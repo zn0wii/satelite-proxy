@@ -1187,6 +1187,7 @@ export function SettingsPage() {
                   onChange={(v) => void setHeroStyle(v as HeroStyle)}
                   options={[
                     { value: "particle", label: t("settings.heroStyleParticle") },
+                    { value: "radiance", label: t("settings.heroStyleRadiance") },
                     { value: "classic", label: t("settings.heroStyleClassic") },
                     { value: "smiley", label: t("settings.heroStyleSmiley") },
                   ]}

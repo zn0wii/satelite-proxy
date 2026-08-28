@@ -32,6 +32,7 @@ import { ErrorModal } from "../components/ErrorModal";
 import { GlassButton } from "../components/GlassButton";
 import { GlassSeg } from "../components/GlassSeg";
 import { HeroVisual } from "../components/HeroVisual";
+import { OceanBackgroundLazy } from "../components/OceanBackgroundLazy";
 import { SimpleTrafficSpark } from "../ui/simple/SimpleTrafficSpark";
 import type {
   AutoSelectMode,
@@ -942,6 +943,7 @@ function coreDisplayName(kind: string | null | undefined): string {
 
   return (
     <div className="page dashboard-page">
+      <OceanBackgroundLazy />
       {toast && <div className="toast">{toast}</div>}
       {error && (
         <ErrorModal

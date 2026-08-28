@@ -60,6 +60,7 @@ export function normalizeHeroStyle(raw: string | null | undefined): HeroStyle {
   const t = (raw ?? "").trim().toLowerCase();
   if (t === "classic") return "classic";
   if (t === "particle") return "particle";
+  if (t === "radiance") return "radiance";
   return "smiley";
 }
 

@@ -270,7 +270,7 @@ pub struct AppSettings {
     /// accent preset id | custom `#rrggbb`.
     #[serde(default = "default_glow_color")]
     pub glow_color: String,
-    /// Overview hero visual: `particle` | `classic` | `smiley`.
+    /// Overview hero visual: `particle` | `radiance` | `classic` | `smiley`.
     #[serde(default = "default_hero_style")]
     pub hero_style: String,
     /// Frosted-glass look for the repeated glass controls (seg / buttons /

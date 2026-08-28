@@ -242,7 +242,7 @@ pub fn update_settings(
             }
             if let Some(hs) = hero_style {
                 let hs = hs.trim().to_ascii_lowercase();
-                if matches!(hs.as_str(), "particle" | "classic" | "smiley") {
+                if matches!(hs.as_str(), "particle" | "radiance" | "classic" | "smiley") {
                     store.settings.hero_style = hs;
                 }
             }

@@ -1,5 +1,7 @@
 allowBuilds:
+  '@vgpu/adapter-node': set this to true or false
   esbuild: true
+  webgpu: set this to true or false
 minimumReleaseAgeExclude:
   - '@xyflow/react@12.11.5'
   - '@xyflow/system@0.0.81'

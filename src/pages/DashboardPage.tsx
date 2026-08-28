@@ -31,8 +31,9 @@ import { useI18n } from "../i18n";
 import { ErrorModal } from "../components/ErrorModal";
 import { GlassButton } from "../components/GlassButton";
 import { GlassSeg } from "../components/GlassSeg";
+import { EarthGlobeLazy } from "../components/EarthGlobeLazy";
 import { HeroVisual } from "../components/HeroVisual";
-import { OceanBackgroundLazy } from "../components/OceanBackgroundLazy";
+import { useTheme } from "../theme";
 import { SimpleTrafficSpark } from "../ui/simple/SimpleTrafficSpark";
 import type {
   AutoSelectMode,
@@ -181,6 +182,7 @@ export function DashboardPage({
   onGoTraffic,
 }: Props) {
   const { t } = useI18n();
+  const { heroIsGlobe } = useTheme();
   const [subs, setSubs] = useState<SubscriptionView[]>([]);
   const [nodes, setNodes] = useState<ProxyNode[]>([]);
   const [currentNode, setCurrentNode] = useState<ProxyNode | null>(null);
@@ -943,7 +945,6 @@ function coreDisplayName(kind: string | null | undefined): string {
 
   return (
     <div className="page dashboard-page">
-      <OceanBackgroundLazy />
       {toast && <div className="toast">{toast}</div>}
       {error && (
         <ErrorModal
@@ -964,13 +965,17 @@ function coreDisplayName(kind: string | null | undefined): string {
         />
       )}
 
-      {/* —— Hero: orbit + status + embedded controls (no floating QC card) —— */}
+      {/* —— Hero: earth globe (starfield backdrop) or orbit visual + status —— */}
       <section className={`dash-hero is-${orbitState}`}>
-        <HeroVisual
-          state={orbitState}
-          spinning={running || switching}
-          switching={switching}
-        />
+        {heroIsGlobe ? (
+          <EarthGlobeLazy />
+        ) : (
+          <HeroVisual
+            state={orbitState}
+            spinning={running || switching}
+            switching={switching}
+          />
+        )}
 
         <div className="dash-hero-copy">
           <div className="dash-kicker mono">

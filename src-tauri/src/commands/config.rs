@@ -87,6 +87,7 @@ pub fn update_settings(
     theme: Option<String>,
     accent: Option<String>,
     glow_color: Option<String>,
+    home_background: Option<String>,
     hero_style: Option<String>,
     glass_frost: Option<bool>,
     tray_icon: Option<String>,
@@ -240,9 +241,15 @@ pub fn update_settings(
                     store.settings.glow_color = gl;
                 }
             }
+            if let Some(bg) = home_background {
+                let bg = bg.trim().to_ascii_lowercase();
+                if matches!(bg.as_str(), "starfield" | "ocean") {
+                    store.settings.home_background = bg;
+                }
+            }
             if let Some(hs) = hero_style {
                 let hs = hs.trim().to_ascii_lowercase();
-                if matches!(hs.as_str(), "particle" | "radiance" | "classic" | "smiley") {
+                if matches!(hs.as_str(), "particle" | "classic" | "smiley") {
                     store.settings.hero_style = hs;
                 }
             }

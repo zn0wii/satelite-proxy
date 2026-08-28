@@ -37,6 +37,7 @@ import type {
   CoreKind,
   DiagnosticIssue,
   ExtraInbound,
+  HomeBackground,
   HeroStyle,
   ThemeId,
 } from "../types";
@@ -78,8 +79,21 @@ function fmtCoreBytes(value: number) {
 
 export function SettingsPage() {
   const { t, locale, setLocale } = useI18n();
-  const { theme, setTheme, accent, setAccent, glow, setGlow, heroStyle, setHeroStyle, glassFrost, setGlassFrost } =
-    useTheme();
+  const {
+    theme,
+    setTheme,
+    accent,
+    setAccent,
+    glow,
+    setGlow,
+    homeBackground,
+    setHomeBackground,
+    heroStyle,
+    setHeroStyle,
+    heroIsGlobe,
+    glassFrost,
+    setGlassFrost,
+  } = useTheme();
   const [tab, setTab] = useState<SettingsTab>("app");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   /** Sponsor QR panel (decrypt-reveal over the image). */
@@ -1173,26 +1187,47 @@ export function SettingsPage() {
                   </button>
                 </div>
               </div>
-              <div className="settings-app-row settings-app-pref settings-hero-row">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.heroStyle")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.heroStyleDesc")}
+              {theme === "aerospace" && (
+                <div className="settings-app-row settings-app-pref">
+                  <div className="settings-app-text">
+                    <div className="settings-app-title">{t("settings.background")}</div>
+                    <div className="settings-app-desc muted">
+                      {t("settings.backgroundDesc")}
+                    </div>
                   </div>
+                  <GlassSeg
+                    value={homeBackground}
+                    ariaLabel={t("settings.background")}
+                    disabled={busy}
+                    onChange={(v) => void setHomeBackground(v as HomeBackground)}
+                    options={[
+                      { value: "starfield", label: t("settings.backgroundStarfield") },
+                      { value: "ocean", label: t("settings.backgroundOcean") },
+                    ]}
+                  />
                 </div>
-                <GlassSeg
-                  value={heroStyle}
-                  ariaLabel={t("settings.heroStyle")}
-                  disabled={busy}
-                  onChange={(v) => void setHeroStyle(v as HeroStyle)}
-                  options={[
-                    { value: "particle", label: t("settings.heroStyleParticle") },
-                    { value: "radiance", label: t("settings.heroStyleRadiance") },
-                    { value: "classic", label: t("settings.heroStyleClassic") },
-                    { value: "smiley", label: t("settings.heroStyleSmiley") },
-                  ]}
-                />
-              </div>
+              )}
+              {!heroIsGlobe && (
+                <div className="settings-app-row settings-app-pref settings-hero-row">
+                  <div className="settings-app-text">
+                    <div className="settings-app-title">{t("settings.heroStyle")}</div>
+                    <div className="settings-app-desc muted">
+                      {t("settings.heroStyleDesc")}
+                    </div>
+                  </div>
+                  <GlassSeg
+                    value={heroStyle}
+                    ariaLabel={t("settings.heroStyle")}
+                    disabled={busy}
+                    onChange={(v) => void setHeroStyle(v as HeroStyle)}
+                    options={[
+                      { value: "particle", label: t("settings.heroStyleParticle") },
+                      { value: "classic", label: t("settings.heroStyleClassic") },
+                      { value: "smiley", label: t("settings.heroStyleSmiley") },
+                    ]}
+                  />
+                </div>
+              )}
               <div className="settings-app-row settings-app-pref settings-tray-icon-row settings-duo-col">
                 <div className="settings-app-text">
                   <div className="settings-app-title">{t("settings.trayIcon")}</div>

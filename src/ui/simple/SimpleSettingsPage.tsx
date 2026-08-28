@@ -5,12 +5,20 @@ import { GlassSwitchControl } from "../../components/GlassSwitchControl";
 import { ErrorModal } from "../../components/ErrorModal";
 import { useI18n, type Locale } from "../../i18n";
 import { useTheme } from "../../theme";
-import type { AppSettings, HeroStyle, ThemeId } from "../../types";
+import type { AppSettings, HeroStyle, HomeBackground, ThemeId } from "../../types";
 import { useUiMode } from "../UiModeContext";
 
 export function SimpleSettingsPage() {
   const { t, locale, setLocale } = useI18n();
-  const { theme, setTheme, heroStyle, setHeroStyle } = useTheme();
+  const {
+    theme,
+    setTheme,
+    homeBackground,
+    setHomeBackground,
+    heroStyle,
+    setHeroStyle,
+    heroIsGlobe,
+  } = useTheme();
   const { setMode } = useUiMode();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,27 +154,49 @@ export function SimpleSettingsPage() {
                 ]}
               />
             </div>
-            <div className="settings-app-row settings-app-pref">
-              <div className="settings-app-text">
-                <div className="settings-app-title">
-                  {t("settings.heroStyle")}
+            {theme === "aerospace" && (
+              <div className="settings-app-row settings-app-pref">
+                <div className="settings-app-text">
+                  <div className="settings-app-title">
+                    {t("settings.background")}
+                  </div>
+                  <div className="settings-app-desc muted">
+                    {t("settings.backgroundDesc")}
+                  </div>
                 </div>
-                <div className="settings-app-desc muted">
-                  {t("settings.heroStyleDesc")}
-                </div>
+                <GlassSeg
+                  value={homeBackground}
+                  ariaLabel={t("settings.background")}
+                  onChange={(v) => void setHomeBackground(v as HomeBackground)}
+                  options={[
+                    { value: "starfield", label: t("settings.backgroundStarfield") },
+                    { value: "ocean", label: t("settings.backgroundOcean") },
+                  ]}
+                />
               </div>
-              <GlassSeg
-                value={heroStyle}
-                ariaLabel={t("settings.heroStyle")}
-                onChange={(v) => void setHeroStyle(v as HeroStyle)}
-                options={[
-                  { value: "particle", label: t("settings.heroStyleParticle") },
-                  { value: "radiance", label: t("settings.heroStyleRadiance") },
-                  { value: "classic", label: t("settings.heroStyleClassic") },
-                  { value: "smiley", label: t("settings.heroStyleSmiley") },
-                ]}
-              />
-            </div>
+            )}
+            {!heroIsGlobe && (
+              <div className="settings-app-row settings-app-pref">
+                <div className="settings-app-text">
+                  <div className="settings-app-title">
+                    {t("settings.heroStyle")}
+                  </div>
+                  <div className="settings-app-desc muted">
+                    {t("settings.heroStyleDesc")}
+                  </div>
+                </div>
+                <GlassSeg
+                  value={heroStyle}
+                  ariaLabel={t("settings.heroStyle")}
+                  onChange={(v) => void setHeroStyle(v as HeroStyle)}
+                  options={[
+                    { value: "particle", label: t("settings.heroStyleParticle") },
+                    { value: "classic", label: t("settings.heroStyleClassic") },
+                    { value: "smiley", label: t("settings.heroStyleSmiley") },
+                  ]}
+                />
+              </div>
+            )}
           </div>
           </div>
           <button

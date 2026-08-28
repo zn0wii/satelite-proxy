@@ -2,6 +2,7 @@ export {
   ThemeProvider,
   useTheme,
   normalizeTheme,
+  normalizeHomeBackground,
   normalizeHeroStyle,
   applyThemeToDom,
   readStoredTheme,

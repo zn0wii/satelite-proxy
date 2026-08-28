@@ -2,7 +2,6 @@ import { useTheme } from "../theme";
 import { FaceMark } from "./FaceMark";
 import type { ParticleSphereState } from "./ParticleSphere";
 import { ParticleSphereLazy } from "./ParticleSphereLazy";
-import { RadianceHeroLazy } from "./RadianceHeroLazy";
 
 interface Props {
   state: ParticleSphereState;
@@ -27,17 +26,6 @@ export function HeroVisual({
         aria-hidden
       >
         <ParticleSphereLazy state={state} />
-      </div>
-    );
-  }
-
-  if (heroStyle === "radiance") {
-    return (
-      <div
-        className={`orbit radiance-orbit ${simple ? "simple-orbit" : ""} ${switching ? "pulse switching" : ""}`}
-        aria-hidden
-      >
-        <RadianceHeroLazy />
       </div>
     );
   }

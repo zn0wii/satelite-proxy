@@ -302,7 +302,9 @@ export interface AppSettings {
   accent?: string;
   /** Background glow color: "accent" (follow) | preset id | #rrggbb */
   glow_color?: string;
-  /** Overview hero visual: particle | classic | smiley */
+  /** Homepage backdrop: starfield | ocean (aerospace theme only). */
+  home_background?: HomeBackground;
+  /** Overview hero visual — only shown when the backdrop is NOT starfield. */
   hero_style?: HeroStyle;
   /** Frosted-glass look for repeated glass controls (costs backdrop-filter
    * GPU layers; default off = solid fills). */
@@ -331,7 +333,9 @@ export type AutoSelectMode = "off" | "smart" | "kernel";
 
 export type ThemeId = "aerospace" | "day";
 
-export type HeroStyle = "particle" | "radiance" | "classic" | "smiley";
+export type HomeBackground = "starfield" | "ocean";
+
+export type HeroStyle = "particle" | "classic" | "smiley";
 
 export type TrayIconStyle = "badge" | "mark" | "ghost" | "buddy" | "danger" | "danger2" | "ghost2" | "faceid";
 

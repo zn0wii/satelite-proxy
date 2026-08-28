@@ -11,10 +11,12 @@ import {
 } from "../../api";
 import { GlassSeg } from "../../components/GlassSeg";
 import { ErrorModal } from "../../components/ErrorModal";
+import { EarthGlobeLazy } from "../../components/EarthGlobeLazy";
 import { HeroVisual } from "../../components/HeroVisual";
 import { useCaptureModeSwitch } from "../../hooks/useCaptureModeSwitch";
 import { useVisibleInterval } from "../../hooks/useVisibleInterval";
 import { useI18n } from "../../i18n";
+import { useTheme } from "../../theme";
 import type {
   ProxyNode,
   ProxyStatus,
@@ -46,6 +48,7 @@ interface Props {
 
 export function SimpleConnectPage({ onGoServers, onGoTraffic }: Props) {
   const { t } = useI18n();
+  const { heroIsGlobe } = useTheme();
   // Seed from the cross-mount status snapshot (see api.ts) so switching
   // between simple tabs paints the real state instead of flashing defaults.
   const [proxy, setProxy] = useState<ProxyStatus | null>(() =>
@@ -239,12 +242,16 @@ export function SimpleConnectPage({ onGoServers, onGoTraffic }: Props) {
           aria-label={running ? t("dashboard.stop") : t("dashboard.start")}
           aria-pressed={running}
         >
-          <HeroVisual
-            state={orbitState}
-            spinning={running || connecting}
-            switching={connecting}
-            variant="simple"
-          />
+          {heroIsGlobe ? (
+            <EarthGlobeLazy interactive={false} />
+          ) : (
+            <HeroVisual
+              state={orbitState}
+              spinning={running || connecting}
+              switching={connecting}
+              variant="simple"
+            />
+          )}
         </button>
         <div className="dash-hero-copy simple-dash-copy">
           <div className="dash-kicker mono">

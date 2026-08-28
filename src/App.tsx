@@ -11,6 +11,9 @@ import type { NavKey } from "./types";
 import { UiModeProvider, useUiMode } from "./ui/UiModeContext";
 import { SimpleShell } from "./ui/simple";
 import { useViewportScale } from "./hooks/useViewportScale";
+import { useTheme } from "./theme";
+import { OceanBackgroundLazy } from "./components/OceanBackgroundLazy";
+import { StarfieldBackgroundLazy } from "./components/StarfieldBackgroundLazy";
 import "./App.css";
 
 // Secondary pages: code-split so low-memory WebView recreate only parses home first.
@@ -44,6 +47,7 @@ function PageFallback() {
 function ProShell() {
   const [nav, setNav] = useState<NavKey>("dashboard");
   const { token, prefill } = useImportIntent();
+  const { theme, homeBackground } = useTheme();
 
   // One-click subscribe → jump to profiles so ConfigPage can open the add form.
   useEffect(() => {
@@ -54,6 +58,19 @@ function ProShell() {
     <div
       className={`app-shell ${nav === "dashboard" ? "dashboard-shell" : ""}`}
     >
+      {/* Background canvases mount here, NOT inside DashboardPage: a
+          position:fixed canvas nested in .main's scroll container drifts with
+          the scroll position in WKWebView (window too small to fit the page
+          → the sky no longer covers the navbar band). */}
+      {nav === "dashboard" && theme === "aerospace" && (
+        <>
+          {homeBackground === "ocean" ? (
+            <OceanBackgroundLazy />
+          ) : (
+            <StarfieldBackgroundLazy />
+          )}
+        </>
+      )}
       <TopNav active={nav} onChange={setNav} />
       <main className="main">
         {/* key={nav} forces a remount on page switch → triggers the CSS

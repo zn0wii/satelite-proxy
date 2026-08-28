@@ -8,12 +8,13 @@ import {
   type ReactNode,
 } from "react";
 import { getSettings, updateSettings } from "../api";
-import type { HeroStyle, ThemeId } from "../types";
+import type { HeroStyle, HomeBackground, ThemeId } from "../types";
 import { applyAccentToDom, applyGlowToDom, normalizeGlowId, resolveAccent } from "./accents";
 
 const THEME_KEY = "satelite.theme";
 const ACCENT_KEY = "satelite.accent";
 const GLOW_KEY = "satelite.glow";
+const BACKGROUND_KEY = "satelite.homeBackground";
 const HERO_KEY = "satelite.heroStyle";
 
 export function normalizeTheme(raw: string | null | undefined): ThemeId {
@@ -56,15 +57,38 @@ function persistThemePref(theme: ThemeId, accent: string, glow: string) {
   }
 }
 
+export function normalizeHomeBackground(
+  raw: string | null | undefined,
+): HomeBackground {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (t === "ocean") return "ocean";
+  return "starfield";
+}
+
+/** Mirror of the backend default (`default_home_background`) — see readStoredHomeBackground. */
+export function readStoredHomeBackground(): HomeBackground {
+  try {
+    return normalizeHomeBackground(localStorage.getItem(BACKGROUND_KEY));
+  } catch {
+    return "starfield";
+  }
+}
+
+function persistHomeBackgroundPref(background: HomeBackground) {
+  try {
+    localStorage.setItem(BACKGROUND_KEY, background);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function normalizeHeroStyle(raw: string | null | undefined): HeroStyle {
   const t = (raw ?? "").trim().toLowerCase();
-  if (t === "classic") return "classic";
-  if (t === "particle") return "particle";
-  if (t === "radiance") return "radiance";
+  if (t === "particle" || t === "classic" || t === "smiley") return t;
   return "smiley";
 }
 
-/** Mirror of the backend default (`default_hero_style`) — see readStoredHeroStyle. */
+/** Mirror of the backend default (`default_hero_style`) — see readStoredTheme. */
 export function readStoredHeroStyle(): HeroStyle {
   try {
     return normalizeHeroStyle(localStorage.getItem(HERO_KEY));
@@ -104,8 +128,12 @@ interface ThemeContextValue {
   setAccent: (next: string) => Promise<void>;
   glow: string;
   setGlow: (next: string) => Promise<void>;
+  homeBackground: HomeBackground;
+  setHomeBackground: (next: HomeBackground) => Promise<void>;
   heroStyle: HeroStyle;
   setHeroStyle: (next: HeroStyle) => Promise<void>;
+  /** The earth globe replaces the hero visual only on the starfield backdrop. */
+  heroIsGlobe: boolean;
   glassFrost: boolean;
   setGlassFrost: (next: boolean) => Promise<void>;
   ready: boolean;
@@ -118,9 +146,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [accent, setAccentState] = useState<string>(readStoredAccent);
   const [glow, setGlowState] = useState<string>(readStoredGlow);
   // Read from localStorage (mirrored on every change) so the FIRST render
-  // already picks the right HeroVisual branch — otherwise a WebView recreate
-  // would default to "particle" and needlessly pull the 530KB three.js chunk
-  // until getSettings() lands.
+  // already picks the right backdrop — otherwise a WebView recreate would
+  // load the wrong vgpu chunk until getSettings() lands.
+  const [homeBackground, setHomeBackgroundState] =
+    useState<HomeBackground>(readStoredHomeBackground);
+  // Same first-render mirror rationale as homeBackground (wrong hero chunk
+  // would flash otherwise) — see readStoredHeroStyle.
   const [heroStyle, setHeroStyleState] = useState<HeroStyle>(readStoredHeroStyle);
   // Mirrors the backend default (default_glass_frost) to avoid a flash of
   // solid controls before settings land.
@@ -135,10 +166,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         const nextTheme = normalizeTheme(s.theme);
         const nextAccent = resolveAccent(s.accent).id;
         const nextGlow = normalizeGlowId(s.glow_color);
-        const nextHero = normalizeHeroStyle(s.hero_style);
+        const nextBackground = normalizeHomeBackground(s.home_background);
         setThemeState(nextTheme);
         setAccentState(nextAccent);
         setGlowState(nextGlow);
+        setHomeBackgroundState(nextBackground);
+        persistHomeBackgroundPref(nextBackground);
+        const nextHero = normalizeHeroStyle(s.hero_style);
         setHeroStyleState(nextHero);
         persistHeroStylePref(nextHero);
         setGlassFrostState(s.glass_frost === true);
@@ -202,6 +236,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     [accent, theme],
   );
 
+  const setHomeBackground = useCallback(async (next: HomeBackground) => {
+    const background = normalizeHomeBackground(next);
+    setHomeBackgroundState(background);
+    persistHomeBackgroundPref(background);
+    try {
+      await updateSettings({ homeBackground: background });
+    } catch {
+      /* UI already switched */
+    }
+  }, []);
+
   const setHeroStyle = useCallback(async (next: HeroStyle) => {
     const style = normalizeHeroStyle(next);
     setHeroStyleState(style);
@@ -231,8 +276,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       setAccent,
       glow,
       setGlow,
+      homeBackground,
+      setHomeBackground,
       heroStyle,
       setHeroStyle,
+      heroIsGlobe: theme === "aerospace" && homeBackground === "starfield",
       glassFrost,
       setGlassFrost,
       ready,
@@ -244,8 +292,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       setAccent,
       glow,
       setGlow,
+      homeBackground,
+      setHomeBackground,
       heroStyle,
       setHeroStyle,
+      theme,
+      homeBackground,
       glassFrost,
       setGlassFrost,
       ready,

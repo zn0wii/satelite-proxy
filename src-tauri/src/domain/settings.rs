@@ -270,7 +270,11 @@ pub struct AppSettings {
     /// accent preset id | custom `#rrggbb`.
     #[serde(default = "default_glow_color")]
     pub glow_color: String,
-    /// Overview hero visual: `particle` | `radiance` | `classic` | `smiley`.
+    /// Homepage backdrop: `starfield` | `ocean` (aerospace theme only).
+    #[serde(default = "default_home_background")]
+    pub home_background: String,
+    /// Overview hero visual (only shown when the backdrop is NOT starfield):
+    /// `particle` | `classic` | `smiley`.
     #[serde(default = "default_hero_style")]
     pub hero_style: String,
     /// Frosted-glass look for the repeated glass controls (seg / buttons /
@@ -400,6 +404,10 @@ fn default_glow_color() -> String {
     "accent".into()
 }
 
+fn default_home_background() -> String {
+    "starfield".into()
+}
+
 fn default_hero_style() -> String {
     // FaceMark (Canvas2D) is the default hero: the three.js particle sphere
     // costs a 530KB chunk + WebGL context on every WebView recreate, which
@@ -436,6 +444,7 @@ impl Default for AppSettings {
             theme: default_theme(),
             accent: default_accent(),
             glow_color: default_glow_color(),
+            home_background: default_home_background(),
             hero_style: default_hero_style(),
             glass_frost: default_glass_frost(),
             tray_icon: TrayIconStyle::default(),

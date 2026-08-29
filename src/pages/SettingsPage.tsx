@@ -657,7 +657,7 @@ export function SettingsPage() {
         : null;
     return (
       <div
-        className={`kernel-row${active ? " core-active" : ""}`}
+        className={`card kernel-card${active ? " core-active" : ""}`}
         key={kind}
         title={
           kind === "xray"
@@ -667,7 +667,7 @@ export function SettingsPage() {
               : t("settings.coreHint")
         }
       >
-        <div className="kernel-row-main">
+        <div className="kernel-card-head">
           {/* Monogram tile: cube = sing-box, bolt = Xray, cat head = mihomo. */}
           <div className="ver-mark kernel-mark" aria-hidden>
             <CoreMark kind={kind} />
@@ -675,6 +675,17 @@ export function SettingsPage() {
           <span className="kernel-name">
             {info?.name ?? (kind === "xray" ? "Xray" : kind === "mihomo" ? "mihomo" : "sing-box")}
           </span>
+          {info?.installed ? (
+            !active && (
+              <span className={`pill ${info.source === "bundled" ? "ok" : ""}`}>
+                {info.source === "bundled"
+                  ? t("settings.coreBundled")
+                  : t("settings.coreInstalled")}
+              </span>
+            )
+          ) : (
+            <span className="pill warn">{t("settings.coreMissing")}</span>
+          )}
           {/* Radio-style enable: clicking switches the active core (a
              running core restarts onto the new binary). */}
           <button
@@ -688,25 +699,14 @@ export function SettingsPage() {
           >
             <span className="core-radio-dot" aria-hidden />
           </button>
-          {/* Fixed-width slot on BOTH rows (empty when active) so the pill /
-             platform columns line up between the two cores. */}
-          <span className="kernel-switch-hint muted">
-            {active ? "" : t("settings.coreSwitchHint")}
-          </span>
-          {info?.installed ? (
-            !active && (
-              <span className={`pill ${info.source === "bundled" ? "ok" : ""}`}>
-                {info.source === "bundled"
-                  ? t("settings.coreBundled")
-                  : t("settings.coreInstalled")}
-              </span>
-            )
-          ) : (
-            <span className="pill warn">{t("settings.coreMissing")}</span>
-          )}
-          <span className="kernel-platform muted mono">
-            {info?.platform ?? "…"}
-          </span>
+        </div>
+
+        <div className="kernel-card-platform muted mono">
+          {info?.platform ?? "…"}
+        </div>
+
+        <div className="kernel-card-ver">
+          <span className="stat-label">{t("settings.coreCurrent")}</span>
           <span className="kernel-version mono">
             {info?.version ?? "—"}
             {info?.source === "downloaded" ? (
@@ -715,44 +715,42 @@ export function SettingsPage() {
           </span>
         </div>
 
-        <div className="kernel-row-meta">
-          <span className="kernel-meta-item mono">
+        <div className="kernel-card-meta">
+          <span className="mono">
             {t("settings.coreBundledShort")} {info?.bundled_version ?? "—"}
           </span>
-          <span className="kernel-meta-sep" aria-hidden>
-            ·
-          </span>
-          <span className="kernel-meta-item mono">
+          <span className="mono">
             {t("settings.coreLatestShort")} {info?.latest_version ?? "—"}
           </span>
           {info?.update_available ? (
             <span className="pill warn">{t("settings.coreUpdateAvail")}</span>
           ) : null}
-          <div className="kernel-row-actions">
-            <GlassButton
-              icon="↻"
-              disabled={busy || checking || !info}
-              onClick={() => void onCheckCoreUpdate(kind)}
-            >
-              {checking
-                ? t("settings.coreChecking")
-                : t("settings.coreCheck")}
-            </GlassButton>
-            <GlassButton
-              variant="primary"
-              icon="⤓"
-              disabled={busy || checking}
-              onClick={() => void onDownloadCore(kind)}
-            >
-              {busy
-                ? t("settings.coreDownloading")
-                : info?.source === "downloaded"
-                  ? info.update_available
-                    ? t("settings.coreUpdate")
-                    : t("settings.coreRedownload")
-                  : t("settings.coreDownload")}
-            </GlassButton>
-          </div>
+        </div>
+
+        <div className="kernel-row-actions">
+          <GlassButton
+            icon="↻"
+            disabled={busy || checking || !info}
+            onClick={() => void onCheckCoreUpdate(kind)}
+          >
+            {checking
+              ? t("settings.coreChecking")
+              : t("settings.coreCheck")}
+          </GlassButton>
+          <GlassButton
+            variant="primary"
+            icon="⤓"
+            disabled={busy || checking}
+            onClick={() => void onDownloadCore(kind)}
+          >
+            {busy
+              ? t("settings.coreDownloading")
+              : info?.source === "downloaded"
+                ? info.update_available
+                  ? t("settings.coreUpdate")
+                  : t("settings.coreRedownload")
+                : t("settings.coreDownload")}
+          </GlassButton>
         </div>
 
         {busy && progress && (
@@ -1535,7 +1533,7 @@ export function SettingsPage() {
       )}
 
       {visibleTab === "core" && (
-        <section className="settings-panel version-split" aria-label="Version">
+        <section className="settings-panel version-v3" aria-label="Version">
           {coreError && (
             <ErrorModal
               message={coreError}
@@ -1543,40 +1541,28 @@ export function SettingsPage() {
             />
           )}
 
-          <div className="version-col">
-            <div className="version-block-title">
-              {t("settings.coreVersionTitle")}
-            </div>
-            <div className="card core-card kernel-list">
-              {renderCoreRow("singbox")}
-              {renderCoreRow("xray")}
-              {renderCoreRow("mihomo")}
-            </div>
+          <div className="version-core-grid">
+            {renderCoreRow("singbox")}
+            {renderCoreRow("xray")}
+            {renderCoreRow("mihomo")}
           </div>
 
-          <div className="version-col">
-            <div className="version-block-title">
-              {t("settings.appVersionTitle")}
-            </div>
-            <div className="card core-card app-card">
-            <div className="ver-hero">
+          <div className="card core-card app-card app-bar">
+            <div className="app-bar-main">
               <div className="ver-mark app-mark" aria-hidden>
                 ◈
               </div>
-              <div className="ver-id">
-                <div className="ver-name">Satelite</div>
-                <div className="ver-sub muted">{t("settings.appTagline")}</div>
+              <div className="app-bar-id">
+                <span className="ver-name">Satelite</span>
+                <span className="ver-sub muted">{t("settings.appTagline")}</span>
               </div>
-              <div className="ver-side">
+              <div className="app-bar-ver">
                 <span className="stat-label">{t("settings.coreCurrent")}</span>
-                <div className="ver-ver mono">{appVersion ?? "…"}</div>
+                <span className="ver-ver mono">{appVersion ?? "…"}</span>
               </div>
-            </div>
-
-            <div className="ver-grid">
-              <div>
+              <div className="app-bar-latest">
                 <span className="stat-label">{t("settings.appLatest")}</span>
-                <div className="mono ver-stat">
+                <span className="mono ver-stat">
                   {appChecking && !appUpdate
                     ? "…"
                     : (appUpdate?.latest_version ?? "—")}
@@ -1587,9 +1573,9 @@ export function SettingsPage() {
                   ) : appUpdate ? (
                     <span className="pill ok">{t("settings.appUpToDate")}</span>
                   ) : null}
-                </div>
+                </span>
               </div>
-              <div className="ver-grid-actions">
+              <div className="app-bar-actions">
                 <GlassButton
                   icon="↻"
                   disabled={appChecking}
@@ -1618,49 +1604,34 @@ export function SettingsPage() {
               />
             )}
 
-            {/* Quiet key/value rows filling the equal-height card: last
-               update check, host platform (the core binary targets it),
-               build stack. */}
-            <div className="app-info-list">
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appCheckedLabel")}
-                </span>
-                <span className="app-info-value">
-                  {appChecking ? "…" : formatCheckedAt(appUpdate?.checked_at)}
-                </span>
-              </div>
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appPlatformLabel")}
-                </span>
-                <span className="app-info-value">
-                  {cores.singbox?.platform ?? cores.xray?.platform ?? cores.mihomo?.platform ?? "—"}
-                </span>
-              </div>
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appStackLabel")}
-                </span>
-                <span className="app-info-value">Tauri · React · Rust</span>
-              </div>
+            {/* Quiet meta strip: last update check, host platform (the core
+               binary targets it), build stack, and the exe path with copy. */}
+            <div className="app-bar-foot">
+              <span className="app-bar-meta">
+                {t("settings.appCheckedLabel")}{" "}
+                {appChecking ? "…" : formatCheckedAt(appUpdate?.checked_at)}
+              </span>
+              <span className="app-bar-meta">
+                {t("settings.appPlatformLabel")}{" "}
+                {cores.singbox?.platform ?? cores.xray?.platform ?? cores.mihomo?.platform ?? "—"}
+              </span>
+              <span className="app-bar-meta">Tauri · React · Rust</span>
+              {appPath && (
+                <>
+                  <code className="kernel-path mono" title={appPath}>
+                    {appPath}
+                  </code>
+                  <GlassButton
+                    iconOnly
+                    icon={copiedPath === appPath ? "✓" : "⧉"}
+                    className="kernel-copy-btn"
+                    title={copiedPath === appPath ? t("common.copied") : t("common.copy")}
+                    aria-label={t("common.copy")}
+                    onClick={() => void onCopyPath(appPath)}
+                  />
+                </>
+              )}
             </div>
-
-            {appPath && (
-              <div className="kernel-row-foot">
-                <code className="kernel-path mono" title={appPath}>
-                  {appPath}
-                </code>
-                <GlassButton
-                  iconOnly
-                  icon={copiedPath === appPath ? "✓" : "⧉"}
-                  className="kernel-copy-btn"
-                  title={copiedPath === appPath ? t("common.copied") : t("common.copy")}
-                  aria-label={t("common.copy")}
-                  onClick={() => void onCopyPath(appPath)}
-                />
-              </div>
-            )}
 
             <div className="ver-links">
               <button
@@ -1751,7 +1722,6 @@ export function SettingsPage() {
               ),
               document.body,
             )}
-          </div>
           </div>
         </section>
       )}

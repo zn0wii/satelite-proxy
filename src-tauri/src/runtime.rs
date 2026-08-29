@@ -182,12 +182,14 @@ pub fn resolve_pending_elevation(
 ) -> Option<PathBuf> {
     let (kind, tun_enabled) = match store.settings.runtime_source() {
         RuntimeSource::Singbox { id } => {
-            let content = store.subscriptions.iter().find(|s| s.id == id).and_then(
-                |s| match &s.source {
+            let content = store
+                .subscriptions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| match &s.source {
                     SubscriptionSource::Singbox { content } => Some(content.clone()),
                     _ => None,
-                },
-            )?;
+                })?;
             let insight = inspect_singbox_config(&content);
             (CoreKind::SingBox, insight.has_tun)
         }
@@ -765,6 +767,38 @@ impl Runtime {
         self.api_clone()
     }
 
+    /// Startup-failure diagnostics shared by all core start paths: prefer the
+    /// manager's captured error tail, else the last 1200 chars of the core's
+    /// own log file (NULs stripped). Empty when the core said nothing.
+    fn core_startup_log_hint(&self) -> String {
+        self.core
+            .last_error()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                self.core
+                    .log_path()
+                    .and_then(|log| std::fs::read(log).ok())
+                    .and_then(|b| {
+                        let s = String::from_utf8_lossy(&b);
+                        let tail: String = s
+                            .chars()
+                            .rev()
+                            .take(1200)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        let cleaned = tail.replace('\0', "");
+                        if cleaned.trim().is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        }
+                    })
+            })
+            .unwrap_or_default()
+    }
+
     /// Generate config, start the active core, optionally enable system proxy.
     pub fn start_proxy(
         &mut self,
@@ -824,14 +858,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -895,33 +937,7 @@ impl Runtime {
             }
         }
         if !ok {
-            let log_hint = self
-                .core
-                .last_error()
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    self.core
-                        .log_path()
-                        .and_then(|log| std::fs::read(log).ok())
-                        .and_then(|b| {
-                            let s = String::from_utf8_lossy(&b);
-                            let tail: String = s
-                                .chars()
-                                .rev()
-                                .take(1200)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            let cleaned = tail.replace('\0', "");
-                            if cleaned.trim().is_empty() {
-                                None
-                            } else {
-                                Some(cleaned)
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            let log_hint = self.core_startup_log_hint();
             let _ = self.core.stop();
             let detail = if log_hint.is_empty() {
                 format!(
@@ -1006,14 +1022,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Metrics")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1087,6 +1111,7 @@ impl Runtime {
         // start (proxying works without stats) but gets logged for diagnosis.
         let wait_started = Instant::now();
         let mut metrics_ok = false;
+        let mut died_during_wait = false;
         while wait_started.elapsed() < Duration::from_secs(3) {
             if metrics.health_ok() {
                 metrics_ok = true;
@@ -1094,9 +1119,23 @@ impl Runtime {
             }
             self.core.poll();
             if !self.core.is_running() {
+                died_during_wait = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(150));
+        }
+        if died_during_wait {
+            // Mirrors the sing-box/mihomo health-wait failure path: the core
+            // died after `wait_until_ready` accepted it — surface its log tail
+            // instead of reporting a successful start the watchdog must undo.
+            let log_hint = self.core_startup_log_hint();
+            let _ = self.core.stop();
+            let detail = if log_hint.is_empty() {
+                "xray exited during startup".to_string()
+            } else {
+                format!("xray exited during startup\n--- log ---\n{log_hint}")
+            };
+            return Err(AppError::Core(detail));
         }
         if !metrics_ok {
             crate::app_log::warn(
@@ -1173,14 +1212,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1260,33 +1307,7 @@ impl Runtime {
             }
         }
         if !ok {
-            let log_hint = self
-                .core
-                .last_error()
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    self.core
-                        .log_path()
-                        .and_then(|log| std::fs::read(log).ok())
-                        .and_then(|b| {
-                            let s = String::from_utf8_lossy(&b);
-                            let tail: String = s
-                                .chars()
-                                .rev()
-                                .take(1200)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            let cleaned = tail.replace('\0', "");
-                            if cleaned.trim().is_empty() {
-                                None
-                            } else {
-                                Some(cleaned)
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            let log_hint = self.core_startup_log_hint();
             let _ = self.core.stop();
             let detail = if log_hint.is_empty() {
                 format!(
@@ -1388,10 +1409,16 @@ impl Runtime {
                 }
             }
             if !ok {
+                let log_hint = self.core_startup_log_hint();
                 let _ = self.core.stop();
-                return Err(AppError::Core(format!(
-                    "sing-box started but clash_api not responding at {host}:{port}"
-                )));
+                let detail = if log_hint.is_empty() {
+                    format!("sing-box started but clash_api not responding at {host}:{port}")
+                } else {
+                    format!(
+                        "sing-box started but clash_api not responding at {host}:{port}\n--- log ---\n{log_hint}"
+                    )
+                };
+                return Err(AppError::Core(detail));
             }
             self.api = Some(api);
             store.settings.clash_api_secret = if secret.is_empty() {
@@ -1412,7 +1439,7 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(100));
             }
             if !ok {
-                let log_hint = self.core.last_error().unwrap_or_default();
+                let log_hint = self.core_startup_log_hint();
                 return Err(AppError::Core(format!(
                     "sing-box failed to stay running{hint}",
                     hint = if log_hint.is_empty() {
@@ -1600,7 +1627,6 @@ fn ensure_listen_port_available_on(port: u16, host: &str, label: &str) -> AppRes
     }
     Ok(())
 }
-
 
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.

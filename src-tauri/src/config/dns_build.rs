@@ -6,7 +6,7 @@
 use crate::config::punycode::to_ascii_domain;
 use crate::domain::{
     read_system_hosts_pairs, DnsAction, DnsRule, DnsSettings, DomainMatcher, FakeIpConfig,
-    HostsConfig, Rule,
+    HostsConfig, Rule, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
 };
 use serde_json::{json, Value};
 
@@ -39,8 +39,6 @@ pub fn build_dns_section(
     effective.rules_enabled = settings.has_enabled_dns_sets();
     effective.hosts = settings.effective_hosts();
     let settings = &effective;
-    // Reserved for future strategy tuning; referenced to avoid dead-code warnings.
-    let _ = settings.leak_protect;
     let hijack = tun_enabled || settings.hijack;
     // DNS final is configured independently on the DNS page (local/domestic/remote);
     // it no longer follows the routing `final`.
@@ -59,11 +57,22 @@ fn dns_final_tag(dns_final: &str) -> &'static str {
     }
 }
 
-/// Hard-coded sing-box server definitions (local + Ali + Tencent + Cloudflare).
+/// Extract the host from a DoH pool URL (`https://1.1.1.1/dns-query` →
+/// `1.1.1.1`). sing-box expresses DoH as `{type:"https", server:<host>}`,
+/// so the shared pool URL form needs this bridge. Pools only ever carry
+/// IP-literal DoH endpoints (no bootstrap dependency), so plain string
+/// slicing is enough.
+fn doh_host(url: &str) -> &str {
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    rest.split('/').next().unwrap_or(rest)
+}
+
+/// sing-box server definitions (local + the shared pools).
 ///
-/// Note: only IP-literal server addresses are used here. Domain-name addresses
-/// (e.g. `dns.google`) would require a `domain_resolver`, creating a bootstrap
-/// dependency — IPs avoid that entirely.
+/// Note: only `pool[0]` of each pool is emitted — sing-box rules address one
+/// server tag per rule and have no racing/fallback between servers, so
+/// second entries would be dead config. mihomo/Xray consume the whole
+/// pool with their native redundancy; see `domain::REMOTE_DNS_POOL`.
 ///
 /// `dns-remote` detours through the `proxy` group: DoH endpoints such as
 /// 1.1.1.1 are commonly blocked on direct connections, and with TUN +
@@ -72,9 +81,13 @@ fn dns_final_tag(dns_final: &str) -> &'static str {
 fn builtin_servers(fake_ip: &FakeIpConfig) -> Vec<Value> {
     let mut servers = vec![
         json!({ "type": "local", "tag": TAG_LOCAL }),
-        json!({ "type": "udp", "tag": TAG_CN, "server": "223.5.5.5" }),
-        json!({ "type": "udp", "tag": "dns-cn-tencent", "server": "119.29.29.29" }),
-        json!({ "type": "https", "tag": TAG_REMOTE, "server": "1.1.1.1", "detour": "proxy" }),
+        json!({ "type": "udp", "tag": TAG_CN, "server": DOMESTIC_DNS_POOL[0] }),
+        json!({
+            "type": "https",
+            "tag": TAG_REMOTE,
+            "server": doh_host(REMOTE_DNS_POOL[0]),
+            "detour": "proxy"
+        }),
     ];
     if fake_ip.enabled {
         let mut fi = json!({
@@ -323,6 +336,31 @@ mod tests {
             .find(|s| s["tag"] == TAG_REMOTE)
             .unwrap();
         assert_eq!(remote["detour"], json!("proxy"));
+    }
+
+    #[test]
+    fn builtin_servers_follow_the_shared_pools() {
+        // Pool unification guard: sing-box must resolve from the same
+        // addresses the other two cores use (domain::REMOTE/DOMESTIC_DNS_POOL).
+        let b = build_dns_section(&DnsSettings::default(), false, &[]);
+        let servers = b.dns["servers"].as_array().unwrap();
+        let by_tag = |t: &str| servers.iter().find(|s| s["tag"] == t).unwrap();
+        assert_eq!(by_tag(TAG_CN)["server"], json!(DOMESTIC_DNS_POOL[0]));
+        assert_eq!(
+            by_tag(TAG_REMOTE)["server"],
+            json!(doh_host(REMOTE_DNS_POOL[0]))
+        );
+        // sing-box addresses one server tag per rule (no racing/fallback),
+        // so only pool[0] of each pool is emitted — no dead second tags.
+        let mut s = DnsSettings::default();
+        s.fake_ip.enabled = false;
+        let b = build_dns_section(&s, false, &[]);
+        assert_eq!(b.dns["servers"].as_array().unwrap().len(), 3);
+        // The shared pool must stay IP-literal so no bootstrap lookup is
+        // ever needed (see doh_host).
+        assert!(REMOTE_DNS_POOL
+            .iter()
+            .all(|u| doh_host(u).parse::<std::net::IpAddr>().is_ok()));
     }
 
     #[test]

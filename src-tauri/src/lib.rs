@@ -420,7 +420,7 @@ pub fn run() {
             commands::get_dns_settings,
             commands::update_dns_settings,
             commands::reset_dns_defaults,
-            commands::test_dns_lookup,
+            commands::diagnose_dns,
             commands::read_system_hosts,
             commands::set_current_node_live,
             commands::smart_switch_now,

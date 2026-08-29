@@ -148,7 +148,10 @@ mod tests {
             ],
         );
         assert!(chain.id.starts_with("chain-"));
-        assert_ne!(chain.id, NodePool::new("x", PoolMode::Explicit { node_ids: vec![] }).id);
+        assert_ne!(
+            chain.id,
+            NodePool::new("x", PoolMode::Explicit { node_ids: vec![] }).id
+        );
     }
 
     #[test]

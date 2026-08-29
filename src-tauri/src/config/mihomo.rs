@@ -21,7 +21,8 @@ use crate::config::punycode::to_ascii_domain;
 use crate::core::kind::CoreKind;
 use crate::domain::{
     DnsAction, DomainMatcher, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleSet,
-    RuleSetDnsStrategy, RuleSetStrategy, RuleTarget, RuleType, Transport,
+    RuleSetDnsStrategy, RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL,
+    REMOTE_DNS_POOL,
 };
 use crate::error::{AppError, AppResult};
 use serde_yaml::{Mapping, Value as Yaml};
@@ -29,13 +30,6 @@ use serde_yaml::{Mapping, Value as Yaml};
 /// Main group tag — must match the sing-box contract (`state.rs` selects
 /// this group over the Clash API and the kernel-selection sync reads `now`).
 const MAIN_GROUP: &str = "proxy";
-/// Built-in remote DoH pool (Clash queries the entries concurrently,
-/// fastest answer wins). Every entry egresses through the main proxy group
-/// — direct DoH is unreachable on censored networks (see build_dns).
-const REMOTE_DNS_POOL: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
-/// Built-in domestic plain-UDP pool (bootstrap, node hostnames, cn
-/// classification). 114DNS backs up AliDNS.
-const DOMESTIC_DNS_POOL: [&str; 2] = ["223.5.5.5", "114.114.114.114"];
 /// mihomo url-test probe defaults.
 const PROBE_INTERVAL_SECS: u64 = 60;
 const PROBE_TOLERANCE_MS: u32 = 50;
@@ -533,11 +527,11 @@ fn bypass_lan_rules() -> Vec<String> {
 // —— DNS ——
 
 /// Map the shared DnsSettings onto mihomo's dns block:
-/// `nameserver` (default resolver by dns_final), `fallback` (the other
-/// side), `nameserver-policy` (per-domain classification from DNS rules and
-/// rule-set dns strategies), `hosts`, and fake-ip when enabled — forced when
-/// tun is on (mihomo requires it; the user's stored DNS settings are not
-/// written back, so turning tun off restores them).
+/// `nameserver` (the dns_final pool — sole fallback for unclassified
+/// domains), `nameserver-policy` (per-domain classification from DNS rules
+/// and rule-set dns strategies), `hosts`, and fake-ip when enabled — forced
+/// when tun is on (mihomo requires it; the user's stored DNS settings are
+/// not written back, so turning tun off restores them).
 fn build_dns(opts: &BuildOptions, sets: &[RuleSet], effective_rules: &[Rule]) -> Mapping {
     let mut policy_remote: Vec<String> = Vec::new();
     let mut policy_domestic: Vec<String> = Vec::new();
@@ -636,10 +630,18 @@ fn build_dns(opts: &BuildOptions, sets: &[RuleSet], effective_rules: &[Rule]) ->
     // mihomo supports the `system` resolver natively — local-classified
     // domains and dns_final=local use it; domestic stays plain-UDP.
     let system_pool: Vec<String> = vec!["system".into()];
-    let (default_ns, fallback_ns): (&[String], &[String]) = match dns_final {
-        "domestic" => (&domestic_pool, &remote_pool),
-        "local" => (&system_pool, &remote_pool),
-        _ => (&remote_pool, &domestic_pool),
+    // dns_final is the ONLY fallback: `nameserver` holds the configured
+    // default pool and mihomo races its entries concurrently (in-pool
+    // redundancy). We deliberately do NOT populate the `fallback` slot
+    // with the "other" pool — mihomo queries fallback servers whenever the
+    // nameserver answer is foreign (default geoip-code:CN filter), which
+    // would send plaintext direct queries (and prefer their answers) for
+    // unclassified foreign domains: a DNS leak, and not what the DNS-page
+    // default resolver setting promises.
+    let default_ns: &[String] = match dns_final {
+        "domestic" => &domestic_pool,
+        "local" => &system_pool,
+        _ => &remote_pool,
     };
 
     let mut dns = Mapping::new();
@@ -657,7 +659,6 @@ fn build_dns(opts: &BuildOptions, sets: &[RuleSet], effective_rules: &[Rule]) ->
     // no address for <node-host>" WARNs).
     dns.insert(str_yaml("proxy-server-nameserver"), dns_seq(&domestic_pool));
     dns.insert(str_yaml("nameserver"), dns_seq(default_ns));
-    dns.insert(str_yaml("fallback"), dns_seq(fallback_ns));
     if !policy_remote.is_empty() || !policy_domestic.is_empty() || !policy_local.is_empty() {
         let mut policy = Mapping::new();
         for pat in policy_domestic {
@@ -1765,6 +1766,9 @@ mod tests {
         let dns = &doc["dns"];
         // Built-in pools: remote DoH (each entry egressing through the main
         // proxy group via the `#proxy` fragment) and domestic plain-UDP.
+        // dns_final=remote (default) puts the remote pool in `nameserver`
+        // and — per the dns_final-is-the-only-fallback rule — no `fallback`
+        // slot is emitted at all.
         let nameserver = dns["nameserver"].as_sequence().unwrap();
         assert_eq!(nameserver.len(), 2);
         assert_eq!(
@@ -1775,10 +1779,12 @@ mod tests {
             nameserver[1].as_str(),
             Some("https://8.8.8.8/dns-query#proxy")
         );
-        let fallback = dns["fallback"].as_sequence().unwrap();
-        assert_eq!(fallback[0].as_str(), Some("223.5.5.5"));
-        assert_eq!(fallback[1].as_str(), Some("114.114.114.114"));
+        assert!(
+            dns["fallback"].is_null(),
+            "cross-pool fallback must not be emitted"
+        );
         assert_eq!(dns["default-nameserver"][0].as_str(), Some("223.5.5.5"));
+        assert_eq!(dns["default-nameserver"][1].as_str(), Some("119.29.29.29"));
         // Node hostnames must resolve via the dedicated plain-UDP pool —
         // not the DoH default (chicken-and-egg with unreachable proxies).
         assert_eq!(

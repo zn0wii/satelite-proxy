@@ -207,6 +207,38 @@ impl ClashApi {
         Ok(body.delay)
     }
 
+    /// Resolve one domain through the core's own DNS pipeline
+    /// (`GET /dns/query?name=&type=`). sing-box routes the query through its
+    /// full DNS rule chain (same path as real traffic) before falling back to
+    /// `dns.final`; mihomo answers via its default resolver (nameserver-policy
+    /// included). Neither response names the upstream server — the query path
+    /// is derived from our own generated config instead (services::dns_diag).
+    pub fn dns_query(
+        &self,
+        name: &str,
+        query_type: &str,
+        timeout: Duration,
+    ) -> AppResult<DnsQueryResponse> {
+        let resp = shared_agent()
+            .get(&format!("{}/dns/query", self.base))
+            .query("name", name)
+            .query("type", query_type)
+            .set("Authorization", &auth(&self.secret))
+            .timeout(timeout)
+            .call()
+            .map_err(map_ureq)?;
+        if !(200..300).contains(&resp.status()) {
+            return Err(AppError::Core(format!(
+                "dns query status {}",
+                resp.status()
+            )));
+        }
+        let text = resp
+            .into_string()
+            .map_err(|e| AppError::Core(format!("dns query body: {e}")))?;
+        parse_dns_query_json(&text)
+    }
+
     /// Full connections snapshot from `/connections` (HTTP).
     pub fn list_connections(&self) -> AppResult<ConnectionsSnapshot> {
         let resp = shared_agent()
@@ -262,6 +294,49 @@ pub fn parse_connections_json(text: &str) -> AppResult<ConnectionsSnapshot> {
         upload_total: body.upload_total,
         download_total: body.download_total,
         connections,
+    })
+}
+
+/// One DNS resource record from `/dns/query` (shape shared by sing-box and
+/// mihomo: `{name, type, TTL, data}`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsQueryAnswer {
+    #[serde(default)]
+    pub name: String,
+    /// RR type number (1 = A, 5 = CNAME, 28 = AAAA …).
+    #[serde(default, rename = "type")]
+    pub rr_type: i64,
+    #[serde(default, rename = "TTL")]
+    pub ttl: i64,
+    #[serde(default)]
+    pub data: String,
+}
+
+/// Parsed `/dns/query` response. Field names mirror the shared wire format.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsQueryResponse {
+    /// DNS RCODE (0 = NOERROR, 3 = NXDOMAIN, 5 = REFUSED …).
+    #[serde(default, rename = "Status")]
+    pub status: i64,
+    #[serde(default, rename = "Answer")]
+    pub answers: Vec<DnsQueryAnswer>,
+}
+
+/// Parse a `/dns/query` JSON body. `Answer` is conditionally emitted by both
+/// cores (and may be null), so it tolerates absence/null/shape drift.
+pub fn parse_dns_query_json(text: &str) -> AppResult<DnsQueryResponse> {
+    #[derive(Deserialize)]
+    struct Wire {
+        #[serde(default, rename = "Status")]
+        status: i64,
+        #[serde(default, rename = "Answer")]
+        answers: Option<Vec<DnsQueryAnswer>>,
+    }
+    let wire: Wire =
+        serde_json::from_str(text).map_err(|e| AppError::Core(format!("dns query json: {e}")))?;
+    Ok(DnsQueryResponse {
+        status: wire.status,
+        answers: wire.answers.unwrap_or_default(),
     })
 }
 
@@ -588,5 +663,42 @@ mod parse_tests {
         let snap = parse_connections_json(raw).expect("snap");
         assert!(snap.connections.is_empty());
         assert_eq!(snap.download_total, 1);
+    }
+
+    #[test]
+    fn dns_query_json_parses_shared_wire_format() {
+        // Shape shared by sing-box and mihomo (`{name, type, TTL, data}` RRs;
+        // sing-box additionally sends a hardcoded "internal" Server field).
+        let raw = r#"{
+          "Status": 0,
+          "Server": "internal",
+          "TC": false, "RD": true, "RA": true, "AD": false, "CD": false,
+          "Question": [{"name": "google.com", "type": 1}],
+          "Answer": [
+            {"name": "google.com", "type": 5, "TTL": 300, "data": "lhr25s34-in-f14.1e100.net"},
+            {"name": "google.com", "type": 1, "TTL": 258, "data": "142.250.72.14"}
+          ]
+        }"#;
+        let parsed = parse_dns_query_json(raw).expect("parse");
+        assert_eq!(parsed.status, 0);
+        assert_eq!(parsed.answers.len(), 2);
+        assert_eq!(parsed.answers[1].rr_type, 1);
+        assert_eq!(parsed.answers[1].ttl, 258);
+        assert_eq!(parsed.answers[1].data, "142.250.72.14");
+    }
+
+    #[test]
+    fn dns_query_json_tolerates_missing_and_null_answer() {
+        // Rejected queries come back with Status != 0 and no Answer section.
+        let refused =
+            r#"{"Status":5,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,"Question":[]}"#;
+        let parsed = parse_dns_query_json(refused).expect("parse");
+        assert_eq!(parsed.status, 5);
+        assert!(parsed.answers.is_empty());
+
+        let null_answer = r#"{"Status":0,"Answer":null}"#;
+        let parsed = parse_dns_query_json(null_answer).expect("parse");
+        assert_eq!(parsed.status, 0);
+        assert!(parsed.answers.is_empty());
     }
 }

@@ -697,7 +697,14 @@ pub fn create_rule_set(
                 // Local set: an optional initial whole-set route from the
                 // new-set dialog (node/smart carry the set-level pin /
                 // keyword filters; Mixed stays an emergent per-rule state).
-                store.create_local_rule_set(n, target, node_id, smart_include, smart_exclude, chain_id)
+                store.create_local_rule_set(
+                    n,
+                    target,
+                    node_id,
+                    smart_include,
+                    smart_exclude,
+                    chain_id,
+                )
             }
         })
         .map_err(|e| e.to_string())?;
@@ -989,13 +996,9 @@ pub fn save_rule(
                     .ok_or_else(|| {
                         crate::error::AppError::Config("链路出口需要选择一个链路".into())
                     })?;
-                let chain = store
-                    .chains
-                    .iter()
-                    .find(|c| c.id == cid)
-                    .ok_or_else(|| {
-                        crate::error::AppError::Config("指定的链路不存在，请重新选择".into())
-                    })?;
+                let chain = store.chains.iter().find(|c| c.id == cid).ok_or_else(|| {
+                    crate::error::AppError::Config("指定的链路不存在，请重新选择".into())
+                })?;
                 (Some(chain.id.clone()), Some(chain.name.clone()))
             } else {
                 (None, None)

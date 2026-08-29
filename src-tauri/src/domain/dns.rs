@@ -2,6 +2,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Unified resolver pool shared by all three core generators (sing-box /
+/// Xray / mihomo). One source of truth so switching cores never changes
+/// which servers answer queries.
+///
+/// Remote pool: DoH over TCP, egressed through the proxy group in every
+/// core (sing-box `detour:"proxy"`, Xray dns-module routing, mihomo
+/// `#proxy`). TCP keeps it working through UDP-less nodes (e.g. socks5
+/// without UDP ASSOCIATE) and encrypts the queries end to end.
+///
+/// Emission is per-core native: mihomo races the whole pool concurrently,
+/// Xray uses ordered fallback within the pool, sing-box rules address one
+/// server tag per rule (no racing) so only the first entry is emitted.
+pub const REMOTE_DNS_POOL: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
+
+/// Domestic pool: plaintext UDP, always direct (plus the bootstrap role in
+/// mihomo's `default-nameserver` / `proxy-server-nameserver`).
+pub const DOMESTIC_DNS_POOL: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
+
 /// Legacy stored value. Resolution modes were removed in schema v3; this is
 /// deserialized only so older stores can still be opened safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -239,10 +257,9 @@ pub struct DnsSettings {
     /// independent_cache in sing-box DNS.
     #[serde(default = "default_true")]
     pub cache: bool,
-    /// Prefer remote/final over silent system leak (disables strategy fallbacks).
-    #[serde(default = "default_true")]
-    pub leak_protect: bool,
-    /// Default resolver for domains that match no rule set.
+    /// Default resolver for domains that match no rule set — the sole
+    /// fallback in every core (the former `leak_protect` switch was removed:
+    /// no core ever silently falls back past `dns_final` anymore).
     #[serde(default = "default_dns_final")]
     pub dns_final: String,
 }
@@ -261,7 +278,6 @@ impl Default for DnsSettings {
             unified_rules: false,
             hijack: true,
             cache: true,
-            leak_protect: true,
             dns_final: default_dns_final(),
         }
     }

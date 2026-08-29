@@ -103,11 +103,7 @@ pub fn update_chain(
 }
 
 #[tauri::command]
-pub fn delete_chain(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+pub fn delete_chain(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     state
         .with_store_mut(|store| store.delete_chain(&id))
         .map_err(|e| e.to_string())?;
@@ -152,9 +148,7 @@ pub async fn diagnose_chain(
     // unexpected stalls the whole future.
     match tokio::time::timeout(
         std::time::Duration::from_secs(35),
-        crate::services::chain_diag::diagnose(
-            api, chain, pools, nodes, probe_url, 6000, locale,
-        ),
+        crate::services::chain_diag::diagnose(api, chain, pools, nodes, probe_url, 6000, locale),
     )
     .await
     {

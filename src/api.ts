@@ -26,7 +26,7 @@ import type {
   SubscriptionUrlEntry,
   SubscriptionView,
   DnsSettings,
-  DnsTestResult,
+  DnsDiagnosisReport,
   HostsEntry,
 } from "./types";
 import { trackCoreBusy } from "./coreBusy";
@@ -585,8 +585,13 @@ export function resetDnsDefaults(section: "servers" | "rules", apply = true) {
   return invoke<DnsSettings>("reset_dns_defaults", { section, apply });
 }
 
-export function testDnsLookup(domain: string) {
-  return invoke<DnsTestResult>("test_dns_lookup", { domain });
+/**
+ * DNS-path diagnosis through the running core: live `/dns/query` resolution
+ * (sing-box/mihomo) plus a local replay of the generated config's decision
+ * chain (which resolver pool, which upstream servers, what matched).
+ */
+export function diagnoseDns(domains: string[]) {
+  return invoke<DnsDiagnosisReport>("diagnose_dns", { domains });
 }
 
 /** Read the OS hosts file as a read-only entry list (for the Hosts UI). */

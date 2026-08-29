@@ -23,7 +23,7 @@ use crate::config::punycode::to_ascii_domain;
 use crate::core::kind::CoreKind;
 use crate::domain::{
     DnsAction, DnsRule, DomainMatcher, OutboundMode, ProtocolConfig, ProxyNode, RuleSet,
-    RuleSetStrategy, RuleTarget, RuleType, Transport,
+    RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
 };
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Map, Value};
@@ -726,16 +726,35 @@ fn build_dns(
 
     let dns_final = opts.dns.normalize_dns_final();
 
-    // Remote resolver (untagged → queries carry dns.tag and route via proxy).
+    // Unified pools (domain::REMOTE/DOMESTIC_DNS_POOL) — the same addresses
+    // sing-box and mihomo resolve from. Remote is DoH over TCP: UDP-less
+    // nodes (socks5 without UDP ASSOCIATE — ssh -D tunnels, cheap relays)
+    // can't carry plaintext-UDP DNS through the proxy, and a dead remote
+    // resolver makes Xray hand unresolved domains to the exit server (read
+    // as a DNS leak by test sites). DoH rides the proxy over TCP, encrypted
+    // end to end; the IP-literal host avoids a bootstrap lookup.
+    //
+    // dns_final is the ONLY fallback: the primary server (index 0) is the
+    // dns_final pool, the second remote entry is in-pool redundancy
+    // (ordered fallback), and every other pool carries skipFallback so it
+    // answers only its own classified domains — never a silent cross-pool
+    // fallback, matching what the DNS-page default resolver promises.
+    //
+    // Remote servers stay untagged so their queries carry dns.tag and
+    // egress through the main outbound; the domestic server is tagged so
+    // its queries egress direct.
     let mut remote = Map::new();
-    remote.insert("address".into(), json!("1.1.1.1"));
+    remote.insert("address".into(), json!(REMOTE_DNS_POOL[0]));
     if !remote_domains.is_empty() {
         remote.insert("domains".into(), json!(remote_domains));
     }
-    // Domestic resolver (tagged → queries route direct). skipFallback unless
-    // it is the primary per dns_final.
+    // Second remote entry: no domains list — pure in-pool fallback for the
+    // primary remote server. Also untagged → also egresses via proxy.
+    let mut remote_backup = Map::new();
+    remote_backup.insert("address".into(), json!(REMOTE_DNS_POOL[1]));
+    // Domestic resolver (tagged → queries route direct).
     let mut domestic = Map::new();
-    domestic.insert("address".into(), json!("223.5.5.5"));
+    domestic.insert("address".into(), json!(DOMESTIC_DNS_POOL[0]));
     domestic.insert("tag".into(), json!(DIRECT_DNS_TAG));
     if !domestic_domains.is_empty() {
         domestic.insert("domains".into(), json!(domestic_domains));
@@ -747,28 +766,56 @@ fn build_dns(
         local.insert("domains".into(), json!(local_domains));
     }
 
+    // Classification-only pools never act as fallback targets.
+    let remote_is_primary = dns_final != "domestic" && dns_final != "local";
+    if !remote_is_primary {
+        remote.insert("skipFallback".into(), json!(true));
+    }
+    if dns_final != "domestic" {
+        domestic.insert("skipFallback".into(), json!(true));
+    }
+    if dns_final != "local" {
+        local.insert("skipFallback".into(), json!(true));
+    }
+
+    // Primary (index 0) = the dns_final pool. Every other pool degrades to
+    // classification-only (skipFallback set above) and is emitted solely
+    // when it has domains to classify.
     match dns_final {
         "domestic" => {
             servers.push(Value::Object(domestic));
-            servers.push(Value::Object(remote));
+            if !local_domains.is_empty() {
+                servers.push(Value::Object(local));
+            }
+            if !remote_domains.is_empty() {
+                servers.push(Value::Object(remote));
+            }
         }
         "local" => {
             servers.push(Value::Object(local));
-            servers.push(Value::Object(remote));
-            servers.push(Value::Object(domestic));
+            if !remote_domains.is_empty() {
+                servers.push(Value::Object(remote));
+            }
+            if !domestic_domains.is_empty() {
+                servers.push(Value::Object(domestic));
+            }
         }
-        // remote (default): remote first, domestic only for its domains.
+        // remote (default): primary + in-pool redundancy, then the other
+        // pools as classification-only entries.
         _ => {
-            domestic.insert("skipFallback".into(), json!(true));
             servers.push(Value::Object(remote));
-            servers.push(Value::Object(domestic));
+            servers.push(Value::Object(remote_backup));
+            if !local_domains.is_empty() {
+                servers.push(Value::Object(local));
+            }
+            if !domestic_domains.is_empty() {
+                servers.push(Value::Object(domestic));
+            }
         }
     }
-    // When leak protection is off, the system resolver is a last-resort
-    // fallback; with it on (default) we never silently fall back to system.
-    if !opts.dns.leak_protect {
-        servers.push(json!("localhost"));
-    }
+    // Note: no localhost/system entry is ever appended — `dns_final` is the
+    // sole fallback in every core (the former leak_protect switch and its
+    // system-resolver escape hatch were removed by design).
     if use_fakeip {
         servers.push(json!("fakedns"));
     }
@@ -1526,16 +1573,36 @@ mod tests {
     #[test]
     fn dns_split_and_tags() {
         let nodes = vec![vless_node("n", None)];
-        let opts = default_opts();
+        let mut opts = default_opts();
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dd1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "cn.example".into(),
+            action: DnsAction::Domestic,
+        });
         let built = build_xray_config(&nodes, &opts).expect("build");
         let dns = &built.value["dns"];
         assert_eq!(dns["tag"], "dns-module");
         let servers = dns["servers"].as_array().unwrap();
-        // default dns_final=remote → remote first, domestic tagged skipFallback
-        assert_eq!(servers[0]["address"], "1.1.1.1");
-        assert_eq!(servers[1]["address"], "223.5.5.5");
-        assert_eq!(servers[1]["tag"], "direct-dns");
-        assert_eq!(servers[1]["skipFallback"], true);
+        // default dns_final=remote → remote DoH primary (both pool entries,
+        // second is in-pool redundancy, untagged so it also egresses via
+        // proxy), domestic tagged skipFallback (classification-only).
+        assert_eq!(servers[0]["address"], REMOTE_DNS_POOL[0]);
+        assert_eq!(servers[1]["address"], REMOTE_DNS_POOL[1]);
+        assert!(servers[1].get("skipFallback").is_none());
+        // domestic classification-only: tagged direct, skipFallback, only
+        // carrying the classified domains (builtin LAN suffixes keep the
+        // local server present by default, so look it up instead of
+        // assuming an index).
+        let domestic = servers
+            .iter()
+            .find(|s| s["tag"] == json!("direct-dns"))
+            .expect("domestic classification entry");
+        assert_eq!(domestic["address"], DOMESTIC_DNS_POOL[0]);
+        assert_eq!(domestic["skipFallback"], true);
+        assert_eq!(domestic["domains"], json!(["domain:cn.example"]));
         // routing: direct-dns → direct, dns-module → main target
         let rules = built.value["routing"]["rules"].as_array().unwrap();
         let direct_dns = rules
@@ -1543,6 +1610,74 @@ mod tests {
             .find(|r| r["inboundTag"] == json!(["direct-dns"]))
             .unwrap();
         assert_eq!(direct_dns["outboundTag"], "direct");
+    }
+
+    /// dns_final is the ONLY fallback: with final=domestic the domestic
+    /// server is primary and the remote pool degrades to classification-only
+    /// (skipFallback) instead of acting as a cross-pool fallback.
+    #[test]
+    fn dns_final_domestic_makes_remote_classification_only() {
+        let nodes = vec![vless_node("n", None)];
+        let mut opts = default_opts();
+        opts.dns.dns_final = "domestic".into();
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["address"], DOMESTIC_DNS_POOL[0]);
+        assert_eq!(servers[0]["tag"], "direct-dns");
+        assert!(servers[0].get("skipFallback").is_none());
+        // Remote classification-only when a rule classifies domains to it;
+        // with nothing to classify it is omitted entirely.
+        assert!(
+            servers
+                .iter()
+                .all(|s| s["address"] != json!(REMOTE_DNS_POOL[0])),
+            "unclassified remote pool must not be present as fallback"
+        );
+
+        let mut opts = opts;
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dr1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "foreign.example".into(),
+            action: DnsAction::Remote,
+        });
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        let remote = servers
+            .iter()
+            .find(|s| s["address"] == json!(REMOTE_DNS_POOL[0]))
+            .expect("remote classification entry");
+        assert_eq!(remote["skipFallback"], true);
+        assert_eq!(remote["domains"], json!(["domain:foreign.example"]));
+    }
+
+    /// Local-classified domains get the system resolver under any dns_final
+    /// (regression guard: they used to be silently dropped unless the final
+    /// itself was local).
+    #[test]
+    fn local_dns_rules_emit_system_resolver_under_remote_final() {
+        let nodes = vec![vless_node("n", None)];
+        let mut opts = default_opts();
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dl1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "corp.internal".into(),
+            action: DnsAction::Local,
+        });
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        let local = servers
+            .iter()
+            .find(|s| s["address"] == json!("localhost"))
+            .expect("system resolver present for local-classified domains");
+        assert_eq!(local["skipFallback"], true);
+        // Builtin LAN suffixes ride along; the user rule must be in the list.
+        let domains = local["domains"].as_array().unwrap();
+        assert!(domains.contains(&json!("domain:corp.internal")));
     }
 
     #[test]

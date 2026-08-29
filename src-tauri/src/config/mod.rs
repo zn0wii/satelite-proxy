@@ -17,6 +17,7 @@ pub use custom::inspect_singbox_config;
 pub use dns_build::lookup_hosts;
 pub use dns_files::dump_dns_rules_file;
 pub use mihomo::build_mihomo_config;
+pub use punycode::to_ascii_domain;
 pub use rule_files::{dump_rule_set_files, remove_rule_set_files};
 pub use write::{
     active_config_path, active_yaml_config_path, remove_custom_config, write_active_config,

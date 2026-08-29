@@ -67,18 +67,64 @@ export interface DnsSettings {
   unified_rules: boolean;
   hijack: boolean;
   cache: boolean;
-  leak_protect: boolean;
   /** Default resolver for domains unmatched by a rule set. */
   dns_final: DnsFinalStrategy;
 }
 
-export interface DnsTestResult {
-  domain: string;
+/** Derived DNS query-path strategy for one domain (config replay). */
+export type DnsPathStrategy =
+  | "remote"
+  | "domestic"
+  | "local"
+  | "block"
+  | "hosts"
+  | "fakeip";
+
+/** One resource record from the core's /dns/query answer. */
+export interface DnsDiagAnswer {
+  name: string;
+  type: number;
+  ttl: number;
+  data: string;
+}
+
+/** Derived query path: which resolver pool the domain takes and why. */
+export interface DnsDiagPath {
+  strategy: DnsPathStrategy;
+  /** Human-readable resolver lines (address + transport + egress). */
+  servers: string[];
+  via_proxy: boolean;
+  /** What matched, e.g. 规则集「海外网站」（后缀 google.com）. */
+  matched_by: string;
+  /** Membership evaluated from a local cache — kernel data is authoritative. */
+  approx: boolean;
+  note?: string | null;
+}
+
+/** Live /dns/query result through the running core. */
+export interface DnsDiagQuery {
   ok: boolean;
-  addrs: string[];
+  status_code: number;
+  status_text: string;
+  answers: DnsDiagAnswer[];
   elapsed_ms: number;
   error?: string | null;
-  note: string;
+}
+
+export interface DnsDiagDomainResult {
+  domain: string;
+  path: DnsDiagPath | null;
+  query: DnsDiagQuery | null;
+  /** Why no runtime query ran (core stopped / Xray / custom without API). */
+  query_note?: string | null;
+}
+
+export interface DnsDiagnosisReport {
+  core_type: string;
+  running: boolean;
+  runtime_source: string;
+  results: DnsDiagDomainResult[];
+  notes: string[];
 }
 
 /** From subscription-userinfo header and/or remark node names. */

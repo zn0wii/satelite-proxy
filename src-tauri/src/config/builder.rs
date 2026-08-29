@@ -275,16 +275,25 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
     route_rules.extend(build_hosts_route_rules(&opts.dns.effective_hosts()));
     if apply_user_rules {
         if opts.rule_sets.is_empty() {
-            route_rules.extend(build_route_rules(&opts.rules, nodes, &tags, &chain_entry_tags));
+            route_rules.extend(build_route_rules(
+                &opts.rules,
+                nodes,
+                &tags,
+                &chain_entry_tags,
+            ));
         } else {
             route_rules.extend(grouped_route_rules);
         }
         if opts.bypass_lan {
             // localhost + LAN safety net before route.final. Emitted after the
-            // rule sets so explicit user rules keep winning, and so domain
-            // classification (geosite sets) happens before any IP matching —
-            // an earlier bare ip rule would force DNS resolution for every
-            // domain connection and break the DNS split.
+            // rule sets so explicit user rules keep winning, and domain
+            // classification (geosite sets) stays ahead of IP matching.
+            // Pre-1.12 kernels resolved FQDNs for bare IP rules (breaking the
+            // DNS split); 1.12+ only resolve via an explicit `resolve` action
+            // (which we never emit) — IP rules now simply don't match domain
+            // destinations, so domain rules must classify first or proxied
+            // traffic falls through to the IP/final tier unresolved.
+            // Verified empirically on 1.13.15.
             route_rules.push(json!({
                 "domain_suffix": ["local", "localhost"],
                 "action": "route",
@@ -566,7 +575,14 @@ fn build_grouped_rule_sets(
         // the user deliberately mixes per-rule routes. Remote sets have no
         // local rules and keep their single set-level route.
         if set.remote.is_none() {
-            route_local_set_grouped(set, nodes, tags, chain_entry_tags, &mut definitions, &mut route_rules);
+            route_local_set_grouped(
+                set,
+                nodes,
+                tags,
+                chain_entry_tags,
+                &mut definitions,
+                &mut route_rules,
+            );
         } else {
             route_rules.push(remote_set_route_rule(set, nodes, tags, chain_entry_tags));
         }
@@ -711,7 +727,10 @@ fn route_local_set_grouped(
         } else if set.strategy == RuleSetStrategy::Filter && rule.target == RuleTarget::Smart {
             filter_key.clone()
         } else {
-            format!("route:{}", resolve_rule_outbound(&rule, nodes, tags, chain_entry_tags))
+            format!(
+                "route:{}",
+                resolve_rule_outbound(&rule, nodes, tags, chain_entry_tags)
+            )
         };
         if let Some((_, rules)) = groups.iter_mut().find(|(group, _)| group == &key) {
             rules.push(rule);
@@ -1132,8 +1151,7 @@ fn build_chain_outbounds_for(
                 let mut clone_tags = Vec::with_capacity(members.len());
                 for (j, node) in members.into_iter().enumerate() {
                     let clone_tag = format!("{}-m{j}", hop_tags[i]);
-                    let (_, mut ob, extra) = match node_to_outbound_tagged(node, Some(&clone_tag))
-                    {
+                    let (_, mut ob, extra) = match node_to_outbound_tagged(node, Some(&clone_tag)) {
                         Ok(v) => v,
                         Err(_) => return None,
                     };
@@ -1210,7 +1228,6 @@ fn build_chain_outbounds(
     }
     (outbounds, entry_tags)
 }
-
 
 /// Nodes matching smart filters (for probe / UI).
 pub fn smart_pool_nodes(r: &Rule, nodes: &[ProxyNode]) -> Vec<ProxyNode> {
@@ -2063,7 +2080,8 @@ mod tests {
             .to_string();
         set.remote.as_mut().unwrap().local_path = Some(local_path.clone());
         let tag = set.id.clone();
-        let (definitions, routes, dns) = build_grouped_rule_sets(&[set.clone()], &[], &[], &Default::default());
+        let (definitions, routes, dns) =
+            build_grouped_rule_sets(&[set.clone()], &[], &[], &Default::default());
 
         assert_eq!(definitions[0]["tag"], tag);
         assert_eq!(definitions[0]["type"], "local");
@@ -2077,7 +2095,8 @@ mod tests {
         assert_eq!(dns[0], json!({ "rule_set": [tag], "action": "reject" }));
 
         set.remote.as_mut().unwrap().format = "binary".into();
-        let (binary_definitions, _, _) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (binary_definitions, _, _) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         assert_eq!(binary_definitions[0]["format"], "binary");
     }
 
@@ -2151,7 +2170,8 @@ mod tests {
             .all(|rule| rule.target == RuleTarget::Proxy));
 
         let tag = set.id.clone();
-        let (definitions, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (definitions, routes, dns) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0]["type"], "inline");
         assert_eq!(
@@ -2206,7 +2226,8 @@ mod tests {
         );
 
         for set in [no_rules, disabled_only, blank_payload, wildcard_only] {
-            let (definitions, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+            let (definitions, routes, dns) =
+                build_grouped_rule_sets(&[set], &[], &[], &Default::default());
             assert!(definitions.is_empty(), "empty set must not be registered");
             assert!(routes.is_empty(), "empty set must not be routed");
             assert!(dns.is_empty(), "empty set must not get DNS rules");
@@ -2231,7 +2252,8 @@ mod tests {
         // Both rules are uneffective → the whole set must vanish.
         set.rules[1].enabled = false;
 
-        let (definitions, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (definitions, routes, dns) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         assert!(definitions.is_empty());
         assert!(routes.is_empty());
         assert!(dns.is_empty());
@@ -2264,7 +2286,8 @@ mod tests {
         );
         set.strategy = RuleSetStrategy::Proxy;
 
-        let (definitions, routes, _dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (definitions, routes, _dns) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         // Parent (DNS) + one child per distinct outbound: proxy, direct, reject.
         assert_eq!(definitions.len(), 4);
         let outbounds: Vec<(String, String)> = routes
@@ -2303,7 +2326,8 @@ mod tests {
         );
         set.strategy = RuleSetStrategy::Direct;
 
-        let (_definitions, routes, _dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (_definitions, routes, _dns) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         // Both pins clamp to the set strategy: a single direct route group.
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["action"], "route");
@@ -2332,7 +2356,8 @@ mod tests {
                 .to_string(),
         );
 
-        let (_, routes, _) = build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["outbound"], tags[0]);
 
@@ -2363,7 +2388,8 @@ mod tests {
 
         let group = set.smart_set_outbound_tag();
         let tag = set.id.clone();
-        let (_, routes, _) = build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
         assert_eq!(
             routes[0],
             json!({ "rule_set": [tag], "action": "route", "outbound": group })
@@ -2379,7 +2405,8 @@ mod tests {
         // and emit no dead selector.
         let mut empty = set;
         empty.smart_include = vec![" nonexistent ".into()];
-        let (_, routes, _) = build_grouped_rule_sets(&[empty.clone()], &nodes, &tags, &Default::default());
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[empty.clone()], &nodes, &tags, &Default::default());
         assert_eq!(routes[0]["outbound"], "proxy");
         assert!(build_filter_set_selectors(&[empty], &nodes, &tags).is_empty());
     }
@@ -2411,7 +2438,8 @@ mod tests {
 
         // Uniform group keeps the classic parent-tag shape, routed to the pin.
         let tag = set.id.clone();
-        let (_, routes, _) = build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["rule_set"], json!([tag]));
         assert_eq!(routes[0]["outbound"], tags[0]);
@@ -2446,7 +2474,8 @@ mod tests {
         // the parent tag carries the route, referencing the whole-set selector.
         let group = set.smart_set_outbound_tag();
         let tag = set.id.clone();
-        let (definitions, routes, _) = build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
+        let (definitions, routes, _) =
+            build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
         assert_eq!(definitions.len(), 1, "no child rule-sets for uniform pool");
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["rule_set"], json!([tag]));
@@ -2475,7 +2504,8 @@ mod tests {
         );
         set.strategy = RuleSetStrategy::Smart;
 
-        let (definitions, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        let (definitions, routes, dns) =
+            build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         // Single outbound group: the parent definition itself carries the
         // route (classic shape) — no child rule-set needed.
         assert_eq!(definitions.len(), 1);
@@ -2576,7 +2606,8 @@ mod tests {
 
         // The predicate must agree with what the builder actually registers.
         for set in [&empty, &disabled_only, &contributing] {
-            let (definitions, routes, dns) = build_grouped_rule_sets(&[set.clone()], &[], &[], &Default::default());
+            let (definitions, routes, dns) =
+                build_grouped_rule_sets(&[set.clone()], &[], &[], &Default::default());
             let registered = !definitions.is_empty() && !routes.is_empty() && !dns.is_empty();
             assert_eq!(
                 registered,
@@ -3643,8 +3674,12 @@ mod tests {
         let chain = ProxyChain::new(
             "诊断链",
             vec![
-                ChainHop::Node { node_id: "n1".into() },
-                ChainHop::Node { node_id: "n2".into() },
+                ChainHop::Node {
+                    node_id: "n1".into(),
+                },
+                ChainHop::Node {
+                    node_id: "n2".into(),
+                },
             ],
         );
 
@@ -3732,9 +3767,15 @@ mod tests {
         // Route rules must point at the EXIT hop's chain-local tag — the
         // internet sees this node's IP.
         let hop2 = by_tag(&entry_tag);
-        let hop2_detour = hop2["detour"].as_str().expect("exit hop detours").to_string();
+        let hop2_detour = hop2["detour"]
+            .as_str()
+            .expect("exit hop detours")
+            .to_string();
         let hop1 = by_tag(&hop2_detour);
-        let hop1_detour = hop1["detour"].as_str().expect("middle hop detours").to_string();
+        let hop1_detour = hop1["detour"]
+            .as_str()
+            .expect("middle hop detours")
+            .to_string();
         let hop0 = by_tag(&hop1_detour);
         // The client-side entry dials out directly — no further detour.
         assert!(
@@ -3841,7 +3882,8 @@ mod tests {
             build_chain_outbounds(&[chain.clone()], &[pool.clone()], &nodes, &tags);
         let entry = entry_tags[&chain.id].clone();
         assert_ne!(
-            entry, pool.outbound_tag(),
+            entry,
+            pool.outbound_tag(),
             "route points at the exit node clone, not the entry pool selector"
         );
 
@@ -3892,7 +3934,11 @@ mod tests {
         let (chain_outbounds, entry_tags) =
             build_chain_outbounds(&[chain.clone()], &[pool.clone()], &nodes, &tags);
         let entry = entry_tags[&chain.id].clone();
-        assert_ne!(entry, pool.outbound_tag(), "exit pool gets a chain-local selector");
+        assert_ne!(
+            entry,
+            pool.outbound_tag(),
+            "exit pool gets a chain-local selector"
+        );
 
         let selector = chain_outbounds
             .iter()
@@ -3910,8 +3956,15 @@ mod tests {
             .iter()
             .find(|o| o["tag"] == json!(member_tag))
             .expect("member clone emitted");
-        let entry_tag_ref = member_ob["detour"].as_str().expect("member clone detours").to_string();
-        assert_ne!(entry_tag_ref, outbound_tag(&nodes[0]), "entry hop is a chain-local clone");
+        let entry_tag_ref = member_ob["detour"]
+            .as_str()
+            .expect("member clone detours")
+            .to_string();
+        assert_ne!(
+            entry_tag_ref,
+            outbound_tag(&nodes[0]),
+            "entry hop is a chain-local clone"
+        );
 
         let entry_ob = chain_outbounds
             .iter()
@@ -3967,7 +4020,8 @@ mod tests {
         let tags: Vec<String> = nodes.iter().map(outbound_tag).collect();
         let mut rule = Rule::new(RuleType::Domain, "example.com".into(), RuleTarget::Chain, 0);
         rule.chain_id = Some("chain-does-not-exist".into());
-        let resolved = resolve_rule_outbound(&rule, &nodes, &tags, &std::collections::HashMap::new());
+        let resolved =
+            resolve_rule_outbound(&rule, &nodes, &tags, &std::collections::HashMap::new());
         assert_eq!(resolved, "proxy");
     }
 }

@@ -4,11 +4,14 @@
 //! - `system.privilege.admin` (osascript / AuthorizationExecuteWithPrivileges)
 //!   is defined as a password-only admin right — SecurityAgent will **not** offer
 //!   fingerprint for that path (see `security authorizationdb read system.privilege.admin`).
-//! - This machine has `pam_tid.so` in `/etc/pam.d/sudo_local`, so **`sudo` with a
-//!   real TTY** shows the Touch ID sheet. We allocate a PTY (via `script`) so a
-//!   GUI app can use that path.
+//! - On Macs where `pam_tid.so` is enabled in `/etc/pam.d/sudo_local` (or the
+//!   global sudo policy), **`sudo` with a real TTY** shows the Touch ID sheet.
+//!   We allocate a PTY (via `script`) so a GUI app can use that path. When
+//!   pam_tid is NOT configured, `sudo` would sit on that hidden PTY waiting for
+//!   a password nobody can type, so we pass `-n` to fail fast into the
+//!   password-based fallbacks below instead of stalling with zero UI feedback.
 //!
-//! Order: sudo+PTY (Touch ID) → AEWP → osascript (password fallbacks).
+//! Order: sudo+PTY (Touch ID / cached credentials) → AEWP → osascript.
 
 use crate::error::{AppError, AppResult};
 use std::ffi::CString;
@@ -199,15 +202,22 @@ pub fn ensure_core_setuid(core: &Path) -> AppResult<()> {
     let _ = Command::new("xattr").args(["-cr"]).arg(core).status();
 
     let path_q = shell_single_quote(&core.to_string_lossy());
+    let core_name = core
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "core".into());
+    // Only xattr cleanup may fail silently; a failed chown/chmod MUST surface
+    // as a non-zero exit (the trailing `|| true` used to swallow both and made
+    // the code report "authorization completed" for a no-op).
     let shell = format!(
-        "chown root:admin {p} && chmod +sx {p} && xattr -dr com.apple.quarantine {p} 2>/dev/null || true",
+        "chown root:admin {p} && chmod +sx {p} && {{ xattr -dr com.apple.quarantine {p} 2>/dev/null || true; }}",
         p = path_q
     );
 
     crate::app_log::info(
         "auth",
         format!(
-            "authorizing setuid on sing-box (Touch ID / password): {}",
+            "authorizing setuid on {core_name} (Touch ID / password): {}",
             core.display()
         ),
     );
@@ -230,7 +240,7 @@ pub fn ensure_core_setuid(core: &Path) -> AppResult<()> {
     if !core_has_setuid(core) {
         let hint = diagnose_setuid_failure(core);
         return Err(AppError::Core(format!(
-            "管理员授权已完成，但 sing-box 仍非 setuid root:admin。{hint}"
+            "管理员提权已执行，但 {core_name} 仍非 setuid root:admin。{hint}"
         )));
     }
 
@@ -251,9 +261,9 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .and_then(|out| {
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            text.lines().last().and_then(|line| {
-                line.split_whitespace().last().map(str::to_string)
-            })
+            text.lines()
+                .last()
+                .and_then(|line| line.split_whitespace().last().map(str::to_string))
         });
 
     let Some(mount_point) = mount_point else {
@@ -270,9 +280,8 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
-            text.lines().any(|l| {
-                l.trim_start().starts_with("Owners:") && l.contains("Disabled")
-            })
+            text.lines()
+                .any(|l| l.trim_start().starts_with("Owners:") && l.contains("Disabled"))
         })
         .unwrap_or(false);
     if ignores_ownership {
@@ -292,9 +301,8 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
-            text.lines().any(|l| {
-                l.contains(&format!(" on {mount_point} ")) && l.contains("nosuid")
-            })
+            text.lines()
+                .any(|l| l.contains(&format!(" on {mount_point} ")) && l.contains("nosuid"))
         })
         .unwrap_or(false);
     if nosuid {
@@ -397,18 +405,28 @@ pub fn run_privileged(tool: &Path, args: &[&str]) -> AppResult<(i32, String)> {
 /// `script` allocates a TTY so pam_tid can present the Touch ID UI.
 fn run_privileged_sudo_pty(tool: &Path, args: &[&str]) -> AppResult<(i32, String)> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
 
     let cmdline = build_tool_cmdline(tool, args);
-    // -p '': suppress textual password prompt; pam_tid shows Touch ID sheet.
+    // Without pam_tid there is no Touch ID sheet; a bare `sudo -p ''` would sit
+    // on this hidden PTY waiting for a password nobody can type (GUI apps have
+    // no visible terminal) and the whole start flow stalled with zero UI
+    // feedback until our own 120s deadline. `-n` makes sudo fail fast instead —
+    // "a password is required" is already in interpret_sudo_output's fallback
+    // list, so we drop straight to AEWP/osascript which surface real dialogs.
+    let n_flag = if pam_tid_enabled() { "" } else { "-n " };
     // Keep sudo credential cache (default timestamp) for nicer repeat UX.
     let inner = format!(
-        "sudo -p '' -- sh -c {q} 2>&1; printf '\\n__SATELITE_EXIT__:%d\\n' $?",
+        "sudo {n_flag}-p '' -- sh -c {q} 2>&1; printf '\\n__SATELITE_EXIT__:%d\\n' $?",
         q = shell_single_quote(&cmdline)
     );
 
-    // macOS: script [-q] [typescript [command ...]]
+    // macOS: script [-q] [typescript [command ...]]. Own process group so the
+    // timeout kill below takes down script + sh + sudo together — killing only
+    // the top `script` used to orphan the root sudo on the dead PTY forever.
     let mut child = Command::new("script")
         .args(["-q", "/dev/null", "sh", "-c", &inner])
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -423,7 +441,7 @@ fn run_privileged_sudo_pty(tool: &Path, args: &[&str]) -> AppResult<(i32, String
                 std::thread::sleep(Duration::from_millis(100));
             }
             Ok(None) => {
-                let _ = child.kill();
+                kill_child_process_group(child.id());
                 let _ = child.wait();
                 return Err(AppError::Core(
                     "sudo 授权超时（未在 120s 内完成指纹/密码）".into(),
@@ -449,6 +467,15 @@ fn run_privileged_sudo_pty(tool: &Path, args: &[&str]) -> AppResult<(i32, String
         String::from_utf8_lossy(&stderr)
     );
     interpret_sudo_output(&combined)
+}
+
+/// SIGKILL the whole process group of a child spawned with
+/// `.process_group(0)` (group leader pid == pgid). Used on the auth timeout so
+/// no root `sudo` survives on an orphaned PTY.
+fn kill_child_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
 }
 
 fn interpret_sudo_output(combined: &str) -> AppResult<(i32, String)> {

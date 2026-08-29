@@ -494,10 +494,7 @@ impl CoreManager {
         let log_path = crate::log_retention::hourly_path(log_dir, kind.log_prefix());
         crate::log_retention::cleanup_current_hour(log_dir)
             .map_err(|e| AppError::Core(format!("clean logs: {e}")))?;
-        let _ = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
+        let _ = open_hourly_log(&log_path)
             .map_err(|e| AppError::Core(format!("open log: {e}")))?;
 
         self.state = CoreState::Starting;
@@ -975,7 +972,7 @@ fn map_tun_permission_hint(err: &str) -> String {
              请在 UAC 弹窗中点「是」；若点了「否」，请关闭 TUN 开关后重试，或以管理员身份运行本程序。"
         } else {
             "TUN 需要更高权限才能创建虚拟网卡 (utun)。\n\
-             macOS：首次开启 TUN 会为 sing-box 设置 setuid（一次 Touch ID / 密码），之后启停不再弹密码。\n\
+             macOS：首次开启 TUN 会为当前内核设置 setuid（一次指纹/密码授权），之后启停不再弹窗。\n\
              若刚更新过内核，可能需重新授权一次。"
         };
         format!("{err}\n\n{platform_hint}")
@@ -1197,6 +1194,31 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(buf.trim().to_string())
 }
 
+/// Open (create if missing) an hourly core log file for append. A setuid-TUN
+/// session can leave that hourly file owned by root without a user write bit,
+/// so a same-hour relaunch fails here with EACCES and takes the whole core
+/// launch down ("open log: Permission denied"). The file is a disposable
+/// console tail, not user data — and the parent dir is writable — so on
+/// PermissionDenied we just unlink it and retry.
+fn open_hourly_log(path: &Path) -> std::io::Result<File> {
+    let try_open = || OpenOptions::new().create(true).append(true).open(path);
+    match try_open() {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "log file not writable (stale root-owned?), recreating: {}",
+                    path.display()
+                ),
+            );
+            fs::remove_file(path)?;
+            try_open()
+        }
+        Err(e) => Err(e),
+    }
+}
+
 struct RotatingCoreWriter {
     log_dir: PathBuf,
     log_prefix: &'static str,
@@ -1222,7 +1244,7 @@ impl RotatingCoreWriter {
         let hour = crate::log_retention::current_hour();
         if self.file_hour != Some(hour) || self.file.is_none() {
             let path = crate::log_retention::hourly_path_for(&self.log_dir, self.log_prefix, hour);
-            match OpenOptions::new().create(true).append(true).open(&path) {
+            match open_hourly_log(&path) {
                 Ok(opened) => {
                     self.file_bytes = opened.metadata().map(|m| m.len()).unwrap_or(0);
                     self.bytes_since_cleanup = 0;

@@ -1321,7 +1321,11 @@ impl AppStore {
 
     // ---- Node pools -----------------------------------------------------
 
-    pub fn create_pool(&mut self, name: &str, mode: crate::domain::PoolMode) -> AppResult<crate::domain::NodePool> {
+    pub fn create_pool(
+        &mut self,
+        name: &str,
+        mode: crate::domain::PoolMode,
+    ) -> AppResult<crate::domain::NodePool> {
         let n = name.trim();
         if n.is_empty() {
             return Err(AppError::Config("节点池名称不能为空".into()));
@@ -1374,9 +1378,9 @@ impl AppStore {
             .chains
             .iter()
             .filter(|c| {
-                c.hops.iter().any(|h| {
-                    matches!(h, crate::domain::ChainHop::Pool { pool_id } if pool_id == id)
-                })
+                c.hops.iter().any(
+                    |h| matches!(h, crate::domain::ChainHop::Pool { pool_id } if pool_id == id),
+                )
             })
             .map(|c| c.name.clone())
             .collect();
@@ -1410,7 +1414,9 @@ impl AppStore {
                 }
                 for nid in node_ids {
                     if !nodes.iter().any(|s| s.node.id == *nid) {
-                        return Err(AppError::Config(format!("节点池引用了不存在的节点 id：{nid}")));
+                        return Err(AppError::Config(format!(
+                            "节点池引用了不存在的节点 id：{nid}"
+                        )));
                     }
                 }
             }
@@ -1561,12 +1567,16 @@ impl AppStore {
             match hop {
                 ChainHop::Node { node_id } => {
                     if !self.nodes.iter().any(|s| s.node.id == *node_id) {
-                        return Err(AppError::Config(format!("链路引用了不存在的节点 id：{node_id}")));
+                        return Err(AppError::Config(format!(
+                            "链路引用了不存在的节点 id：{node_id}"
+                        )));
                     }
                 }
                 ChainHop::Pool { pool_id } => {
                     if !self.pools.iter().any(|p| p.id == *pool_id) {
-                        return Err(AppError::Config(format!("链路引用了不存在的节点池 id：{pool_id}")));
+                        return Err(AppError::Config(format!(
+                            "链路引用了不存在的节点池 id：{pool_id}"
+                        )));
                     }
                 }
             }
@@ -1757,8 +1767,7 @@ fn store_from_json(value: Value) -> AppStore {
     // is the only load path (the serde derives alone don't run for it), and
     // any field it skips loads as empty and is then wiped from disk by the
     // next save.
-    let (pools, retained_pools) =
-        split_known_items::<crate::domain::NodePool>(obj.get("pools"));
+    let (pools, retained_pools) = split_known_items::<crate::domain::NodePool>(obj.get("pools"));
     store.pools = pools;
     store.retained_pools = retained_pools;
 
@@ -1768,9 +1777,8 @@ fn store_from_json(value: Value) -> AppStore {
     store.retained_chains = retained_chains;
 
     if let Some(aliases) = obj.get("node_aliases") {
-        match serde_json::from_value::<std::collections::BTreeMap<String, String>>(
-            aliases.clone(),
-        ) {
+        match serde_json::from_value::<std::collections::BTreeMap<String, String>>(aliases.clone())
+        {
             Ok(parsed) => store.node_aliases = parsed,
             Err(error) => crate::app_log::warn(
                 "storage",
@@ -2087,7 +2095,14 @@ mod tests {
         let id = store.rule_sets[0].id.clone();
 
         let (updated, _) = store
-            .batch_set_rule_targets(&id, RuleTarget::Node, Some("node-1".into()), vec![], vec![], None)
+            .batch_set_rule_targets(
+                &id,
+                RuleTarget::Node,
+                Some("node-1".into()),
+                vec![],
+                vec![],
+                None,
+            )
             .unwrap();
         // Batch node → whole-set Node strategy + set-level pin; every local
         // rule carries the same pin for per-row display.
@@ -2108,7 +2123,6 @@ mod tests {
                 None,
                 vec!["东京".into(), "东京 ".into()],
                 vec!["香港".into()],
-            
                 None,
             )
             .unwrap();
@@ -2130,7 +2144,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec!["东京".into()],
-            
                 None,
             )
             .is_err());
@@ -2162,7 +2175,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2202,7 +2214,14 @@ mod tests {
             node: node_pin,
         });
         let (updated, _) = store
-            .batch_set_rule_targets(&set.id, RuleTarget::Node, Some("n1".into()), vec![], vec![], None)
+            .batch_set_rule_targets(
+                &set.id,
+                RuleTarget::Node,
+                Some("n1".into()),
+                vec![],
+                vec![],
+                None,
+            )
             .unwrap();
         assert_eq!(updated.strategy, RuleSetStrategy::Node);
         assert_eq!(updated.node_id.as_deref(), Some("n1"));
@@ -2218,7 +2237,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2259,7 +2277,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2305,7 +2322,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2429,7 +2445,10 @@ mod tests {
         assert_eq!(reloaded.chains.len(), 1, "chains must survive reload");
         assert_eq!(reloaded.chains[0].id, chain.id);
         assert_eq!(
-            reloaded.node_aliases.get("identity|原名").map(String::as_str),
+            reloaded
+                .node_aliases
+                .get("identity|原名")
+                .map(String::as_str),
             Some("别名"),
             "node aliases must survive reload"
         );
@@ -3232,7 +3251,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -3437,7 +3455,11 @@ mod tests {
             .unwrap();
         let err = store.delete_pool(&pool.id).unwrap_err();
         assert!(err.to_string().contains("链路引用"));
-        assert_eq!(store.pools.len(), 1, "blocked delete must not remove the pool");
+        assert_eq!(
+            store.pools.len(),
+            1,
+            "blocked delete must not remove the pool"
+        );
     }
 
     #[test]
@@ -3521,14 +3543,16 @@ mod tests {
 
         let err = store.delete_chain(&chain.id).unwrap_err();
         assert!(err.to_string().contains("规则集引用"));
-        assert_eq!(store.chains.len(), 1, "blocked delete must not remove the chain");
+        assert_eq!(
+            store.chains.len(),
+            1,
+            "blocked delete must not remove the chain"
+        );
     }
 
     #[test]
     fn chain_rule_usage_dedups_set_level_and_per_rule_references() {
-        use crate::domain::{
-            ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType,
-        };
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
         let mut store = AppStore::default();
         store.nodes.push(mk_stored_node("n1", "A"));
         store.nodes.push(mk_stored_node("n2", "B"));
@@ -3536,8 +3560,12 @@ mod tests {
             .create_chain(
                 "被引用链",
                 vec![
-                    ChainHop::Node { node_id: "n1".into() },
-                    ChainHop::Node { node_id: "n2".into() },
+                    ChainHop::Node {
+                        node_id: "n1".into(),
+                    },
+                    ChainHop::Node {
+                        node_id: "n2".into(),
+                    },
                 ],
             )
             .unwrap();
@@ -3573,7 +3601,11 @@ mod tests {
 
         let usage = store.chain_rule_usage();
         let names = &usage[&chain.id];
-        assert_eq!(names.len(), 2, "set A counted once despite two reference levels");
+        assert_eq!(
+            names.len(),
+            2,
+            "set A counted once despite two reference levels"
+        );
         assert!(names.contains(&"集合A".to_string()));
         assert!(names.contains(&"集合B".to_string()));
         assert!(!names.contains(&"集合C".to_string()));

@@ -107,7 +107,7 @@ impl CoreManager {
         self.log_path.as_deref()
     }
 
-    fn latest_log_path(&self) -> Option<PathBuf> {
+    pub fn latest_log_path(&self) -> Option<PathBuf> {
         self.log_dir
             .as_ref()
             .map(|dir| crate::log_retention::hourly_path(dir, self.kind.log_prefix()))
@@ -120,6 +120,22 @@ impl CoreManager {
     pub fn core_log_tail(&self, limit: usize) -> Option<(PathBuf, Vec<String>)> {
         let path = self.latest_log_path()?;
         Some((path.clone(), read_file_tail_lines(&path, limit)))
+    }
+
+    /// Truncate the current-hour log file of this core's session. The core
+    /// process keeps its writer handle open in append mode, so after the
+    /// truncate its next write lands at the start of the (now empty) file —
+    /// a clean "clear" without touching previous hours' rotated files.
+    pub fn clear_log(&self) -> AppResult<()> {
+        let Some(path) = self.latest_log_path() else {
+            return Ok(());
+        };
+        if path.exists() {
+            fs::write(&path, b"").map_err(|e| {
+                AppError::Core(format!("clear core log {}: {e}", path.display()))
+            })?;
+        }
+        Ok(())
     }
 
     pub fn is_running(&self) -> bool {
@@ -494,8 +510,7 @@ impl CoreManager {
         let log_path = crate::log_retention::hourly_path(log_dir, kind.log_prefix());
         crate::log_retention::cleanup_current_hour(log_dir)
             .map_err(|e| AppError::Core(format!("clean logs: {e}")))?;
-        let _ = open_hourly_log(&log_path)
-            .map_err(|e| AppError::Core(format!("open log: {e}")))?;
+        let _ = open_hourly_log(&log_path).map_err(|e| AppError::Core(format!("open log: {e}")))?;
 
         self.state = CoreState::Starting;
         self.last_error = None;

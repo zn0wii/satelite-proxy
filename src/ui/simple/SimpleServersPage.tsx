@@ -317,9 +317,9 @@ export function SimpleServersPage() {
             icon="⚡"
             disabled={testing || nodeTotal === 0}
             onClick={() => void onTestAll()}
-            title={t("nodes.testLatency")}
+            title={t("nodes.testRealLatency")}
           >
-            {testing ? t("nodes.testing") : t("nodes.testLatency")}
+            {testing ? t("nodes.testing") : t("nodes.testRealLatency")}
           </GlassButton>
         </div>
       </header>

@@ -2,7 +2,8 @@
 //!
 //! Architecture:
 //!   passive connection journal → degradation / healthy re-probe
-//!   → on-demand active URL probe of top-K candidates
+//!   → on-demand ranked probe of top-K candidates (TCP ping; kernel URL
+//!     probe only for QUIC-only protocols and current-node health)
 //!   → light score + Clash-style tolerance + dwell / cooldown / eject
 //!
 //! Not a pure Clash `url-test` (no continuous full-list interval).
@@ -13,7 +14,7 @@
 use crate::app_log;
 use crate::config::{outbound_tag, smart_pool_nodes};
 use crate::domain::{ProxyNode, Rule, RuleSetStrategy, RuleTarget};
-use crate::services::latency::probe_nodes;
+use crate::services::latency::{probe_nodes, probe_nodes_ranked};
 use crate::state::AppState;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -430,12 +431,12 @@ pub async fn select_best_now(state: &AppState) -> Result<SmartSwitchNowResult, S
             });
         }
 
-        let results = probe_nodes(
+        let results = probe_nodes_ranked(
             batch,
-            Some(PROBE_TIMEOUT_MS),
-            Some(BOOTSTRAP_CONCURRENCY),
+            PROBE_TIMEOUT_MS,
+            BOOTSTRAP_CONCURRENCY,
             Some(api.clone()),
-            probe_url.clone(),
+            &probe_url,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -700,17 +701,35 @@ async fn tick(state: &AppState) -> Result<(), String> {
     ctrl().set_phase(Phase::Probing);
 
     // —— Level 1: confirm current node ——
-    let cur_results = probe_nodes(
-        &[current.clone()],
+    // Health: URL probe through the kernel — the only probe that catches
+    // proxy-dead-but-TCP-alive nodes, which a ping-only check would keep
+    // "healthy" forever. Comparison latency: ranked (TCP ping) probe so the
+    // tolerance math against TCP-ranked candidates stays like-for-like —
+    // URL-vs-TCP would inflate the current node's number and churn switches.
+    // (For a QUIC current node both probes share the clash cache key.)
+    let cur_fail = probe_nodes(
+        std::slice::from_ref(&current),
         Some(PROBE_TIMEOUT_MS),
         Some(1),
         Some(api.clone()),
         probe_url.clone(),
     )
     .await
-    .map_err(|e| e.to_string())?;
-    let cur_ms = cur_results.first().and_then(|r| r.latency_ms);
-    let cur_fail = cur_ms.is_none();
+    .map_err(|e| e.to_string())?
+    .first()
+    .map(|r| r.latency_ms.is_none())
+    .unwrap_or(true);
+    let cur_ms = probe_nodes_ranked(
+        std::slice::from_ref(&current),
+        PROBE_TIMEOUT_MS,
+        1,
+        Some(api.clone()),
+        &probe_url,
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    .first()
+    .and_then(|r| r.latency_ms);
 
     {
         let mut c = ctrl();
@@ -817,12 +836,12 @@ async fn tick(state: &AppState) -> Result<(), String> {
         return Ok(());
     }
 
-    let cand_results = probe_nodes(
+    let cand_results = probe_nodes_ranked(
         &candidates,
-        Some(PROBE_TIMEOUT_MS),
-        Some(CANDIDATE_CONCURRENCY),
+        PROBE_TIMEOUT_MS,
+        CANDIDATE_CONCURRENCY,
         Some(api),
-        probe_url,
+        &probe_url,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -1058,12 +1077,12 @@ async fn maintain_smart_rule(
     sort_candidates_by_score(&mut pool, &ejected);
     pool.truncate(BOOTSTRAP_MAX.min(TOP_K.max(8)));
 
-    let results = match probe_nodes(
+    let results = match probe_nodes_ranked(
         &pool,
-        Some(PROBE_TIMEOUT_MS),
-        Some(BOOTSTRAP_CONCURRENCY),
+        PROBE_TIMEOUT_MS,
+        BOOTSTRAP_CONCURRENCY,
         Some(api.clone()),
-        probe_url.to_string(),
+        probe_url,
     )
     .await
     {

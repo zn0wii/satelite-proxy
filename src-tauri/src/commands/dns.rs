@@ -15,7 +15,7 @@ fn dump_dns_rules(state: &AppState) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_dns_settings(state: State<'_, AppState>) -> Result<DnsSettings, String> {
     state
         .with_store(|store| Ok(store.dns.clone()))
@@ -31,7 +31,7 @@ pub async fn read_system_hosts() -> Result<Vec<HostsEntry>, String> {
 }
 
 /// Replace full DNS settings. Optionally restart core when `apply` is true and running.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_dns_settings(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -63,7 +63,7 @@ pub fn update_dns_settings(
 
 /// Reset DNS rules to factory defaults (other fields unchanged).
 /// Rules reset reloads `resources/dns/builtin-dns-rules.list`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_dns_defaults(
     app: AppHandle,
     state: State<'_, AppState>,

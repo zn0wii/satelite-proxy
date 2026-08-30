@@ -13,14 +13,14 @@ fn apply_running(app: &AppHandle) {
     crate::rule_apply::request_restart(app.clone(), Vec::new());
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_pools(state: State<'_, AppState>) -> Result<Vec<NodePool>, String> {
     state
         .with_store(|store| Ok(store.pools.clone()))
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_pool(
     state: State<'_, AppState>,
     name: String,
@@ -31,7 +31,7 @@ pub fn create_pool(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_pool(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -48,7 +48,7 @@ pub fn update_pool(
     Ok(pool)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_pool(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     state
         .with_store_mut(|store| store.delete_pool(&id))
@@ -57,7 +57,7 @@ pub fn delete_pool(app: AppHandle, state: State<'_, AppState>, id: String) -> Re
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_chains(state: State<'_, AppState>) -> Result<Vec<ProxyChain>, String> {
     state
         .with_store(|store| Ok(store.chains.clone()))
@@ -67,7 +67,7 @@ pub fn list_chains(state: State<'_, AppState>) -> Result<Vec<ProxyChain>, String
 /// Rule-set references per chain id (set-level pin or any single rule,
 /// deduped per set) — mirrors `delete_chain`'s guard so the list page can
 /// show "used by N rule sets" before a delete is attempted.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_chain_usage(
     state: State<'_, AppState>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
@@ -76,7 +76,7 @@ pub fn list_chain_usage(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_chain(
     state: State<'_, AppState>,
     name: String,
@@ -87,7 +87,7 @@ pub fn create_chain(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_chain(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -102,7 +102,7 @@ pub fn update_chain(
     Ok(chain)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_chain(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     state
         .with_store_mut(|store| store.delete_chain(&id))

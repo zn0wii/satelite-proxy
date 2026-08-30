@@ -1750,6 +1750,62 @@ tr.row-active {
   max-width: 48rem;
 }
 
+/* —— Multi-core mode tab (sidecar) ——
+   One enable row (title + running pill + switch) and, when enabled, the
+   protocol→core table + base-port field. */
+
+.sidecar-card {
+  width: 100%;
+  max-width: 48rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1rem 1.05rem;
+}
+
+.sidecar-card .via-proxy-row {
+  align-items: center;
+}
+
+.sidecar-pill {
+  margin-left: 0.5rem;
+}
+
+.sidecar-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  padding-top: 0.7rem;
+}
+
+.sidecar-warn {
+  color: var(--warning);
+}
+
+/* Protocol→core table: protocol column + per-row core select. */
+.multicore-table td {
+  vertical-align: middle;
+}
+
+.multicore-table .sidecar-tag {
+  margin-left: 0.45rem;
+  font-size: 0.62rem;
+  padding: 0.05rem 0.4rem;
+}
+
+.multicore-table .solid-select {
+  width: 100%;
+  min-width: 9rem;
+}
+
+/* Delegated-protocol badge on node rows (list + grid). */
+.sidecar-tag {
+  margin-left: 0.35rem;
+  font-size: 0.62rem;
+  padding: 0.05rem 0.4rem;
+}
+
 /* —— Version tab: app bar (full width under the kernel cards) ——
    Two compact lines: identity + versions + actions, then a quiet meta strip
    (last check · platform · stack · exe path) and the link row. */
@@ -1986,6 +2042,12 @@ tr.row-active {
   justify-content: flex-end;
 }
 
+/* Grouping seg + view seg always share one wrapped row (never split). */
+.nodes-view-segs {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .segmented.compact {
   display: inline-grid;
   grid-auto-flow: column;
@@ -2098,6 +2160,88 @@ tr.row-active {
 .node-virtual-row {
   height: 49px;
 }
+
+/* —— Nodes page grouping (subscription / protocol / country) ——
+   Header rows share the node row height so the fixed-size virtualizer
+   math stays exact; the grid header spans all columns at card height and
+   is padded with filler cells to keep the per-cell indexing aligned. */
+.node-group-row > td {
+  height: 30px;
+  padding: 0 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 7%, transparent);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.node-group-caret {
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-size: 0.7em;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.node-group-caret.closed {
+  transform: rotate(-90deg);
+}
+
+.node-group-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.5rem;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--muted) 7%, transparent);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.node-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.node-group-flag {
+  font-size: 1.05em;
+}
+
+.node-group-count {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+
+/* —— 单点测试 armed: every node wears a green outline so the
+   click-to-test affordance stays visible across the whole list/grid.
+   Cards take a real border + soft glow; table rows draw theirs via the
+   cells (tr can't carry borders reliably under border-collapse). */
+.spot-armed .node-card {
+  border-color: var(--success-border);
+  box-shadow:
+    0 0 0 1px var(--success-border),
+    0 0 10px color-mix(in srgb, var(--success) 20%, transparent);
+}
+
+.spot-armed .node-virtual-row > td {
+  border-top: 1px solid var(--success-border);
+  border-bottom: 1px solid var(--success-border);
+}
+
+.spot-armed .node-virtual-row > td:first-child {
+  border-left: 1px solid var(--success-border);
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.spot-armed .node-virtual-row > td:last-child {
+  border-right: 1px solid var(--success-border);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
 
 .node-virtual-spacer > td {
   padding: 0;
@@ -6296,6 +6440,7 @@ tr.dns-diag-tr:hover {
   );
 }
 
+
 /* —— Glass switch (frosted toggle, same family) —— */
 .glass-switch {
   appearance: none;
@@ -6951,28 +7096,42 @@ select:not([size]):disabled {
   white-space: nowrap;
 }
 
-/* —— Traffic page core-log tab (Xray mode) ——
-   Reuses the Logs page toolbar/panel anatomy. Core lines carry no separate
-   timestamp/target columns (both live inside the message text), so the row
-   grid drops to level + message. */
-.core-log-tab {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.core-log-tab .logs-panel {
-  flex: 1 1 auto;
-}
+/* —— Core log lines (Logs page kernel-log view) ——
+   Core lines carry no separate timestamp/target columns (both live inside
+   the message text), so the row grid drops to level + message. */
 
 .log-line.core-log-line {
   grid-template-columns: 52px 1fr;
 }
 
-.core-log-count {
-  flex: none;
-  font-size: 12px;
+/* Running indicator inside the kernel log tabs (green = process alive). */
+.seg-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--muted);
+  opacity: 0.4;
+}
+
+.seg-dot.on {
+  background: var(--success);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--success);
+}
+
+/* Logs page kernel-log view: core picker + source file path foot line. */
+.logs-toolbar .solid-select {
+  min-width: 7.5rem;
+}
+
+.logs-core-path {
+  margin: 0.4rem 0.2rem 0;
+  font-size: 11px;
+  word-break: break-all;
+  user-select: text;
 }
 
 button.active-soft {
@@ -8550,6 +8709,17 @@ li.virt-pad {
 .chain-menu-pop.up {
   bottom: calc(100% + 4px);
   top: auto;
+}
+
+/* An open ⋮ popover must paint above the cards that follow it: .card's
+   deliberate isolation (navbar-repaint fix, see .card) traps the popover's
+   z-index inside that card's own stacking context, so later sibling cards
+   would cover it. Lift the whole source card while its menu is open — the
+   same :has idiom the DNS panels use. */
+.chain-card:has(.chain-menu-pop),
+.chain-pool-list:has(.chain-menu-pop) {
+  position: relative;
+  z-index: 30;
 }
 
 /* Live keyword-filter feedback in the pool editor: match count + a one-line

@@ -353,29 +353,26 @@ type RowMenuItem = {
 
 /** Compact "⋮" overflow menu for pool rows and chain cards — the same idiom
     as the subscription card menu: opaque popover (never glass), capture-phase
-    outside click via [data-chain-menu], Escape to close. Rows in the lower
-    half of a list pass flipUp so the popup opens toward the roomier side. */
-function RowMenu({ items, flipUp = false }: { items: RowMenuItem[]; flipUp?: boolean }) {
+    outside click via [data-chain-menu], Escape to close. The open id is owned
+    by ChainPage (one menuId for every ⋮ on the page), so opening one menu
+    closes the previous — per-instance state used to leave both open. Rows in
+    the lower half of a list pass flipUp so the popup opens toward the
+    roomier side. */
+function RowMenu({
+  id,
+  openId,
+  setOpenId,
+  items,
+  flipUp = false,
+}: {
+  id: string;
+  openId: string | null;
+  setOpenId: (id: string | null) => void;
+  items: RowMenuItem[];
+  flipUp?: boolean;
+}) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDocPointerDown(e: PointerEvent) {
-      const t = e.target as HTMLElement | null;
-      if (t?.closest?.("[data-chain-menu]")) return;
-      setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("pointerdown", onDocPointerDown, true);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDocPointerDown, true);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const open = openId === id;
 
   return (
     <div className="rule-menu chain-menu" data-chain-menu>
@@ -385,7 +382,7 @@ function RowMenu({ items, flipUp = false }: { items: RowMenuItem[]; flipUp?: boo
         aria-label={t("common.actions")}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpenId(open ? null : id)}
       >
         ⋮
       </button>
@@ -398,7 +395,7 @@ function RowMenu({ items, flipUp = false }: { items: RowMenuItem[]; flipUp?: boo
               role="menuitem"
               className={`rule-menu-item${it.danger ? " danger" : ""}`}
               onClick={() => {
-                setOpen(false);
+                setOpenId(null);
                 it.onClick();
               }}
             >
@@ -416,6 +413,8 @@ function PoolRow({
   nodes,
   usedByChains,
   flipUp,
+  openMenuId,
+  setOpenMenuId,
   onEdit,
   onDelete,
 }: {
@@ -425,6 +424,8 @@ function PoolRow({
   usedByChains: number;
   /** Lower-half rows open the ⋮ menu upward (no room below the list). */
   flipUp: boolean;
+  openMenuId: string | null;
+  setOpenMenuId: (id: string | null) => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -463,6 +464,9 @@ function PoolRow({
         </span>
       )}
       <RowMenu
+        id={`pool-${pool.id}`}
+        openId={openMenuId}
+        setOpenId={setOpenMenuId}
         flipUp={flipUp}
         items={[
           { key: "edit", label: t("common.edit"), onClick: onEdit },
@@ -1478,6 +1482,27 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
   const [confirmDelete, setConfirmDelete] = useState<
     { kind: "pool" | "chain"; id: string; name: string } | null
   >(null);
+  /** Which ⋮ menu is open ("pool-…"/"chain-…") — single owner for every
+      RowMenu on the page so a second one replaces the first. */
+  const [menuId, setMenuId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!menuId) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-chain-menu]")) return;
+      setMenuId(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuId(null);
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuId]);
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const poolById = useMemo(() => new Map(pools.map((p) => [p.id, p])), [pools]);
@@ -1563,6 +1588,8 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
                 nodes={nodes}
                 usedByChains={poolChainCount.get(p.id) ?? 0}
                 flipUp={i >= Math.ceil(pools.length / 2)}
+                openMenuId={menuId}
+                setOpenMenuId={setMenuId}
                 onEdit={() => setPoolEditor({ pool: p })}
                 onDelete={() => setConfirmDelete({ kind: "pool", id: p.id, name: p.name })}
               />
@@ -1604,6 +1631,9 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
                         <span className="chain-card-usage none">{t("chain.notUsedByRules")}</span>
                       )}
                       <RowMenu
+                        id={`chain-${c.id}`}
+                        openId={menuId}
+                        setOpenId={setMenuId}
                         flipUp={i >= Math.ceil(chains.length / 2)}
                         items={[
                           { key: "diag", label: t("chain.diag"), onClick: () => setDiagFor(c) },

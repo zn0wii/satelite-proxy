@@ -158,6 +158,19 @@ pub enum Transport {
         #[serde(skip_serializing_if = "Option::is_none")]
         host: Option<String>,
     },
+    /// Xray-only split-HTTP transport (a.k.a. splithttp). sing-box has no
+    /// equivalent — nodes carrying this transport must be served by the
+    /// Xray sidecar (multi-core mode) or the Xray core; the sing-box
+    /// generator rejects them with a pointed error.
+    Xhttp {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+        /// `auto` | `packet-up` | `stream-up` | `stream-one` (Xray default auto).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+    },
 }
 
 /// Parameters for the shadow-tls SIP003 plugin (Clash `plugin-opts` under
@@ -496,6 +509,7 @@ impl NodeSummary {
             Some(Transport::Grpc { .. }) => Some("grpc".into()),
             Some(Transport::Http { .. }) => Some("http".into()),
             Some(Transport::HttpUpgrade { .. }) => Some("httpupgrade".into()),
+            Some(Transport::Xhttp { .. }) => Some("xhttp".into()),
             Some(Transport::Tcp) | None => None,
         };
         let extra = node_extra(node);

@@ -38,7 +38,7 @@ pub struct NodePage {
     pub offset: usize,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     state
         .with_store(|store| Ok(store.settings.clone()))
@@ -63,7 +63,7 @@ pub async fn regenerate_api_secret(app: AppHandle) -> Result<AppSettings, String
     .map_err(|e| format!("regenerate secret task: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_settings(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -96,6 +96,11 @@ pub fn update_settings(
     auto_select: Option<String>, // off | smart | kernel
     route_final: Option<String>, // proxy | direct | block (Rule mode)
     find_process: Option<bool>,
+    multi_core_enabled: Option<bool>,
+    // Per-protocol core routing rows. Only delegations are stored (v1:
+    // core == "xray"); unknown protocols/cores are dropped silently.
+    protocol_cores: Option<Vec<crate::domain::ProtocolCoreItem>>,
+    sidecar_port: Option<u16>,
 ) -> Result<AppSettings, String> {
     let mut launch_changed: Option<bool> = None;
     let mut auto_select_changed: Option<(
@@ -105,6 +110,7 @@ pub fn update_settings(
     let mut route_final_changed = false;
     let mut find_process_changed = false;
     let mut bypass_lan_changed = false;
+    let mut multi_core_changed = false;
     let settings = state
         .with_store_mut(|store| {
             if let Some(p) = mixed_port {
@@ -323,6 +329,51 @@ pub fn update_settings(
                     ),
                 );
             }
+            // —— Multi-core mode (sing-box main mode) ——
+            if let Some(v) = multi_core_enabled {
+                // Defense in depth for a stale UI: the mode only exists under
+                // the sing-box main core (set_core_type auto-disables it on
+                // switch; here we refuse to re-enable it under another core).
+                if v && !store.settings.multi_core_available() {
+                    return Err(AppError::Config("多核模式仅支持 sing-box 主内核".into()));
+                }
+                if store.settings.multi_core_enabled != v {
+                    multi_core_changed = true;
+                    store.settings.multi_core_enabled = v;
+                }
+            }
+            if let Some(list) = protocol_cores {
+                // Normalize: trim + lowercase both sides, dedupe by protocol
+                // (first wins), keep only real delegations. Unknown values are
+                // harmless (never match a node) — the build-time plan
+                // re-checks each node against the sidecar core support anyway.
+                let mut seen = std::collections::HashSet::new();
+                let cleaned: Vec<crate::domain::ProtocolCoreItem> = list
+                    .iter()
+                    .map(|e| crate::domain::ProtocolCoreItem {
+                        protocol: e.protocol.trim().to_ascii_lowercase(),
+                        core: e.core.trim().to_ascii_lowercase(),
+                    })
+                    .filter(|e| {
+                        !e.protocol.is_empty()
+                            && e.core == crate::core::CoreKind::Xray.as_str()
+                            && seen.insert(e.protocol.clone())
+                    })
+                    .collect();
+                if cleaned != store.settings.protocol_cores {
+                    multi_core_changed = true;
+                    store.settings.protocol_cores = cleaned;
+                }
+            }
+            if let Some(p) = sidecar_port {
+                if p == 0 {
+                    return Err(AppError::Config("副进程端口无效".into()));
+                }
+                if store.settings.sidecar_port != p {
+                    multi_core_changed = true;
+                    store.settings.sidecar_port = p;
+                }
+            }
             Ok(store.settings.clone())
         })
         .map_err(|e| e.to_string())?;
@@ -338,6 +389,7 @@ pub fn update_settings(
     let need_restart = route_final_changed
         || find_process_changed
         || bypass_lan_changed
+        || multi_core_changed
         || auto_select_changed
             .map(|(prev, next)| prev.is_kernel() != next.is_kernel())
             .unwrap_or(false);
@@ -367,7 +419,7 @@ pub async fn set_current_node(app: AppHandle, node_id: String) -> Result<AppSett
     .map_err(|e| format!("select node task: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_node(
     state: State<'_, AppState>,
     id: String,
@@ -378,7 +430,7 @@ pub fn rename_node(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
     state
         .with_store(|store| {
@@ -415,7 +467,7 @@ pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, Str
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_nodes_page(
     state: State<'_, AppState>,
     query: Option<String>,
@@ -490,7 +542,7 @@ pub fn list_nodes_page(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_node_ids(
     state: State<'_, AppState>,
     query: Option<String>,
@@ -557,7 +609,7 @@ fn extract_custom_nodes(
 /// Read-only node list extracted from the selected custom sing-box config.
 /// Custom profiles never feed the node store, so the stored config body is
 /// parsed on demand. Empty when not in custom runtime mode.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_custom_config_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
     custom_config_nodes(&state)
 }
@@ -661,6 +713,9 @@ pub async fn generate_singbox_config(
     let core_type = settings.core_type.clone();
     let worker_secret = secret.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // Mirror the runtime's delegation plan so the written config matches
+        // what a start would generate (None in mihomo/Xray main modes).
+        let sidecar = crate::runtime::compute_sidecar_plan(&settings, &chains, &nodes);
         let opts = BuildOptions {
             mixed_port: settings.mixed_port,
             allow_lan: settings.allow_lan,
@@ -685,6 +740,7 @@ pub async fn generate_singbox_config(
             block_quic: settings.block_quic,
             bypass_lan: settings.bypass_lan,
             tun_interface_name: None,
+            sidecar,
         };
         let result = match crate::core::CoreKind::parse(&core_type) {
             crate::core::CoreKind::Mihomo => {
@@ -740,7 +796,7 @@ pub async fn generate_singbox_config(
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_active_config_path(state: State<'_, AppState>) -> Result<Option<String>, String> {
     // mihomo keeps its Clash YAML in active.yaml; JSON cores share active.json.
     let core_type = state
@@ -786,6 +842,9 @@ pub async fn preview_singbox_config(
         _ => active_config_path(&state.app_data_dir),
     };
     tauri::async_runtime::spawn_blocking(move || {
+        // Mirror the runtime's delegation plan so the preview matches what a
+        // start would actually generate (None in mihomo/Xray main modes).
+        let sidecar = crate::runtime::compute_sidecar_plan(&settings, &chains, &nodes);
         let opts = BuildOptions {
             mixed_port: settings.mixed_port,
             allow_lan: settings.allow_lan,
@@ -810,6 +869,7 @@ pub async fn preview_singbox_config(
             block_quic: settings.block_quic,
             bypass_lan: settings.bypass_lan,
             tun_interface_name: None,
+            sidecar,
         };
         let result = match crate::core::CoreKind::parse(&core_type) {
             crate::core::CoreKind::Mihomo => {

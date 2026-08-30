@@ -109,14 +109,14 @@ async fn wait_for_refresh(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_subscriptions(state: State<'_, AppState>) -> Result<Vec<SubscriptionView>, String> {
     state
         .with_store(|store| Ok(store.subscriptions.iter().map(|s| s.to_view()).collect()))
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_subscription_urls(
     state: State<'_, AppState>,
 ) -> Result<Vec<SubscriptionUrlEntry>, String> {
@@ -137,7 +137,7 @@ pub fn list_subscription_urls(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_subscription(
     state: State<'_, AppState>,
     id: String,
@@ -252,7 +252,7 @@ pub async fn add_subscription_singbox(
     persist_import(&app, &state, outcome)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_import_file(path: String) -> Result<String, String> {
     let path = PathBuf::from(path.trim());
     if !path.exists() {
@@ -607,7 +607,7 @@ async fn load_inline_body(content: Option<String>, path: Option<String>) -> Resu
     .map_err(|error| format!("read file task: {error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_subscription(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -622,7 +622,7 @@ pub fn remove_subscription(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_subscription_nodes(
     state: State<'_, AppState>,
     id: String,
@@ -785,7 +785,7 @@ fn enabled_flags(state: &AppState) -> Vec<bool> {
 }
 
 /// Click a config card: exclusive enable (default) or Mix toggle.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn activate_subscription(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -803,7 +803,7 @@ pub fn activate_subscription(
 }
 
 /// Toggle Mix mode (multi-subscription enable). Turning off keeps first enabled only.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_mix_mode(
     app: tauri::AppHandle,
     state: State<'_, AppState>,

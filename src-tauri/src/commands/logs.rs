@@ -1,4 +1,5 @@
 use crate::app_log::{self, LogBatch, LogLevel};
+use crate::core::CoreKind;
 use crate::state::AppState;
 use serde::Serialize;
 use tauri::State;
@@ -22,7 +23,7 @@ pub async fn list_app_logs(
     .map_err(|e| format!("list logs task: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_app_logs() -> Result<(), String> {
     app_log::clear();
     Ok(())
@@ -35,16 +36,28 @@ pub struct CoreLogTail {
     pub lines: Vec<String>,
 }
 
-/// Tail of the active core's hourly log file. Xray has no per-connection
-/// API, so the Xray-mode traffic page streams the core log instead — at
-/// `info` level Xray logs accepted connections and routing decisions there.
-#[tauri::command]
+/// Tail of a core's hourly log file (Logs page kernel-log view). Xray has
+/// no per-connection API, so its raw log carries accepted connections and
+/// routing decisions — read at `info` level. `kind` selects which core's
+/// file to read (sing-box | xray | mihomo) — under multi-core mode the
+/// sidecar writes its own file separate from the main core's; `None` keeps
+/// the historical behavior of tailing the main core.
+#[tauri::command(async)]
 pub fn get_core_log_tail(
     state: State<'_, AppState>,
     limit: Option<usize>,
+    kind: Option<String>,
 ) -> Result<CoreLogTail, String> {
     let limit = limit.unwrap_or(300).clamp(1, 1_000);
-    let tail = state.lock_runtime().core.core_log_tail(limit);
+    let runtime = state.lock_runtime();
+    let tail = match kind.as_deref() {
+        Some("singbox") => runtime.core_log_tail_for(CoreKind::SingBox, limit),
+        Some("xray") => runtime.core_log_tail_for(CoreKind::Xray, limit),
+        Some("mihomo") => runtime.core_log_tail_for(CoreKind::Mihomo, limit),
+        // Legacy / default: whatever the main manager last ran.
+        _ => runtime.core.core_log_tail(limit),
+    };
+    drop(runtime);
     Ok(match tail {
         Some((path, lines)) => CoreLogTail {
             path: Some(path.display().to_string()),
@@ -55,4 +68,21 @@ pub fn get_core_log_tail(
             lines: Vec::new(),
         },
     })
+}
+
+/// Truncate the current-hour log file of the given core (same manager
+/// resolution as `get_core_log_tail`). Only the file this app instance
+/// writes is cleared — previous hours' rotated files stay for retention.
+#[tauri::command(async)]
+pub fn clear_core_log(state: State<'_, AppState>, kind: String) -> Result<(), String> {
+    let parsed = match kind.as_str() {
+        "singbox" => CoreKind::SingBox,
+        "xray" => CoreKind::Xray,
+        "mihomo" => CoreKind::Mihomo,
+        _ => return Err(format!("unknown core kind: {kind}")),
+    };
+    state
+        .lock_runtime()
+        .core_log_clear_for(parsed)
+        .map_err(|e| e.to_string())
 }

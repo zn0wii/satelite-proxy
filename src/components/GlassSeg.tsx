@@ -1,9 +1,10 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
 interface Option {
   value: string;
-  label: string;
+  /** ReactNode — embed e.g. a status dot next to the label. */
+  label: ReactNode;
 }
 
 interface Props {

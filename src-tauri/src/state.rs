@@ -1501,6 +1501,22 @@ impl AppState {
     pub fn cached_core_state(&self) -> CoreState {
         self.cached_status().core_state
     }
+
+    /// Poll the companion Xray sidecar (reap a dead child, read liveness),
+    /// best-effort: `None` when the runtime lock is contended — the watchdog
+    /// just skips that tick instead of blocking an async worker.
+    pub fn poll_sidecar(&self) -> Option<(bool, CoreState)> {
+        let mut runtime = match self.runtime.try_lock() {
+            Ok(runtime) => runtime,
+            Err(TryLockError::WouldBlock) => return None,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                app_log::error("lock", "runtime lock was poisoned — recovering");
+                poisoned.into_inner()
+            }
+        };
+        runtime.sidecar.poll();
+        Some((runtime.sidecar.is_running(), runtime.sidecar.state()))
+    }
 }
 
 // —— core watchdog ——————————————————————————————————————————————
@@ -1540,6 +1556,11 @@ pub fn spawn_core_watchdog(app: tauri::AppHandle) {
         .spawn(move || {
             let mut was_running = false;
             let mut attempts: Vec<Instant> = Vec::new();
+            // Companion Xray sidecar gets its own edge/budget tracking: it
+            // crashes independently of the main core (which stays Running),
+            // so the main-core inputs alone never see the failure.
+            let mut sidecar_was_running = false;
+            let mut sidecar_attempts: Vec<Instant> = Vec::new();
             loop {
                 std::thread::sleep(Duration::from_millis(WATCHDOG_POLL_MS));
                 let Some(state) = app.try_state::<AppState>() else {
@@ -1571,6 +1592,34 @@ pub fn spawn_core_watchdog(app: tauri::AppHandle) {
                     crate::rule_apply::request_restart(app.clone(), Vec::new());
                 }
                 was_running = now_running;
+
+                // Sidecar watchdog: only meaningful while the main core is
+                // up (stop paths tear the sidecar down with it, landing on
+                // Stopped, which the edge check rejects).
+                let Some((sidecar_running, sidecar_state)) = state.poll_sidecar() else {
+                    continue;
+                };
+                sidecar_attempts.retain(|t| now.duration_since(*t) < WATCHDOG_WINDOW);
+                if watchdog_should_restart(
+                    sidecar_was_running,
+                    sidecar_running,
+                    transitioning,
+                    sidecar_state,
+                    sidecar_attempts.len(),
+                ) && now_running
+                {
+                    sidecar_attempts.push(now);
+                    app_log::warn(
+                        "core",
+                        format!(
+                            "xray sidecar died unexpectedly (state {sidecar_state:?}) — auto-restarting (attempt {}/{WATCHDOG_MAX_ATTEMPTS} in {}s)",
+                            sidecar_attempts.len(),
+                            WATCHDOG_WINDOW.as_secs()
+                        ),
+                    );
+                    crate::rule_apply::request_restart(app.clone(), Vec::new());
+                }
+                sidecar_was_running = sidecar_running;
             }
         })
         .ok();

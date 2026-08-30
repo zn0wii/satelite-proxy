@@ -209,6 +209,14 @@ fn build_transport(draft: &ManualNodeDraft, protocol: Protocol) -> Option<Transp
             path: opt_nonempty(&draft.path),
             host: opt_nonempty(&draft.host),
         }),
+        // Xray-only: such nodes only work via multi-core Xray delegation
+        // (the manual form's hint says so). No mode field in the draft —
+        // Xray defaults to "auto".
+        "xhttp" | "splithttp" => Some(Transport::Xhttp {
+            path: opt_nonempty(&draft.path),
+            host: opt_nonempty(&draft.host),
+            mode: None,
+        }),
         _ => Some(Transport::Tcp),
     }
 }
@@ -430,6 +438,11 @@ pub fn node_to_draft(node: &ProxyNode) -> ManualNodeDraft {
         }
         Some(Transport::HttpUpgrade { path, host }) => {
             draft.network = Some("httpupgrade".into());
+            draft.path = path.clone();
+            draft.host = host.clone();
+        }
+        Some(Transport::Xhttp { path, host, .. }) => {
+            draft.network = Some("xhttp".into());
             draft.path = path.clone();
             draft.host = host.clone();
         }

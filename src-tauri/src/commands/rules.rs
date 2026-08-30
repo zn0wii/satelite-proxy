@@ -68,14 +68,14 @@ fn dump_set(state: &AppState, set_id: &str) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_rule_sets(state: State<'_, AppState>) -> Result<Vec<RuleSetSummary>, String> {
     state
         .with_store(|store| Ok(store.list_rule_set_summaries()))
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_rule_set(state: State<'_, AppState>, id: String) -> Result<RuleSet, String> {
     state
         .with_store(|store| {
@@ -432,7 +432,7 @@ mod remote_rule_view_tests {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_active_rule_set(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -457,7 +457,7 @@ pub fn set_active_rule_set(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_rule_set_enabled(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -487,7 +487,7 @@ pub fn set_rule_set_enabled(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_rule_set_strategy(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -548,7 +548,7 @@ pub fn set_rule_set_strategy(
     Ok(set)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn batch_set_rule_targets(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -577,7 +577,7 @@ pub fn batch_set_rule_targets(
     Ok(set)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_rule_set_dns_strategy(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -605,7 +605,7 @@ pub fn set_rule_set_dns_strategy(
 }
 
 /// Reorder rule sets. `ids` is full preferred order (first = highest priority).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reorder_rule_sets(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -629,7 +629,7 @@ pub fn reorder_rule_sets(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_rule_set(
     state: State<'_, AppState>,
     name: String,
@@ -712,7 +712,7 @@ pub fn create_rule_set(
     Ok(set)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_rule_set(
     state: State<'_, AppState>,
     id: String,
@@ -788,7 +788,7 @@ pub async fn refresh_remote_rule_set(app: AppHandle, id: String) -> Result<RuleS
     crate::remote_rule_auto::refresh(app, id).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_rule_set(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -829,7 +829,7 @@ pub fn delete_rule_set(
 /// Reset one factory rule set (the bundled `system-*` remote sets) from its
 /// packaged `.srs` copy. Anything else — including legacy `builtin-*` ids —
 /// is not resettable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_rule_set(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -849,7 +849,7 @@ pub fn reset_rule_set(
 
 /// Reset the three bundled remote rule sets to factory defaults. Legacy
 /// `builtin-*` list sets stay untouched — recognized but never restored.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_builtin_rule_set(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -872,7 +872,7 @@ pub fn reset_builtin_rule_set(
 }
 
 /// List rules of a set (default: active set).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_rules(state: State<'_, AppState>, set_id: Option<String>) -> Result<Vec<Rule>, String> {
     state
         .with_store(|store| {
@@ -894,7 +894,7 @@ pub fn list_rules(state: State<'_, AppState>, set_id: Option<String>) -> Result<
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_rule(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1109,7 +1109,7 @@ fn rule_set_id_of(state: &AppState, rule: &Rule) -> Option<String> {
         .flatten()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_rule(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1150,7 +1150,7 @@ pub fn remove_rule(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_rule_enabled(
     app: AppHandle,
     state: State<'_, AppState>,

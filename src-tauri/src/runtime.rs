@@ -2,14 +2,15 @@
 
 use crate::api::{ClashApi, ConnectionInfo, RequestRecord, TrafficTotals, XrayMetrics};
 use crate::config::{
-    build_mihomo_config, build_singbox_config, build_xray_config, generate_api_secret,
-    inspect_singbox_config, outbound_tag, write_active_config, write_active_yaml_config,
-    write_custom_config, BuildOptions,
+    build_mihomo_config, build_singbox_config, build_xray_config, build_xray_sidecar_config,
+    generate_api_secret, inspect_singbox_config, outbound_tag, write_active_config,
+    write_active_yaml_config, write_custom_config, write_xray_sidecar_config, BuildOptions,
+    SidecarPlan,
 };
 use crate::core::manager::{CoreManager, CoreState};
 use crate::core::resolve_core_bin;
 use crate::core::CoreKind;
-use crate::domain::{RuntimeSource, SubscriptionSource};
+use crate::domain::{ChainHop, Protocol, ProxyNode, RuntimeSource, SubscriptionSource};
 use crate::error::{AppError, AppResult};
 use crate::proxy::{create_system_proxy, SystemProxy, SystemProxySnapshot};
 use crate::storage::AppStore;
@@ -76,6 +77,10 @@ pub struct ProxyStatus {
     /// worth calling out rather than leaving silent.
     #[serde(default)]
     pub core_elevated: bool,
+    /// Companion Xray sidecar process is running (sing-box main mode,
+    /// `settings.multi_core_*` delegation). Never true under other cores.
+    #[serde(default)]
+    pub sidecar_running: bool,
 }
 
 /// Cap history to limit RAM (UI only needs recent activity).
@@ -120,6 +125,12 @@ impl PassiveNodeStats {
 
 pub struct Runtime {
     pub core: CoreManager,
+    /// Companion Xray sidecar process (sing-box main mode + delegation
+    /// settings). Independent `CoreManager` instance — the struct has no
+    /// static state, so a second one just owns a second child process.
+    pub sidecar: CoreManager,
+    /// Ports the sidecar currently owns (per-node loopback inbounds).
+    sidecar_ports: Vec<u16>,
     pub system_proxy_on: bool,
     pub proxy_snapshot: Option<SystemProxySnapshot>,
     pub api: Option<ClashApi>,
@@ -233,6 +244,8 @@ impl Runtime {
     pub fn new() -> Self {
         Self {
             core: CoreManager::default(),
+            sidecar: CoreManager::default(),
+            sidecar_ports: Vec::new(),
             system_proxy_on: false,
             proxy_snapshot: None,
             api: None,
@@ -270,8 +283,44 @@ impl Runtime {
         self.xray_metrics.clone()
     }
 
+    /// Tail of the log file for a specific core kind. Under multi-core mode
+    /// the two cores write to separate hourly files — the sidecar manager
+    /// owns the companion's file, the main manager everyone else's. Whichever
+    /// manager actually ran (or is running) the requested kind answers.
+    pub fn core_log_tail_for(
+        &self,
+        kind: CoreKind,
+        limit: usize,
+    ) -> Option<(PathBuf, Vec<String>)> {
+        if self.sidecar.kind() == kind {
+            if let Some(tail) = self.sidecar.core_log_tail(limit) {
+                return Some(tail);
+            }
+        }
+        if self.core.kind() == kind {
+            return self.core.core_log_tail(limit);
+        }
+        None
+    }
+
+    /// Truncate the current-hour log file of the given core kind (same
+    /// manager resolution as [`Self::core_log_tail_for`]). No-op when that
+    /// core never ran in this app instance.
+    pub fn core_log_clear_for(&self, kind: CoreKind) -> AppResult<()> {
+        if self.sidecar.kind() == kind {
+            if self.sidecar.latest_log_path().is_some() {
+                return self.sidecar.clear_log();
+            }
+        }
+        if self.core.kind() == kind {
+            return self.core.clear_log();
+        }
+        Ok(())
+    }
+
     pub fn status(&mut self, store: &AppStore) -> ProxyStatus {
         self.core.poll();
+        self.sidecar.poll();
         // Core may have exited outside stop_proxy — keep uptime field consistent.
         if !self.core.is_running() {
             self.core_started_at = None;
@@ -350,6 +399,10 @@ impl Runtime {
                 store.settings.core_type.clone()
             },
             core_elevated,
+            // The sidecar is only meaningful while the main core runs; a
+            // stopped main core always reports it down regardless of a
+            // lingering process (stop paths tear it down first anyway).
+            sidecar_running: self.core.is_running() && self.sidecar.is_running(),
         }
     }
 
@@ -856,6 +909,29 @@ impl Runtime {
             ));
         }
 
+        // Xray sidecar delegation (sing-box main mode only). Resolved before
+        // any build work: the generated sing-box config embeds socks
+        // outbounds pointing at the sidecar ports, so a missing Xray binary
+        // must fail the start up front rather than half-start into
+        // references to a process that will never exist.
+        //
+        // Port occupancy is NOT probed per port here — with hundreds of
+        // delegated nodes that would spawn hundreds of lsof/netstat child
+        // processes. Known ports (mixed/api/extra/diag) are already excluded
+        // at plan time; anything else on a sidecar port is cleared by the
+        // standard `ensure_ports_free` inside `start_with_ports`, and a real
+        // bind conflict surfaces as the sidecar's own FATAL → full rollback.
+        let sidecar_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        if sidecar_plan.is_some() {
+            let (xbin, _) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Xray);
+            if xbin.is_none() {
+                return Err(AppError::Core(
+                    "Xray 副进程已启用但未找到 Xray 内核：请先在设置中下载 Xray，或关闭协议委托"
+                        .into(),
+                ));
+            }
+        }
+
         ensure_listen_port_available_on(
             store.settings.mixed_port,
             if store.settings.allow_lan {
@@ -885,7 +961,9 @@ impl Runtime {
         // clear it when the user has the secret toggle off (see
         // resolve_clash_api_secret / api_secret_enabled).
         let secret = resolve_clash_api_secret(store);
-        let built = build_singbox_config(&nodes, &build_options(store, secret.clone()))?;
+        let mut opts = build_options(store, secret.clone());
+        opts.sidecar = sidecar_plan.clone();
+        let built = build_singbox_config(&nodes, &opts)?;
         let config_path = write_active_config(app_data_dir, &built)?;
         if store.settings.current_node_id.is_none() {
             if let Some(first) = nodes.first() {
@@ -955,6 +1033,19 @@ impl Runtime {
         self.api = Some(api);
         self.core_started_at = Some(now_unix_secs());
 
+        // Main core healthy — now bring up the companion Xray sidecar (if
+        // delegated). Failure fails the whole start and rolls the main core
+        // back: its outbounds already point at the sidecar ports, so
+        // leaving it running would black-hole delegated nodes.
+        if let Some(plan) = &sidecar_plan {
+            if let Err(e) = self.start_xray_sidecar(app_data_dir, resource_dir, &nodes, plan) {
+                let _ = self.core.stop();
+                self.core_started_at = None;
+                self.api = None;
+                return Err(e);
+            }
+        }
+
         // System proxy is independent — optional on start; prefer UI switch after running.
         if enable_system_proxy {
             if let Err(e) = self.set_system_proxy(store, true) {
@@ -965,6 +1056,76 @@ impl Runtime {
         }
 
         Ok(self.status(store))
+    }
+
+    /// Build, write and start the companion Xray sidecar process for the
+    /// delegation plan. Called only after the main sing-box core is healthy.
+    ///
+    /// `start_with_ports` itself waits until the first sidecar port is
+    /// listening (and errors if the process dies), so a successful return
+    /// means every delegated node's inbound is live. Config validation runs
+    /// via Xray's own `-test` (`CoreKind::check_command_args`); the sidecar
+    /// config deliberately contains no geodata references, so the test never
+    /// needs the geosite/geoip assets.
+    fn start_xray_sidecar(
+        &mut self,
+        app_data_dir: &Path,
+        resource_dir: Option<&Path>,
+        nodes: &[ProxyNode],
+        plan: &SidecarPlan,
+    ) -> AppResult<()> {
+        let entries: Vec<(ProxyNode, u16)> = plan
+            .ports
+            .iter()
+            .filter_map(|(id, port)| {
+                nodes
+                    .iter()
+                    .find(|n| &n.id == id)
+                    .map(|n| (n.clone(), *port))
+            })
+            .collect();
+        let built = build_xray_sidecar_config(&entries)?;
+        let config_path = write_xray_sidecar_config(app_data_dir, &built)?;
+        let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Xray);
+        let bin = bin.ok_or_else(|| AppError::Core("Xray sidecar binary not found".into()))?;
+        let log_dir = app_data_dir.join("logs");
+
+        let mut ports = plan.port_list();
+        let first = ports.remove(0);
+        // No elevated path: the sidecar only binds loopback socks ports.
+        if let Err(e) = self.sidecar.start_with_ports(
+            CoreKind::Xray,
+            &bin,
+            &config_path,
+            &log_dir,
+            first,
+            None,
+            &ports,
+            false,
+            resource_dir,
+        ) {
+            let _ = self.sidecar.stop();
+            let hint = self.sidecar.last_error().unwrap_or_default();
+            return Err(AppError::Core(format!(
+                "Xray 副进程启动失败：{e}{}",
+                if hint.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{hint}")
+                }
+            )));
+        }
+        self.sidecar_ports = plan.port_list();
+        crate::app_log::info(
+            "xray_sidecar",
+            format!(
+                "Xray 副进程已启动：{} 个委托节点，端口 {}..={}",
+                plan.ports.len(),
+                self.sidecar_ports.first().copied().unwrap_or(0),
+                self.sidecar_ports.last().copied().unwrap_or(0),
+            ),
+        );
+        Ok(())
     }
 
     /// Generate an Xray config and start the Xray core. Mirrors the sing-box
@@ -1522,6 +1683,17 @@ impl Runtime {
         if let Some(metrics) = self.xray_metrics.take() {
             metrics.deactivate();
         }
+        // Sidecar first: the main core's delegated outbounds point at its
+        // ports, so tear the dependent process down before the ingress.
+        // Soft-fail — a sticky sidecar must not block stopping the proxy;
+        // the next start's begin-with-stop cleans it up again.
+        if self.sidecar.is_running() || self.sidecar.state() != CoreState::Stopped {
+            if let Err(e) = self.sidecar.stop() {
+                crate::app_log::warn("xray_sidecar", format!("sidecar stop: {e}"));
+            }
+            self.sidecar.await_owned_ports_released();
+        }
+        self.sidecar_ports.clear();
         self.core.stop()?;
         // `CoreManager::stop` waits for the process we actually own. Never
         // force-kill arbitrary listeners here: an empty/test runtime has no
@@ -1594,6 +1766,8 @@ impl Runtime {
             metrics.deactivate();
         }
         self.core.force_shutdown();
+        self.sidecar.force_shutdown();
+        self.sidecar_ports.clear();
         self.clear_live_connections();
         self.traffic_prev = None;
         self.traffic_speed = (0, 0);
@@ -1655,6 +1829,132 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         block_quic: store.settings.block_quic,
         bypass_lan: store.settings.bypass_lan,
         tun_interface_name: None,
+        sidecar: None,
+    }
+}
+
+/// Delegated nodes per sidecar plan cap this high; the rest stay native.
+/// Not a functional limit — each delegated node costs one sing-box socks
+/// outbound, one Xray inbound/outbound pair and one loopback port, all cheap
+/// — it only guards against pathological stores (five-figure subscriptions)
+/// where config size and startup time would degrade for everyone.
+const SIDECAR_MAX_NODES: usize = 1024;
+
+/// Compute which enabled nodes delegate to the companion Xray sidecar and
+/// which loopback port each one gets. `None` = no sidecar (fully native
+/// sing-box config):
+/// - sidecar disabled in settings, or core_type/runtime_source is not the
+///   generated sing-box path (mihomo/Xray main modes never delegate);
+/// - no enabled node qualifies (protocol not in the delegation set, Xray
+///   can't speak the exact protocol/transport combination, pinned by a
+///   chain hop, WireGuard endpoint, or above [`SIDECAR_MAX_NODES`]).
+///
+/// Nodes dropped from the plan silently fall back to their native sing-box
+/// outbound (they keep the same tag either way), with a warn log each.
+pub(crate) fn compute_sidecar_plan(
+    settings: &crate::domain::AppSettings,
+    chains: &[crate::domain::ProxyChain],
+    nodes: &[ProxyNode],
+) -> Option<SidecarPlan> {
+    if !settings.multi_core_enabled {
+        return None;
+    }
+    if CoreKind::parse(&settings.core_type) != CoreKind::SingBox
+        || settings.runtime_source().is_custom()
+    {
+        return None;
+    }
+    // Only entries pinned to a non-main core delegate. v1 supports exactly
+    // one sidecar target (Xray); future cores slot in here as additional
+    // sidecar processes.
+    let wanted: std::collections::HashSet<&str> = settings
+        .protocol_cores
+        .iter()
+        .filter(|e| e.core == CoreKind::Xray.as_str())
+        .map(|e| e.protocol.as_str())
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    // Chain hop pins keep native semantics (v1): a detour chain that routed
+    // through a loopback socks hop would technically work, but the hop dial
+    // direction gets confusing to reason about and to diagnose.
+    let chain_node_ids: std::collections::HashSet<&str> = chains
+        .iter()
+        .flat_map(|c| c.hops.iter())
+        .filter_map(|h| match h {
+            ChainHop::Node { node_id } => Some(node_id.as_str()),
+            ChainHop::Pool { .. } => None,
+        })
+        .collect();
+
+    let base = settings.sidecar_port;
+    // Ports the main config (or the app) already owns — claiming one would
+    // only surface as a sidecar bind FATAL after the main core is up, so
+    // such nodes stay native instead.
+    let mut reserved: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    reserved.insert(settings.mixed_port);
+    reserved.insert(settings.api_port);
+    reserved.insert(crate::config::DIAG_INBOUND_PORT);
+    for inb in &settings.extra_inbounds {
+        reserved.insert(inb.port);
+    }
+
+    let mut ports: Vec<(String, u16)> = Vec::new();
+    // Sidecar ports are base + i over *candidate* nodes, not delegated ones:
+    // skipping a reserved port must not stall (or shift) the range.
+    let mut next_index: u32 = 0;
+    for node in nodes {
+        // Delegation follows ONLY the user's per-protocol pinning — no
+        // per-transport special cases. Nodes the main core can't serve
+        // natively (e.g. xhttp under sing-box) are filtered at config
+        // generation with a logged reason unless their protocol is pinned
+        // to the sidecar here.
+        if !wanted.contains(node.protocol.as_str()) {
+            continue;
+        }
+        if node.protocol == Protocol::WireGuard {
+            continue;
+        }
+        if chain_node_ids.contains(node.id.as_str()) {
+            continue;
+        }
+        if !CoreKind::Xray.supports_node(node) {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("节点「{}」的协议组合 Xray 不支持，保持原生出站", node.name),
+            );
+            continue;
+        }
+        let Some(delta) = u16::try_from(next_index).ok() else {
+            crate::app_log::warn("xray_sidecar", "委托端口超出 u16 范围，提前截断委托计划");
+            break;
+        };
+        let Some(port) = base.checked_add(delta) else {
+            crate::app_log::warn("xray_sidecar", "委托端口超出 u16 范围，提前截断委托计划");
+            break;
+        };
+        next_index += 1;
+        if reserved.contains(&port) {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("候选端口 {port} 与主配置监听端口冲突，该节点保持原生出站"),
+            );
+            continue;
+        }
+        ports.push((node.id.clone(), port));
+        if ports.len() >= SIDECAR_MAX_NODES {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("委托节点超过 {SIDECAR_MAX_NODES} 个上限，其余保持 sing-box 原生出站"),
+            );
+            break;
+        }
+    }
+    if ports.is_empty() {
+        None
+    } else {
+        Some(SidecarPlan { ports })
     }
 }
 
@@ -1907,6 +2207,195 @@ mod clash_api_secret_tests {
         store.settings.clash_api_secret = Some("kept-secret".into());
         let secret = resolve_clash_api_secret(&mut store);
         assert_eq!(secret, "kept-secret");
+    }
+}
+
+#[cfg(test)]
+mod sidecar_plan_tests {
+    use super::*;
+    use crate::domain::{ProtocolConfig, ProxyChain, TlsConfig, Transport};
+
+    fn node(id: &str, protocol: Protocol) -> ProxyNode {
+        let config = match protocol {
+            Protocol::Vless => ProtocolConfig::Vless {
+                uuid: "uuid-1".into(),
+                flow: None,
+                packet_encoding: "xudp".into(),
+            },
+            _ => ProtocolConfig::Shadowsocks {
+                method: "aes-256-gcm".into(),
+                password: "pw".into(),
+                plugin: None,
+                plugin_opts: None,
+                shadow_tls: None,
+            },
+        };
+        ProxyNode {
+            id: id.into(),
+            name: format!("n-{id}"),
+            protocol,
+            server: "example.com".into(),
+            port: 443,
+            tls: None,
+            transport: None,
+            udp: Some(true),
+            config,
+            source: None,
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    fn sidecar_store() -> AppStore {
+        let mut store = AppStore::default();
+        store.settings.multi_core_enabled = true;
+        store.settings.protocol_cores = vec![crate::domain::ProtocolCoreItem {
+            protocol: "vless".into(),
+            core: "xray".into(),
+        }];
+        store.settings.sidecar_port = 20890;
+        store
+    }
+
+    #[test]
+    fn disabled_or_non_singbox_core_yields_no_plan() {
+        let mut store = sidecar_store();
+        let nodes = vec![node("n1", Protocol::Vless)];
+        store.settings.multi_core_enabled = false;
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &nodes).is_none());
+
+        store.settings.multi_core_enabled = true;
+        store.settings.core_type = "xray".into();
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &nodes).is_none());
+    }
+
+    #[test]
+    fn only_delegated_protocols_get_ports_in_input_order() {
+        let store = sidecar_store();
+        let nodes = vec![
+            node("ss1", Protocol::Shadowsocks),
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(
+            plan.ports,
+            vec![("vl1".into(), 20890), ("vl2".into(), 20891)]
+        );
+    }
+
+    #[test]
+    fn xray_unsupported_combo_falls_back_to_native() {
+        // REALITY over ws is exactly the combination CoreKind::Xray rejects —
+        // the plan must drop it (native sing-box outbound) rather than emit a
+        // sidecar inbound the Xray config can't map.
+        let store = sidecar_store();
+        let mut n = node("vl", Protocol::Vless);
+        n.tls = Some(TlsConfig {
+            enabled: true,
+            server_name: Some("sni.example.com".into()),
+            insecure: None,
+            alpn: None,
+            utls_fingerprint: None,
+            reality_public_key: Some("pbk".into()),
+            reality_short_id: Some("abcd".into()),
+        });
+        n.transport = Some(Transport::Ws {
+            path: None,
+            headers: None,
+            max_early_data: None,
+        });
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &[n]).is_none());
+    }
+
+    #[test]
+    fn chain_pinned_nodes_stay_native() {
+        let mut store = sidecar_store();
+        store.chains = vec![ProxyChain::new(
+            "链",
+            vec![
+                ChainHop::Node {
+                    node_id: "vl1".into(),
+                },
+                ChainHop::Node {
+                    node_id: "ss1".into(),
+                },
+            ],
+        )];
+        let nodes = vec![
+            node("ss1", Protocol::Shadowsocks),
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports, vec![("vl2".into(), 20890)]);
+    }
+
+    #[test]
+    fn plan_caps_at_max_nodes() {
+        let store = sidecar_store();
+        let nodes: Vec<ProxyNode> = (0..(SIDECAR_MAX_NODES + 5))
+            .map(|i| node(&format!("n{i}"), Protocol::Vless))
+            .collect();
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports.len(), SIDECAR_MAX_NODES);
+    }
+
+    #[test]
+    fn xhttp_nodes_follow_the_protocol_pin_only() {
+        // No per-transport special cases: an xhttp node delegates exactly
+        // when its PROTOCOL is pinned to Xray. vless is pinned here (goes to
+        // the sidecar); shadowsocks is not (stays native — and since
+        // sing-box can't speak xhttp, generation filters that node out).
+        let store = sidecar_store();
+        let mut vl_xhttp = node("vl1", Protocol::Vless);
+        vl_xhttp.transport = Some(crate::domain::Transport::Xhttp {
+            path: None,
+            host: None,
+            mode: None,
+        });
+        let mut ss_xhttp = node("ss1", Protocol::Shadowsocks);
+        ss_xhttp.transport = Some(crate::domain::Transport::Xhttp {
+            path: None,
+            host: None,
+            mode: None,
+        });
+        let nodes = vec![vl_xhttp, ss_xhttp];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports, vec![("vl1".into(), 20890)]);
+    }
+
+    #[test]
+    fn reserved_ports_are_skipped_without_stalling_the_range() {
+        // The second candidate port (base+1) collides with the Clash API
+        // port: that node stays native, later nodes keep their own indexes —
+        // the range must not shift, stall, or reuse the reserved port.
+        let mut store = sidecar_store(); // base 20890
+        store.settings.api_port = 20891;
+        store.settings.extra_inbounds = vec![crate::domain::ExtraInbound {
+            id: "x".into(),
+            kind: "mixed".into(),
+            port: 20894,
+            allow_lan: false,
+        }];
+        let nodes = vec![
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+            node("vl3", Protocol::Vless),
+            node("vl4", Protocol::Vless),
+            node("vl5", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(
+            plan.ports,
+            vec![
+                ("vl1".into(), 20890),
+                // 20891 = api port → vl2 native
+                ("vl3".into(), 20892),
+                ("vl4".into(), 20893),
+                // 20894 = extra inbound → vl5 native
+            ]
+        );
     }
 }
 

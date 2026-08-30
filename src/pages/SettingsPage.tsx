@@ -18,6 +18,7 @@ import {
   updateSettings,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
+import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { SolidSelect } from "../components/SolidSelect";
 import { GlassSeg } from "../components/GlassSeg";
 import { GlassSwitchControl } from "../components/GlassSwitchControl";
@@ -46,9 +47,23 @@ import { ChainPage } from "./ChainPage";
 import { DnsPage } from "./DnsPage";
 import { HostsPage } from "./HostsPage";
 
-type SettingsTab = "app" | "ports" | "rules" | "chain" | "dns" | "hosts" | "core";
+type SettingsTab =
+  | "app"
+  | "ports"
+  | "rules"
+  | "chain"
+  | "multiCore"
+  | "dns"
+  | "hosts"
+  | "core";
 
-const CUSTOM_BLOCKED_TABS = new Set(["rules", "chain", "dns", "hosts"]);
+const CUSTOM_BLOCKED_TABS = new Set([
+  "rules",
+  "chain",
+  "multiCore",
+  "dns",
+  "hosts",
+]);
 
 /** Repository link shown in the bottom-right corner of the settings page. */
 const PROJECT_URL = "https://github.com/zn0wii/satelite-proxy/";
@@ -144,6 +159,8 @@ export function SettingsPage() {
   const [blockQuic, setBlockQuic] = useState(false);
   /** Bypass localhost and LAN segments with built-in direct rules. */
   const [bypassLan, setBypassLan] = useState(true);
+  /** Xray sidecar base port — committed on blur/Enter (see onCommitSidecarPort). */
+  const [sidecarPort, setSidecarPort] = useState("20890");
   /** Extra inbound drafts — applied on card save (needs core restart). */
   const [extra, setExtra] = useState<ExtraInbound[]>([]);
   // Extra-inbound editor modal (add / edit share one form).
@@ -172,6 +189,7 @@ export function SettingsPage() {
   const [coreCheckingKind, setCoreCheckingKind] = useState<CoreKind | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
   const [coreProxyAvailable, setCoreProxyAvailable] = useState(false);
+  const [sidecarRunning, setSidecarRunning] = useState(false);
   const [coreProgress, setCoreProgress] =
     useState<CoreDownloadProgress | null>(null);
 
@@ -213,6 +231,11 @@ export function SettingsPage() {
           id: "chain" as const,
           label: t("settings.tabChain"),
           hint: t("settings.hintChain"),
+        },
+        {
+          id: "multiCore" as const,
+          label: t("settings.tabMultiCore"),
+          hint: t("settings.hintMultiCore"),
         },
         {
           id: "dns" as const,
@@ -294,6 +317,7 @@ export function SettingsPage() {
         setBlockQuic(!!s.block_quic);
         setBypassLan(s.bypass_lan !== false);
         setExtra(s.extra_inbounds ?? []);
+        setSidecarPort(String(s.sidecar_port ?? 20890));
       })
       .catch((e) => setError(typeof e === "string" ? e : String(e)));
     void reloadCore();
@@ -330,12 +354,23 @@ export function SettingsPage() {
     void runAppUpdateCheck(false);
   }, [tab, runAppUpdateCheck]);
 
-  useEffect(() => {
-    if (tab !== "core") return;
-    void getProxyStatus()
-      .then((status) => setCoreProxyAvailable(status.running))
-      .catch(() => setCoreProxyAvailable(false));
-  }, [tab]);
+  // Poll on both the core and multi-core tabs: the multi-core tab's running
+  // pill must follow the debounced restart that enabling the switch triggers
+  // (stop → regenerate → main core health → sidecar spawn takes a few
+  // seconds after the toggle lands).
+  useVisibleInterval(
+    () =>
+      getProxyStatus()
+        .then((status) => {
+          setCoreProxyAvailable(status.running);
+          setSidecarRunning(!!status.sidecar_running);
+        })
+        .catch(() => {
+          setCoreProxyAvailable(false);
+          setSidecarRunning(false);
+        }),
+    tab === "core" || tab === "multiCore" ? 2000 : null,
+  );
 
   // Close the inbound-row ⋮ menu on outside pointer-down / Escape.
   useEffect(() => {
@@ -762,7 +797,9 @@ export function SettingsPage() {
                   ? t("settings.corePreparing")
                   : progress.stage === "installing"
                     ? t("settings.coreInstalling")
-                    : t("settings.coreDownloading")}
+                    : progress.stage === "assets"
+                      ? t("settings.coreAssets")
+                      : t("settings.coreDownloading")}
               </span>
               <span className="mono core-download-percent">
                 {progress.percent != null
@@ -831,6 +868,54 @@ export function SettingsPage() {
         /* ignore */
       }
     }
+  }
+
+  /** Protocols a sidecar core can carry (CoreKind=Xray support surface).
+   *  Nodes whose exact transport combo Xray rejects (e.g. REALITY+ws) fall
+   *  back to native sing-box outbounds at build time. */
+  const MULTICORE_PROTOCOLS: { value: string; label: string }[] = [
+    { value: "vmess", label: "VMess" },
+    { value: "vless", label: "VLESS" },
+    { value: "shadowsocks", label: "Shadowsocks" },
+    { value: "trojan", label: "Trojan" },
+    { value: "hysteria2", label: "Hysteria2" },
+    { value: "socks5", label: "SOCKS5" },
+    { value: "http", label: "HTTP" },
+    { value: "wireguard", label: "WireGuard" },
+  ];
+  const delegatedProtocols = new Set(
+    (settings?.protocol_cores ?? [])
+      .filter((e) => e.core === "xray")
+      .map((e) => e.protocol),
+  );
+  /** Multi-core only exists under the sing-box main core; switching cores
+   *  auto-disables it (backend mirrors this in set_core_type). */
+  const multiCoreAvailable = (settings?.core_type ?? "singbox") === "singbox";
+
+  /** Row change in the multi-core table: "auto" removes the delegation
+   *  (protocol follows the main core), anything else pins it. */
+  function onProtocolCoreChange(protocol: string, core: string) {
+    const rest = (settings?.protocol_cores ?? []).filter(
+      (e) => e.protocol !== protocol,
+    );
+    const next =
+      core === "auto" ? rest : [...rest, { protocol, core }];
+    void patchApp({ protocolCores: next });
+  }
+
+  async function onCommitSidecarPort() {
+    const parsed = Number.parseInt(sidecarPort, 10);
+    const current = settings?.sidecar_port ?? 20890;
+    if (
+      !Number.isFinite(parsed) ||
+      parsed <= 0 ||
+      parsed > 65535 ||
+      parsed === current
+    ) {
+      setSidecarPort(String(current));
+      return;
+    }
+    await patchApp({ sidecarPort: parsed });
   }
 
   async function onChangeLocale(next: Locale) {
@@ -911,6 +996,7 @@ export function SettingsPage() {
             ? {
                 rules: t("config.customDisabled"),
                 chain: t("config.customDisabled"),
+                multiCore: t("config.customDisabled"),
                 dns: t("config.customDisabled"),
                 hosts: t("config.customDisabled"),
               }
@@ -922,6 +1008,7 @@ export function SettingsPage() {
       {error &&
         visibleTab !== "rules" &&
         visibleTab !== "chain" &&
+        visibleTab !== "multiCore" &&
         visibleTab !== "dns" &&
         visibleTab !== "hosts" && (
         <ErrorModal message={error} onClose={() => setError(null)} />
@@ -936,7 +1023,10 @@ export function SettingsPage() {
               ? " settings-ports-page"
               : ""
         }${
-          visibleTab === "rules" || visibleTab === "chain" || visibleTab === "dns"
+          visibleTab === "rules" ||
+          visibleTab === "chain" ||
+          visibleTab === "multiCore" ||
+          visibleTab === "dns"
             ? " settings-scroll-embed"
             : ""
         }`}
@@ -945,6 +1035,130 @@ export function SettingsPage() {
         {!customRuntime && visibleTab === "rules" && <RulesPage embedded />}
 
         {!customRuntime && visibleTab === "chain" && <ChainPage embedded />}
+
+        {visibleTab === "multiCore" && settings && (
+          <section className="settings-panel" aria-label="Multi-core">
+            <div className="card sidecar-card">
+              <div className="via-proxy-row">
+                <div>
+                  <div className="sys-proxy-title">
+                    {t("settings.multiCore")}
+                    {settings.multi_core_enabled && (
+                      <span
+                        className={`pill sidecar-pill${sidecarRunning ? " ok" : ""}`}
+                      >
+                        {sidecarRunning
+                          ? t("settings.multiCoreRunning")
+                          : t("settings.multiCoreIdle")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="sys-proxy-desc">
+                    {t("settings.multiCoreDesc")}
+                  </div>
+                </div>
+                <GlassSwitchControl
+                  checked={!!settings.multi_core_enabled}
+                  title={t("settings.multiCore")}
+                  disabled={customRuntime || !multiCoreAvailable}
+                  onChange={(v) => void patchApp({ multiCoreEnabled: v })}
+                />
+              </div>
+
+              {!multiCoreAvailable && (
+                <div className="field-hint muted">
+                  {t("settings.multiCoreSingboxOnly")}
+                </div>
+              )}
+
+              {settings.multi_core_enabled && (
+                <div className="sidecar-body">
+                  <div className="table-wrap">
+                    <table className="multicore-table">
+                      <colgroup>
+                        <col />
+                        <col style={{ width: 170 }} />
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th>{t("settings.multiCoreProtocolCol")}</th>
+                          <th>{t("settings.multiCoreCoreCol")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {MULTICORE_PROTOCOLS.map((p) => (
+                          <tr key={p.value}>
+                            <td>
+                              <code>{p.label}</code>
+                              {delegatedProtocols.has(p.value) ? (
+                                <span className="pill sidecar-pill sidecar-tag">
+                                  Xray
+                                </span>
+                              ) : null}
+                            </td>
+                            <td>
+                              <SolidSelect
+                                value={
+                                  delegatedProtocols.has(p.value)
+                                    ? "xray"
+                                    : "auto"
+                                }
+                                aria-label={p.label}
+                                disabled={customRuntime}
+                                onChange={(v) =>
+                                  onProtocolCoreChange(p.value, v)
+                                }
+                                options={[
+                                  {
+                                    value: "auto",
+                                    label: t("settings.multiCoreFollowMain"),
+                                  },
+                                  { value: "xray", label: "Xray" },
+                                ]}
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="field-hint muted">
+                    {t("settings.multiCoreTableHint")}
+                  </div>
+                  {delegatedProtocols.size === 0 && (
+                    <div className="field-hint sidecar-warn">
+                      {t("settings.multiCoreNoProtocols")}
+                    </div>
+                  )}
+                  <label className="field field-inline">
+                    <span className="field-inline-row">
+                      <span className="field-inline-label">
+                        {t("settings.multiCorePort")}
+                      </span>
+                      <input
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        inputMode="numeric"
+                        className="mono"
+                        value={sidecarPort}
+                        onChange={(e) => setSidecarPort(e.target.value)}
+                        onBlur={() => void onCommitSidecarPort()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter")
+                            (e.target as HTMLInputElement).blur();
+                        }}
+                      />
+                    </span>
+                    <span className="field-hint muted">
+                      {t("settings.multiCorePortHint")}
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
         {!customRuntime && visibleTab === "dns" && (
           <DnsPage embedded />
         )}

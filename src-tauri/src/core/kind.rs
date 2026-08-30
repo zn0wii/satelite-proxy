@@ -256,11 +256,13 @@ impl CoreKind {
     }
 
     /// Whether this core can serve the NODE as a whole — protocol plus the
-    /// per-node shapes a core cannot represent. sing-box serves everything;
-    /// Xray rejects REALITY over non-tcp/grpc and hysteria2 with obfs
+    /// per-node shapes a core cannot represent. Xray rejects REALITY over
+    /// transports other than tcp/grpc/xhttp and hysteria2 with obfs
     /// (generation-time rules); mihomo (canonical Clash Meta, proper uTLS)
-    /// only lacks our ss+shadow-tls detour shape — REALITY/Vision and every
-    /// vmess transport are fine.
+    /// lacks our ss+shadow-tls detour shape and the xhttp transport;
+    /// sing-box serves every protocol it parses except xhttp — those nodes
+    /// stay listed and are force-delegated to the Xray sidecar when
+    /// multi-core mode is on (the sing-box generator rejects them natively).
     pub fn supports_node(self, node: &crate::domain::ProxyNode) -> bool {
         if !self.supports(node.protocol) {
             return false;
@@ -275,6 +277,7 @@ impl CoreKind {
                     node.transport.as_ref(),
                     None | Some(crate::domain::Transport::Tcp)
                         | Some(crate::domain::Transport::Grpc { .. })
+                        | Some(crate::domain::Transport::Xhttp { .. })
                 )
             {
                 return false;
@@ -293,6 +296,11 @@ impl CoreKind {
                 ..
             }
         ) && matches!(self, Self::Mihomo | Self::Xray)
+        {
+            return false;
+        }
+        if matches!(self, Self::Mihomo)
+            && matches!(node.transport, Some(crate::domain::Transport::Xhttp { .. }))
         {
             return false;
         }

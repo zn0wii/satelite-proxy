@@ -266,7 +266,11 @@ pub fn download_missing_mihomo_geodata(
             continue;
         }
         let url = format!("{MIHOMO_GEODATA_BASE_URL}/{file}");
-        let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(120));
+        // 30s: this download sits inside the core-start path holding the
+        // store/runtime locks. 120s × 2 files let a blocked GitHub route
+        // (CN direct) stall the restart for minutes with the UI busy.
+        // The files are ~8MB/~4MB — 30s is ample on any working route.
+        let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(30));
         if let Some(proxy) = proxy_url {
             let proxy = ureq::Proxy::new(proxy)
                 .map_err(|e| AppError::Core(format!("mihomo geodata proxy: {e}")))?;
@@ -360,6 +364,50 @@ pub fn mihomo_geodata_state(app_data_dir: &Path) -> [(&'static str, GeodataFileS
         Ok(arr) => arr,
         Err(_) => unreachable!("MIHOMO_GEODATA_FILES has exactly 2 entries"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Post-download prefetch: fetch a core's runtime assets right after the core
+// itself is installed (settings → core download/update), so the first start
+// doesn't discover-and-download them while holding the store/runtime locks
+// (AGENTS.md §9.22).
+// ---------------------------------------------------------------------------
+
+/// Fetch whatever network assets `kind` needs at start time. Best-effort:
+/// returns one warning string per failed asset; the startup `ensure_*`
+/// calls remain as the fallback when something fails here.
+pub fn prefetch_runtime_assets(
+    kind: crate::core::CoreKind,
+    app_data_dir: &Path,
+    resource_dir: Option<&Path>,
+    proxy_url: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    match kind {
+        crate::core::CoreKind::Xray => {
+            if let Err(error) = ensure_geodata(app_data_dir, resource_dir, proxy_url) {
+                warnings.push(format!("xray geodata prefetch failed: {error}"));
+            }
+        }
+        crate::core::CoreKind::Mihomo => {
+            if let Err(error) = download_missing_mihomo_geodata(app_data_dir, proxy_url, false) {
+                warnings.push(format!("mihomo geodata prefetch failed: {error}"));
+            }
+        }
+        crate::core::CoreKind::SingBox => {}
+    }
+    // wintun.dll (Windows TUN) is shared by Xray and mihomo — prefetch it for
+    // both so enabling TUN never triggers a download on core start.
+    #[cfg(target_os = "windows")]
+    if matches!(
+        kind,
+        crate::core::CoreKind::Xray | crate::core::CoreKind::Mihomo
+    ) {
+        if let Err(error) = ensure_wintun(app_data_dir, resource_dir, proxy_url) {
+            warnings.push(format!("wintun prefetch failed: {error}"));
+        }
+    }
+    warnings
 }
 
 /// Xray's native tun inbound loads wintun.dll on Windows (not shipped in the

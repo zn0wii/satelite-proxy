@@ -88,6 +88,29 @@ pub fn active_yaml_config_path(app_data_dir: &Path) -> PathBuf {
     config_dir(app_data_dir).join("active.yaml")
 }
 
+/// Config path for the Xray sidecar companion process. Never touches
+/// `active.*` — the sidecar dialect is a strict subset generated whole on
+/// every start (same rewrite policy as the other config files).
+pub fn xray_sidecar_config_path(app_data_dir: &Path) -> PathBuf {
+    config_dir(app_data_dir).join("xray-sidecar.json")
+}
+
+/// Write the Xray sidecar config (tmp+rename, no backup churn — the file is
+/// fully derived from the main config's build plan and cheap to regenerate).
+pub fn write_xray_sidecar_config(app_data_dir: &Path, built: &BuiltConfig) -> AppResult<PathBuf> {
+    let dir = config_dir(app_data_dir);
+    fs::create_dir_all(&dir)?;
+
+    let raw = serde_json::to_string_pretty(&built.value)
+        .map_err(|e| AppError::Config(format!("serialize sidecar config: {e}")))?;
+
+    let path = xray_sidecar_config_path(app_data_dir);
+    let tmp = dir.join("xray-sidecar.json.tmp");
+    fs::write(&tmp, raw)?;
+    fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// Write active.yaml and a timestamped backup (mirrors write_active_config).
 pub fn write_active_yaml_config(app_data_dir: &Path, raw: &str) -> AppResult<PathBuf> {
     let dir = config_dir(app_data_dir);

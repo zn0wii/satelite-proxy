@@ -38,6 +38,7 @@ const NETWORKS = [
   { value: "grpc", label: "gRPC" },
   { value: "http", label: "HTTP" },
   { value: "httpupgrade", label: "HTTPUpgrade" },
+  { value: "xhttp", label: "XHTTP (仅 Xray)" },
 ];
 const FINGERPRINTS = [
   "chrome",
@@ -660,7 +661,8 @@ export function NodeDraftFields({ value, disabled, onChange }: Props) {
           </label>
           {(value.network === "ws" ||
             value.network === "http" ||
-            value.network === "httpupgrade") && (
+            value.network === "httpupgrade" ||
+            value.network === "xhttp") && (
             <div className="field-grid">
               <label className="field">
                 <span>路径</span>

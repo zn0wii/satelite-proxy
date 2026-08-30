@@ -274,6 +274,12 @@ export interface SettingsUpdatePayload {
   routeFinal?: string | null;
   /** Resolve originating process per connection (find_process_mode). */
   findProcess?: boolean | null;
+  /** Multi-core mode master switch (sing-box main mode). */
+  multiCoreEnabled?: boolean | null;
+  /** Per-protocol core routing rows (delegations only). */
+  protocolCores?: import("./types").ProtocolCoreItem[] | null;
+  /** Base loopback port for the sidecar's per-node inbounds. */
+  sidecarPort?: number | null;
 }
 
 type SettingsWaiter = {
@@ -325,6 +331,9 @@ function scheduleSettingsWrite() {
       autoSelect: payload.autoSelect ?? null,
       routeFinal: payload.routeFinal ?? null,
       findProcess: payload.findProcess ?? null,
+      multiCoreEnabled: payload.multiCoreEnabled ?? null,
+      protocolCores: payload.protocolCores ?? null,
+      sidecarPort: payload.sidecarPort ?? null,
     })
       .then((settings) => {
         settingsSnapshot = settings;
@@ -405,15 +414,25 @@ export function clearAppLogs() {
   return invoke<void>("clear_app_logs");
 }
 
+/** Truncate the current-hour log file of the given core (multi-core aware). */
+export function clearCoreLog(kind: string) {
+  return invoke<void>("clear_core_log", { kind });
+}
+
 export interface CoreLogTail {
   /** Absolute path of the core's hourly log file, when a session exists. */
   path: string | null;
   lines: string[];
 }
 
-/** Tail of the active core's log (Xray-mode traffic page stand-in). */
-export function getCoreLogTail(limit?: number | null) {
-  return invoke<CoreLogTail>("get_core_log_tail", { limit: limit ?? null });
+/** Tail of a core's log (Xray-mode traffic page stand-in; logs page core
+ *  view). `kind` picks which core's file under multi-core mode — omit for
+ *  the main core's log (legacy behavior). */
+export function getCoreLogTail(limit?: number | null, kind?: string | null) {
+  return invoke<CoreLogTail>("get_core_log_tail", {
+    limit: limit ?? null,
+    kind: kind ?? null,
+  });
 }
 
 export function generateSingboxConfig() {
@@ -513,6 +532,18 @@ export function testNodesLatency(ids?: string[] | null, timeoutMs?: number | nul
     timeout_ms: timeoutMs ?? null,
   };
   return invoke<LatencyBatchResult>("test_nodes_latency", args);
+}
+
+/** Fast "Ping 测试": direct TCP connect (30 concurrent), never through the
+ * kernel even while the core is running — raw reachability, not real proxy
+ * latency. Same result shape as testNodesLatency. */
+export function pingNodesLatency(ids?: string[] | null, timeoutMs?: number | null) {
+  const args: Record<string, unknown> = {
+    ids: ids ?? null,
+    timeoutMs: timeoutMs ?? null,
+    timeout_ms: timeoutMs ?? null,
+  };
+  return invoke<LatencyBatchResult>("ping_nodes_latency", args);
 }
 
 /** Same TCP probe, for nodes extracted from the selected custom sing-box config (results not persisted). */

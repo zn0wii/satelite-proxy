@@ -494,7 +494,17 @@ fn parse_vmess_uri(line: &str) -> Result<ProxyNode, String> {
             path,
             host: host_header.map(|h| vec![h]),
         }),
-        _ => Some(Transport::Tcp),
+        "httpupgrade" => Some(Transport::HttpUpgrade {
+            path,
+            host: host_header,
+        }),
+        "xhttp" | "splithttp" => Some(Transport::Xhttp {
+            path,
+            host: host_header,
+            mode: None,
+        }),
+        "tcp" | "" => Some(Transport::Tcp),
+        other => return Err(format!("unsupported transport: {other}")),
     };
 
     let tls = if tls_enabled {
@@ -613,7 +623,17 @@ fn parse_vless_uri(line: &str) -> Result<ProxyNode, String> {
             path: query.get("path").cloned(),
             host: query.get("host").map(|h| vec![h.clone()]),
         }),
-        _ => Some(Transport::Tcp),
+        "httpupgrade" => Some(Transport::HttpUpgrade {
+            path: query.get("path").cloned(),
+            host: query.get("host").cloned(),
+        }),
+        "xhttp" | "splithttp" => Some(Transport::Xhttp {
+            path: query.get("path").cloned(),
+            host: query.get("host").cloned(),
+            mode: query.get("mode").cloned(),
+        }),
+        "tcp" | "" => Some(Transport::Tcp),
+        other => return Err(format!("unsupported transport: {other}")),
     };
 
     Ok(ProxyNode {
@@ -697,7 +717,21 @@ fn parse_trojan_uri(line: &str) -> Result<ProxyNode, String> {
         "grpc" => Some(Transport::Grpc {
             service_name: query.get("serviceName").cloned(),
         }),
-        _ => Some(Transport::Tcp),
+        "http" | "h2" => Some(Transport::Http {
+            path: query.get("path").cloned(),
+            host: query.get("host").map(|h| vec![h.clone()]),
+        }),
+        "httpupgrade" => Some(Transport::HttpUpgrade {
+            path: query.get("path").cloned(),
+            host: query.get("host").cloned(),
+        }),
+        "xhttp" | "splithttp" => Some(Transport::Xhttp {
+            path: query.get("path").cloned(),
+            host: query.get("host").cloned(),
+            mode: query.get("mode").cloned(),
+        }),
+        "tcp" | "" => Some(Transport::Tcp),
+        other => return Err(format!("unsupported transport: {other}")),
     };
 
     Ok(ProxyNode {
@@ -1129,6 +1163,37 @@ mod tests {
         let node = parse_uri_line(uri).unwrap();
         assert_eq!(node.protocol, Protocol::Trojan);
         assert_eq!(node.name, "TJ");
+    }
+
+    #[test]
+    fn vless_xhttp_link_parses_and_unknown_type_rejected() {
+        // type=xhttp used to silently become Transport::Tcp — the node parsed
+        // fine and then could never connect. It is representable now (Xray
+        // serves it via multi-core delegation).
+        let uri = "vless://22222222-2222-2222-2222-222222222222@vl.example.com:443?encryption=none&security=tls&sni=cdn.example.com&type=xhttp&path=%2Fupload&mode=stream-up#VL-XHTTP";
+        let node = parse_uri_line(uri).unwrap();
+        match node.transport {
+            Some(Transport::Xhttp { path, host, mode }) => {
+                assert_eq!(path.as_deref(), Some("/upload"));
+                // No host param in this link (sni ≠ transport host).
+                assert_eq!(host, None);
+                assert_eq!(mode.as_deref(), Some("stream-up"));
+            }
+            other => panic!("expected xhttp transport, got {other:?}"),
+        }
+
+        // Unknown transports must be an explicit error, never a Tcp downgrade.
+        let uri = "vless://22222222-2222-2222-2222-222222222222@vl.example.com:443?type=kcp#VL-KCP";
+        let err = parse_uri_line(uri).unwrap_err();
+        assert!(err.contains("unsupported transport: kcp"), "got: {err}");
+
+        // httpupgrade is representable — must parse, not degrade.
+        let uri = "vless://22222222-2222-2222-2222-222222222222@vl.example.com:443?encryption=none&security=tls&type=httpupgrade&path=%2Fup&host=cdn.example.com#VL-UP";
+        let node = parse_uri_line(uri).unwrap();
+        assert!(matches!(
+            node.transport,
+            Some(Transport::HttpUpgrade { .. })
+        ));
     }
 
     #[test]

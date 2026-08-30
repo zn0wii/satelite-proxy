@@ -312,6 +312,36 @@ pub struct AppSettings {
     /// a running core); plain `update_settings` never touches it.
     #[serde(default = "default_core_type")]
     pub core_type: String,
+
+    /// Multi-core mode master switch (sing-box main mode only): protocols
+    /// pinned to a non-main core in `protocol_cores` are forwarded through a
+    /// companion core process via loopback socks outbounds. Off (default) =
+    /// every protocol follows the main core, unchanged behavior.
+    #[serde(default)]
+    pub multi_core_enabled: bool,
+    /// Per-protocol core routing entries of the multi-core table. Only
+    /// actual delegations are stored (v1: `core == "xray"`); protocols
+    /// without an entry follow the main core. Per-node core support is
+    /// re-checked at build time (REALITY+ws etc. fall back native).
+    #[serde(default)]
+    pub protocol_cores: Vec<ProtocolCoreItem>,
+    /// Base port for the sidecar's per-node loopback inbounds; delegated
+    /// node i listens on `base + i` (127.0.0.1 only).
+    #[serde(default = "default_sidecar_port")]
+    pub sidecar_port: u16,
+}
+
+/// One protocol→core row of the multi-core settings table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolCoreItem {
+    /// `Protocol::as_str` value (e.g. `vless`).
+    pub protocol: String,
+    /// `CoreKind::as_str` value the protocol is pinned to (v1: `xray`).
+    pub core: String,
+}
+
+fn default_sidecar_port() -> u16 {
+    20890
 }
 
 fn default_runtime_source() -> String {
@@ -454,6 +484,9 @@ impl Default for AppSettings {
             smart_switch: false,
             runtime_source: default_runtime_source(),
             core_type: default_core_type(),
+            multi_core_enabled: false,
+            protocol_cores: Vec::new(),
+            sidecar_port: default_sidecar_port(),
         }
     }
 }
@@ -507,6 +540,23 @@ impl AppSettings {
             _ => "proxy",
         }
     }
+
+    /// Multi-core delegation only exists under the sing-box main core — the
+    /// sidecar hangs off the sing-box generated config. `set_core_type` uses
+    /// this to auto-disable the mode when switching to another core (protocol
+    /// pins are kept so switching back only needs the switch re-flipped), and
+    /// `update_settings` rejects enabling it under any other core.
+    pub fn multi_core_available(&self) -> bool {
+        self.core_type == "singbox"
+    }
+
+    /// Keep `multi_core_enabled` consistent with `core_type` after a core
+    /// switch. Cheap no-op when the mode is off or sing-box stays active.
+    pub fn enforce_multi_core_scope(&mut self) {
+        if self.multi_core_enabled && !self.multi_core_available() {
+            self.multi_core_enabled = false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +585,33 @@ mod tests {
         settings.migrate_capture_mode();
         assert_eq!(settings.capture_mode, CaptureMode::System);
         assert!(!settings.tun_enabled);
+    }
+
+    #[test]
+    fn core_switch_auto_disables_multi_core_but_keeps_pins() {
+        let mut settings = AppSettings {
+            core_type: "singbox".into(),
+            multi_core_enabled: true,
+            protocol_cores: vec![ProtocolCoreItem {
+                protocol: "vless".into(),
+                core: "xray".into(),
+            }],
+            ..AppSettings::default()
+        };
+        assert!(settings.multi_core_available());
+
+        // Switching to Xray flips the mode off but keeps the table pins so
+        // switching back to sing-box restores the previous selection.
+        settings.core_type = "xray".into();
+        settings.enforce_multi_core_scope();
+        assert!(!settings.multi_core_enabled);
+        assert_eq!(settings.protocol_cores.len(), 1);
+
+        // Back on sing-box the user only needs to re-enable the switch.
+        settings.core_type = "singbox".into();
+        settings.multi_core_enabled = true;
+        settings.enforce_multi_core_scope();
+        assert!(settings.multi_core_enabled);
     }
 
     #[test]

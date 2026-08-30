@@ -64,7 +64,7 @@ pub async fn list_request_failures(
     .map_err(|e| format!("list request failures task: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_request_history(state: State<'_, AppState>) -> Result<(), String> {
     state
         .clear_request_history_nonblocking()

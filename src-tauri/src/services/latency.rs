@@ -8,8 +8,10 @@
 //!   mapping into the running config (custom sing-box profiles). UDP-only
 //!   protocols (hysteria/hysteria2/tuic) have no TCP fallback at all —
 //!   without the core they report an explicit "start the proxy" error.
-//! - **Smart switch**: passes the clash API when the core is up, so its
-//!   candidate scoring rides the same through-kernel probes.
+//! - **Smart switch**: ranks candidates with [`probe_nodes_ranked`] — TCP
+//!   ping for TCP-capable nodes (a better speed correlate in practice), the
+//!   through-kernel URL probe only for QUIC-only protocols and for the
+//!   current node's health confirmation.
 //!
 //! Clash path uses **unified delay** (like mihomo / FlClash): probe twice and
 //! report the second RTT so handshake / cold-connect bias is reduced.
@@ -119,6 +121,93 @@ pub async fn probe_nodes(
         .collect();
     results.append(&mut task_errors);
     Ok(results)
+}
+
+/// Pure-TCP fast ping for the Nodes page "Ping 测试" button: direct TCP
+/// reachability, never routed through the kernel even when the core is
+/// running — that's the point (the through-kernel path is accurate but
+/// slow). Reuses the probe pool (caller-set concurrency, per-key coalescing
+/// and the shared `tcp|` cache). QUIC-only protocols have no TCP port to
+/// ping at all, so their `unsupported` note is rewritten from the
+/// "core not running" wording into a ping-appropriate one.
+pub async fn ping_nodes(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+) -> AppResult<Vec<LatencyResult>> {
+    let mut results = probe_nodes(nodes, timeout_ms, concurrency, None, String::new()).await?;
+    for r in &mut results {
+        if r.method == "unsupported" {
+            r.error =
+                Some("QUIC-only protocol: no TCP port to ping — use the real-latency test with the core running".into());
+        }
+    }
+    Ok(results)
+}
+
+/// Ranking probe for smart switch: TCP ping for every TCP-capable node —
+/// empirically a better speed correlate than through-kernel URL probes,
+/// whose numbers are dominated by probe-server and TLS variance — and the
+/// kernel URL probe only for QUIC-only protocols, which have no TCP port
+/// to ping. Keeps candidate ranking and the current-node comparison
+/// like-for-like (see smart_switch). `clash` serves the QUIC fallback;
+/// without it those nodes come back `unsupported`. Results keep the
+/// caller's node order.
+pub async fn probe_nodes_ranked(
+    nodes: &[ProxyNode],
+    timeout_ms: u64,
+    concurrency: usize,
+    clash: Option<ClashApi>,
+    probe_url: &str,
+) -> AppResult<Vec<LatencyResult>> {
+    if nodes.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut tcp_nodes = Vec::new();
+    let mut udp_nodes = Vec::new();
+    for node in nodes {
+        if node.protocol.is_udp_only() {
+            udp_nodes.push(node.clone());
+        } else {
+            tcp_nodes.push(node.clone());
+        }
+    }
+    let tcp_results = if tcp_nodes.is_empty() {
+        Vec::new()
+    } else {
+        ping_nodes(&tcp_nodes, Some(timeout_ms), Some(concurrency)).await?
+    };
+    let udp_results = if udp_nodes.is_empty() {
+        Vec::new()
+    } else {
+        probe_nodes(
+            &udp_nodes,
+            Some(timeout_ms),
+            Some(concurrency),
+            clash,
+            probe_url.to_string(),
+        )
+        .await?
+    };
+    // Merge back into the caller's order so index-based consumers are stable.
+    let by_id: HashMap<String, LatencyResult> = tcp_results
+        .into_iter()
+        .chain(udp_results)
+        .map(|r| (r.id.clone(), r))
+        .collect();
+    Ok(nodes
+        .iter()
+        .map(|n| {
+            by_id.get(&n.id).cloned().unwrap_or(LatencyResult {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                latency_ms: None,
+                error: Some("missing probe result".into()),
+                tested_at: now_secs(),
+                method: "error".into(),
+            })
+        })
+        .collect())
 }
 
 fn spawn_probe_task(
@@ -493,6 +582,38 @@ mod tests {
         assert_eq!(results[0].method, "unsupported");
         assert!(results[0].latency_ms.is_none());
         assert!(results[0].error.is_some());
+    }
+
+    // The ping button must not tell users to "start the core" — it never
+    // uses the core at all. QUIC-only protocols are simply unpingable.
+    #[tokio::test]
+    async fn ping_nodes_flags_quic_only_without_core_not_running_note() {
+        use crate::domain::Protocol;
+        let nodes = vec![node(Protocol::Hysteria2)];
+        let results = ping_nodes(&nodes, Some(200), Some(1)).await.unwrap();
+        assert_eq!(results[0].method, "unsupported");
+        let err = results[0].error.as_deref().unwrap_or_default();
+        assert!(
+            !err.contains("core not running"),
+            "ping note must not claim the core is stopped: {err}"
+        );
+    }
+
+    // Smart-switch ranking: TCP-capable nodes ride the fast TCP ping even
+    // when the clash API is available; QUIC-only nodes fall back to the
+    // through-kernel URL probe. Order follows the input.
+    #[tokio::test]
+    async fn ranked_probes_use_tcp_for_tcp_capable_and_clash_for_quic() {
+        use crate::domain::Protocol;
+        let clash = crate::api::ClashApi::new("127.0.0.1", 1, "secret");
+        let nodes = vec![node(Protocol::Shadowsocks), node(Protocol::Hysteria2)];
+        let results = probe_nodes_ranked(&nodes, 200, 2, Some(clash), "")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, nodes[0].id, "caller order must be kept");
+        assert_eq!(results[0].method, "tcp");
+        assert_eq!(results[1].method, "clash_api");
     }
 
     #[tokio::test]

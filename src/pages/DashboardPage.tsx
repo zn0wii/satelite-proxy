@@ -1631,7 +1631,7 @@ function coreDisplayName(kind: string | null | undefined): string {
               <span className="kv-k">{t("dashboard.exitCountry")}</span>
               <span
                 className={`kv-v ${exitIp?.countryCode ? "" : "lat-none"}`}
-                title={exitIp?.countryCode ?? undefined}
+                title={exitIp?.source ?? undefined}
               >
                 {exitIp?.countryCode
                   ? countryDisplayName(exitIp.countryCode, locale)

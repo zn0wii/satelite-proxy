@@ -110,6 +110,7 @@ pub fn update_settings(
     let mut find_process_changed = false;
     let mut bypass_lan_changed = false;
     let mut multi_core_changed = false;
+    let theme_changed = theme.is_some();
     let settings = state
         .with_store_mut(|store| {
             if let Some(p) = mixed_port {
@@ -375,6 +376,9 @@ pub fn update_settings(
         crate::autostart::set_launch_at_login(enabled).map_err(|e| e.to_string())?;
     }
     crate::tray::refresh_icon(&app);
+    if theme_changed {
+        crate::window_ctrl::apply_window_theme(&app);
+    }
 
     // route.final must restart: sing-box Clash PUT /configs often returns OK without
     // re-applying route.final (file updates, process keeps old final).

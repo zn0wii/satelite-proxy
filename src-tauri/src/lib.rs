@@ -183,6 +183,11 @@ pub fn run() {
             app.manage(app_state);
             app_log::info("app", "Satelite started");
 
+            // Pin the title bar to the stored theme before the window paints —
+            // otherwise it starts on the OS light/dark mode and can mismatch
+            // the app's own theme setting (see window_ctrl::apply_window_theme).
+            window_ctrl::apply_window_theme(app.handle());
+
             // Seed bundled remote rule sets: copy the packaged `.srs` files
             // into the remote cache and heal their store entries. Must run
             // before `remote_rule_auto::spawn` so the copies are referenced

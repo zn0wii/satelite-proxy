@@ -13,7 +13,17 @@ import type { NavKey } from "./types";
 import { UiModeProvider, useUiMode } from "./ui/UiModeContext";
 import { SimpleShell } from "./ui/simple";
 import { useViewportScale } from "./hooks/useViewportScale";
+import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import "./App.css";
+
+// Cmd/Ctrl+<digit> → tab, matching TopNav's on-screen order.
+const PRO_SHORTCUT_MAP: Partial<Record<string, NavKey>> = {
+  "1": "dashboard",
+  "2": "nodes",
+  "3": "config",
+  "4": "traffic",
+  "5": "logs",
+};
 
 // Secondary pages: code-split so low-memory WebView recreate only parses home first.
 const ConfigPage = lazy(() =>
@@ -51,6 +61,8 @@ function ProShell() {
   useEffect(() => {
     if (token && prefill) setNav("config");
   }, [token, prefill]);
+
+  useGlobalShortcuts(PRO_SHORTCUT_MAP, setNav, "settings");
 
   return (
     <div

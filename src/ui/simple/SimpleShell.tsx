@@ -11,10 +11,18 @@ import {
 import { useImportIntent } from "../../ImportIntentContext";
 import { useI18n } from "../../i18n";
 import type { MessageKey } from "../../i18n";
+import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { UiModeMenu } from "../UiModeMenu";
 import { SimpleConnectPage } from "./SimpleConnectPage";
 
 export type SimpleNavKey = "connect" | "servers" | "traffic" | "settings";
+
+// Cmd/Ctrl+<digit> → tab, matching the on-screen tab order.
+const SIMPLE_SHORTCUT_MAP: Partial<Record<string, SimpleNavKey>> = {
+  "1": "connect",
+  "2": "servers",
+  "3": "traffic",
+};
 
 const SimpleServersPage = lazy(() =>
   import("./SimpleServersPage").then((m) => ({ default: m.SimpleServersPage })),
@@ -85,6 +93,8 @@ export function SimpleShell() {
   useEffect(() => {
     if (token && prefill) setNav("servers");
   }, [token, prefill]);
+
+  useGlobalShortcuts(SIMPLE_SHORTCUT_MAP, setNav, "settings");
 
   return (
     <div

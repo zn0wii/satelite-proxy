@@ -940,6 +940,32 @@ export function SettingsPage() {
   const visibleTab =
     customRuntime && CUSTOM_BLOCKED_TABS.has(tab) ? "app" : tab;
 
+  // ←/→ cycle through the settings sub-tabs, skipping any the custom
+  // runtime blocks. Ignored while typing (input/textarea/select) so text
+  // cursor movement and dropdown navigation are unaffected.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const active = document.activeElement;
+      const tag = active?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((active as HTMLElement | null)?.isContentEditable) return;
+
+      const enabled = tabs.filter(
+        (x) => !(customRuntime && CUSTOM_BLOCKED_TABS.has(x.id)),
+      );
+      const idx = enabled.findIndex((x) => x.id === visibleTab);
+      if (idx === -1) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowRight" ? 1 : -1;
+      const next = enabled[(idx + delta + enabled.length) % enabled.length];
+      setTab(next.id);
+      setError(null);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [tabs, customRuntime, visibleTab]);
+
   // The sponsor easter egg renders on the app tab only; leaving the tab
   // unmounts it — reset the open state so coming back doesn't resurrect
   // a stale panel.

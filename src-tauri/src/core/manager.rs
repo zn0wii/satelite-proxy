@@ -1023,6 +1023,30 @@ fn map_tun_permission_hint(err: &str) -> String {
     }
 }
 
+/// sing-tun's slow-interface warning (`open interface take too much time to
+/// finish!`), logged 10s into a TUN start while the adapter is still coming
+/// up. Shared by the runtime's readiness windows (log-evidence deadline
+/// extension) and the failure hint below.
+pub(crate) const SLOW_TUN_WARN_NEEDLE: &str = "take too much time to finish";
+
+/// Appends guidance when the startup text shows the sing-tun slow-interface
+/// warning. Unlike the mappers above this one is applied to the *composed*
+/// readiness failure (message + core log tail) — the WARN only ever lives in
+/// the log file, never in `last_error`, so `map_core_startup_hint` cannot see
+/// it. Marker-guarded so re-applying on an already-hinted text is a no-op.
+pub(crate) fn map_slow_tun_start_hint(err: &str) -> String {
+    const MARKER: &str = "TUN 虚拟网卡在本机创建异常缓慢";
+    if !err.contains(SLOW_TUN_WARN_NEEDLE) || err.contains(MARKER) {
+        return err.to_string();
+    }
+    format!(
+        "{err}\n\n{}",
+        "TUN 虚拟网卡在本机创建异常缓慢，内核一直在等待网卡就绪。\n\
+         常见原因：其他 VPN/代理客户端占用 wintun 虚拟网卡、杀毒软件拦截、Windows 网络栈卡顿。\n\
+         处理：退出其他正在运行的 VPN/代理软件后重试；仍失败请重启电脑后再开启 TUN。"
+    )
+}
+
 fn port_has_listener(port: u16) -> bool {
     !listener_pids_on_port(port).is_empty()
 }
@@ -1481,7 +1505,9 @@ mod core_startup_hint_tests {
     //! actionable hint: the locked-cache.db timeout (orphaned elevated core
     //! from a crashed session) gets the cache hint, TUN permission failures
     //! the UAC/setuid hint, and unknown errors pass through untouched.
-    use super::map_core_startup_hint;
+    //! `map_slow_tun_start_hint` owns the slow-wintun-adapter WARN (applied
+    //! to composed readiness failures that embed the core log tail).
+    use super::{map_core_startup_hint, map_slow_tun_start_hint};
 
     #[test]
     fn cache_file_timeout_gets_the_orphan_hint() {
@@ -1515,6 +1541,35 @@ mod core_startup_hint_tests {
     fn unknown_errors_pass_through_untouched() {
         let err = "FATAL something entirely unknown happened";
         assert_eq!(map_core_startup_hint(err), err);
+    }
+
+    #[test]
+    fn slow_tun_warn_gets_the_wintun_hint() {
+        // Verbatim from the field report (ANSI level tags included): the WARN
+        // sing-tun logs 10s into a TUN start while the wintun adapter is
+        // still coming up. It must survive in the embedded log tail and map
+        // to the adapter-conflict guidance.
+        let err = "sing-box started but clash_api not responding at 127.0.0.1:19090\n\
+                   --- log ---\n\
+                   +0800 2026-08-31 22:03:30 \u{1b}[33mWARN\u{1b}[0m inbound/tun[tun-in]: open interface take too much time to finish!";
+        let mapped = map_slow_tun_start_hint(err);
+        assert!(mapped.starts_with(err), "original text is preserved");
+        assert!(mapped.contains("wintun"));
+        assert!(mapped.contains("重启电脑"));
+    }
+
+    #[test]
+    fn slow_tun_hint_is_idempotent() {
+        let err = "WARN inbound/tun[tun-in]: open interface take too much time to finish!";
+        let once = map_slow_tun_start_hint(err);
+        let twice = map_slow_tun_start_hint(&once);
+        assert_eq!(once, twice, "re-applying must not append the hint again");
+    }
+
+    #[test]
+    fn slow_tun_hint_ignores_text_without_the_warn() {
+        let err = "sing-box started but clash_api not responding at 127.0.0.1:19090";
+        assert_eq!(map_slow_tun_start_hint(err), err);
     }
 }
 

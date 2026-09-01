@@ -93,6 +93,14 @@ const MAX_LIVE_REMOVAL_HISTORY: usize = 10_000;
 /// trim runs after the WebView has already parsed whatever we sent, so the
 /// bound must live here, at the payload source.
 const MAX_LIVE_BATCH_ROWS: usize = 1000;
+/// Base readiness window for TUN (elevated) starts. Must clear sing-tun's
+/// internal 10s slow-interface WARN timer so the WARN is observable as stall
+/// evidence before the base window closes (see `wait_clash_api_ready`).
+const STARTUP_WAIT_TUN_BASE: Duration = Duration::from_secs(12);
+/// Hard ceiling for the evidence-gated TUN deadline extension: a wintun
+/// adapter still not up past this is a host conflict (other VPN / AV /
+/// wedged network stack), not a slow boot — fail with the slow-adapter hint.
+const TUN_STARTUP_STALL_CAP: Duration = Duration::from_secs(45);
 
 /// Passive connection-journal stats for one outbound tag (smart switch Level 0).
 #[derive(Debug, Clone, Default)]
@@ -471,9 +479,12 @@ impl Runtime {
 
     /// Passive health for smart switch from connection journal (no MITM / no HTTP codes).
     ///
-    /// Heuristic "suspicious": closed within 3s with almost no bytes — proxy path often
-    /// dies before useful transfer. Multi-destination and consecutive tail reduce
-    /// single-site false positives (docs/auto.md).
+    /// Heuristic "suspicious": closed with almost no bytes either fast (≤3s —
+    /// proxy path died early) or zero-byte within the dial-timeout band (≤15s —
+    /// the outbound dial never succeeded, e.g. `dial tcp ... i/o timeout` after
+    /// ~5s; those connections never move a byte, see `request_looks_failed`).
+    /// Multi-destination and consecutive tail reduce single-site false
+    /// positives (docs/auto.md).
     pub fn passive_node_stats(&self, node_tag: &str, lookback_ms: i64) -> PassiveNodeStats {
         let now = now_unix_ms();
         let mut samples: Vec<(i64, bool, String)> = Vec::new(); // closed_at, sus, dest_key
@@ -493,7 +504,7 @@ impl Runtime {
                 continue;
             }
             let dur = closed_at.saturating_sub(rec.first_seen);
-            let sus = dur <= 3000 && rec.download < 1024 && rec.upload < 1024;
+            let sus = request_looks_failed(dur, rec.upload, rec.download);
             let dest = if !rec.host.is_empty() {
                 rec.host.clone()
             } else if !rec.destination.is_empty() && rec.destination != "—" {
@@ -741,9 +752,11 @@ impl Runtime {
         self.request_batch(store, query, limit, after_seq, false)
     }
 
-    /// Closed requests that look like failures / timeouts: short-lived (≤ 3s)
-    /// with almost no bytes transferred — same heuristic used by the passive
-    /// smart-switch health check (see `passive_node_stats`).
+    /// Closed requests that look like failures / timeouts: no meaningful
+    /// bytes and either short-lived (≤3s) or a zero-byte close within the
+    /// dial-timeout band (≤15s) — same heuristic used by the passive
+    /// smart-switch health check (see `passive_node_stats` and
+    /// `request_looks_failed`).
     pub fn request_failures(
         &mut self,
         store: &AppStore,
@@ -772,7 +785,7 @@ impl Runtime {
             }
             let closed_at = record.closed_at.unwrap_or(record.last_seen);
             let duration = closed_at.saturating_sub(record.first_seen);
-            duration <= 3000 && record.download < 1024 && record.upload < 1024
+            request_looks_failed(duration, record.upload, record.download)
         };
 
         if let Some(after_seq) = after_seq {
@@ -859,6 +872,81 @@ impl Runtime {
                     })
             })
             .unwrap_or_default()
+    }
+
+    /// True when the core's current log file contains `needle`. Reads the raw
+    /// file — not `core_startup_log_hint`, which short-circuits on
+    /// `last_error` — so WARN-class lines that never become errors stay
+    /// visible. Hourly log files are small and the readiness wait samples
+    /// this at most once per second.
+    fn core_log_contains(&self, needle: &str) -> bool {
+        self.core
+            .log_path()
+            .and_then(|log| std::fs::read(log).ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+            .unwrap_or(false)
+    }
+
+    /// Readiness wait shared by the sing-box start paths: polls the Clash API
+    /// (plus the mixed-inbound dial when `mixed_port` is given) until ready,
+    /// the window closes, or the core exits. Returns `(ok, api_seen_ok)`.
+    ///
+    /// The base window is short because the runtime lock is held here — but a
+    /// TUN start whose log shows sing-tun's slow-interface WARN (`open
+    /// interface take too much time to finish!`) is evidence the core is
+    /// booting, not wedged: clash_api only comes up after the tun inbound
+    /// finishes. While that evidence is present and the core is alive, the
+    /// deadline is pushed out to `TUN_STARTUP_STALL_CAP` instead of killing
+    /// the core mid-boot — kill + restart churns the wintun adapter, which
+    /// makes the next attempt slower still (2026-08 field report: TUN never
+    /// came up on a conflict-heavy Windows host because every retry killed
+    /// the core at the 10s mark).
+    fn wait_clash_api_ready(
+        &mut self,
+        elevated: bool,
+        api: &ClashApi,
+        mixed_port: Option<u16>,
+    ) -> (bool, bool) {
+        let base = if elevated {
+            STARTUP_WAIT_TUN_BASE
+        } else {
+            Duration::from_secs(6)
+        };
+        let wait_started = Instant::now();
+        let mut deadline = wait_started + base;
+        let mut ticks: u32 = 0;
+        let mut ok = false;
+        let mut api_seen_ok = false;
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            if api.health_ok() {
+                api_seen_ok = true;
+                // The control API responding is not enough to claim success —
+                // the mixed inbound must accept connections too (a core whose
+                // inbound never bound would otherwise be reported running).
+                if mixed_port.map(dial_mixed_ok).unwrap_or(true) {
+                    ok = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            self.core.poll();
+            if !self.core.is_running() {
+                break;
+            }
+            ticks += 1;
+            // Sample the core log once per second of a TUN start for the
+            // slow-interface WARN (see method doc).
+            if elevated
+                && ticks % 5 == 0
+                && self.core_log_contains(crate::core::manager::SLOW_TUN_WARN_NEEDLE)
+            {
+                deadline = wait_started + TUN_STARTUP_STALL_CAP;
+            }
+        }
+        (ok, api_seen_ok)
     }
 
     /// Generate config, start the active core, optionally enable system proxy.
@@ -1003,33 +1091,12 @@ impl Runtime {
         self.last_binary_path = Some(bin.clone());
 
         let api = ClashApi::new("127.0.0.1", store.settings.api_port, &secret);
-        // TUN start can take a few seconds (utun + routes). Health uses a short
-        // per-try timeout so we do not block the runtime lock for minutes.
-        let max_wait = if elevated {
-            Duration::from_secs(10)
-        } else {
-            Duration::from_secs(6)
-        };
-        let wait_started = Instant::now();
-        let mut ok = false;
-        let mut api_seen_ok = false;
-        while wait_started.elapsed() < max_wait {
-            if api.health_ok() {
-                api_seen_ok = true;
-                // The control API responding is not enough to claim success —
-                // the mixed inbound must accept connections too (a core whose
-                // inbound never bound would otherwise be reported running).
-                if dial_mixed_ok(store.settings.mixed_port) {
-                    ok = true;
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            self.core.poll();
-            if !self.core.is_running() {
-                break;
-            }
-        }
+        // TUN start can take a few seconds (utun + routes) — or much longer
+        // when the wintun adapter itself is slow to come up. Health uses a
+        // short base window (we hold the runtime lock here), extended on
+        // slow-TUN log evidence (see `wait_clash_api_ready`).
+        let (ok, api_seen_ok) =
+            self.wait_clash_api_ready(elevated, &api, Some(store.settings.mixed_port));
         if !ok {
             let log_hint = self.core_startup_log_hint();
             let _ = self.core.stop();
@@ -1044,7 +1111,11 @@ impl Runtime {
             } else {
                 format!("{what}\n--- log ---\n{log_hint}")
             };
-            return Err(AppError::Core(detail));
+            // The slow-TUN WARN only ever lives in the log tail — map it on
+            // the composed detail so the failure names the real culprit.
+            return Err(AppError::Core(
+                crate::core::manager::map_slow_tun_start_hint(&detail),
+            ));
         }
         self.api = Some(api);
         self.core_started_at = Some(now_unix_secs());
@@ -1599,24 +1670,10 @@ impl Runtime {
             let port = insight.clash_api_port.unwrap_or(9090);
             let secret = insight.clash_api_secret.clone().unwrap_or_default();
             let api = ClashApi::new(host, port, &secret);
-            let max_wait = if elevated {
-                Duration::from_secs(10)
-            } else {
-                Duration::from_secs(6)
-            };
-            let wait_started = Instant::now();
-            let mut ok = false;
-            while wait_started.elapsed() < max_wait {
-                if api.health_ok() {
-                    ok = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                self.core.poll();
-                if !self.core.is_running() {
-                    break;
-                }
-            }
+            // Custom configs have arbitrary inbound shapes — no mixed dial,
+            // API health alone decides. Slow-TUN evidence extends the window
+            // exactly like the generated path (`wait_clash_api_ready`).
+            let (ok, _) = self.wait_clash_api_ready(elevated, &api, None);
             if !ok {
                 let log_hint = self.core_startup_log_hint();
                 let _ = self.core.stop();
@@ -1627,7 +1684,9 @@ impl Runtime {
                         "sing-box started but clash_api not responding at {host}:{port}\n--- log ---\n{log_hint}"
                     )
                 };
-                return Err(AppError::Core(detail));
+                return Err(AppError::Core(
+                    crate::core::manager::map_slow_tun_start_hint(&detail),
+                ));
             }
             self.api = Some(api);
             store.settings.clash_api_secret = if secret.is_empty() {
@@ -2065,6 +2124,25 @@ fn now_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Closed-connection failure heuristic shared by the passive smart-switch
+/// health check ([`Runtime::passive_node_stats`]) and the failures page
+/// ([`Runtime::request_failures`]).
+///
+/// Two shapes count as failed, both requiring "almost no bytes":
+/// - fast death: ≤3s lifetime (connected, then the proxy path died early);
+/// - dial timeout: zero bytes in BOTH directions within ≤15s — the outbound
+///   dial never succeeded (`dial tcp …: i/o timeout` lands at ~5s in the
+///   kernel log). Any successful exchange moves at least a TLS ClientHello
+///   upstream, so a truly zero-byte close is a connect failure. The old
+///   ≤3s-only rule let dead nodes sail past passive detection: their failed
+///   connections live exactly as long as the kernel dial timeout.
+fn request_looks_failed(duration_ms: i64, upload: u64, download: u64) -> bool {
+    if upload >= 1024 || download >= 1024 {
+        return false;
+    }
+    duration_ms <= 3_000 || (upload == 0 && download == 0 && duration_ms <= 15_000)
 }
 
 fn now_unix_secs() -> i64 {
@@ -2816,5 +2894,106 @@ mod live_batch_tests {
                 row.id
             );
         }
+    }
+}
+
+/// Passive smart-switch detection of dead nodes (regression: dial-timeout
+/// closes live ~5s — the kernel's dial timeout — which the old ≤3s-only
+/// heuristic never counted as suspicious, so a dead node was invisible to
+/// passive detection until the 10-minute health re-probe).
+#[cfg(test)]
+mod passive_failure_tests {
+    use super::*;
+
+    fn conn(id: &str, host: &str, node: &str, up: u64, down: u64) -> ConnectionInfo {
+        ConnectionInfo {
+            id: id.into(),
+            destination: format!("{host}:443"),
+            host: host.into(),
+            destination_ip: "1.2.3.4".into(),
+            destination_port: "443".into(),
+            network: "tcp".into(),
+            conn_type: String::new(),
+            source: "127.0.0.1:1".into(),
+            process: String::new(),
+            chains: vec![node.into()],
+            node: node.into(),
+            rule: String::new(),
+            rule_payload: String::new(),
+            upload: up,
+            download: down,
+            start: String::new(),
+        }
+    }
+
+    /// Close every currently-open journal record, backdating `first_seen` so
+    /// each record has the requested lifetime.
+    fn close_with_lifetime(runtime: &mut Runtime, lifetime_ms: i64) {
+        runtime.ingest_connections(Vec::new());
+        let now = now_unix_ms();
+        for rec in runtime.request_by_id.values_mut() {
+            rec.first_seen = now - lifetime_ms;
+        }
+    }
+
+    #[test]
+    fn dial_timeout_zero_byte_closes_are_suspicious() {
+        // Real-world shape (kernel log): `dial tcp …: i/o timeout` after 5.0s,
+        // 0 bytes both ways, across several destinations.
+        let mut runtime = Runtime::new();
+        let hosts = [
+            "github.com",
+            "github.githubassets.com",
+            "ipwho.is",
+            "api.myip.com",
+            "ip-api.com",
+        ];
+        runtime.ingest_connections(
+            hosts
+                .iter()
+                .enumerate()
+                .map(|(i, h)| conn(&format!("c{i}"), h, "node-dead", 0, 0))
+                .collect(),
+        );
+        close_with_lifetime(&mut runtime, 5_000);
+
+        let stats = runtime.passive_node_stats("node-dead", 20_000);
+        assert_eq!(stats.total, 5);
+        assert_eq!(stats.suspicious, 5);
+        assert_eq!(stats.sus_dests, 5);
+        assert_eq!(stats.consecutive_recent_sus, 5);
+        assert!(stats.soft_degraded(5, 0.15));
+        assert!(stats.hard_degraded());
+    }
+
+    #[test]
+    fn healthy_and_idle_closes_stay_clean() {
+        let mut runtime = Runtime::new();
+        runtime.ingest_connections(vec![
+            // Healthy transfer: bytes moved both ways, closed at 5s.
+            conn("ok", "ok.example", "node-live", 4_096, 65_536),
+            // Long-lived idle zero-byte close (UDP NAT timeout shape).
+            conn("idle", "idle.example", "node-live", 0, 0),
+        ]);
+        close_with_lifetime(&mut runtime, 300_000);
+
+        let stats = runtime.passive_node_stats("node-live", 600_000);
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.suspicious, 0);
+        assert!(!stats.soft_degraded(2, 0.15));
+        assert!(!stats.hard_degraded());
+    }
+
+    #[test]
+    fn one_way_bytes_within_dial_band_are_not_failures() {
+        // Bytes moved upstream (request sent, response never came) at 8s:
+        // not a clean zero-byte dial failure, and beyond the fast-death
+        // window — must stay non-suspicious (could be a slow origin).
+        let mut runtime = Runtime::new();
+        runtime.ingest_connections(vec![conn("half", "half.example", "node-x", 900, 0)]);
+        close_with_lifetime(&mut runtime, 8_000);
+
+        let stats = runtime.passive_node_stats("node-x", 20_000);
+        assert_eq!(stats.suspicious, 0);
     }
 }

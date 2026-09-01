@@ -560,9 +560,8 @@ export function NodesPage() {
         title={t("nodes.groupToggleHint")}
       >
         <td colSpan={6}>
-          <span className={`node-group-caret${open ? "" : " closed"}`}>
-            ▾
-          </span>
+          {/* CSS-drawn caret — the ▾ glyph renders off-center in Segoe UI. */}
+          <span className={`node-group-caret${open ? "" : " closed"}`} />
           <span className="node-group-label">
             {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
             {item.label}
@@ -584,9 +583,7 @@ export function NodesPage() {
         onClick={() => toggleGroup(item.key)}
         title={t("nodes.groupToggleHint")}
       >
-        <span className={`node-group-caret${open ? "" : " closed"}`}>
-          ▾
-        </span>
+        <span className={`node-group-caret${open ? "" : " closed"}`} />
         <span className="node-group-label">
           {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
           {item.label}
@@ -791,20 +788,18 @@ export function NodesPage() {
               ]}
             />
             <div className="node-group-fold" role="group" aria-label={t("nodes.groupBy")}>
+              {/* CSS-drawn ⊖/⊕ — Unicode math glyphs sit off-center in
+                  Segoe UI Symbol on Windows (fine on macOS SF Pro). */}
               <span
-                className={`node-group-fold-label${groupBy === "none" ? " disabled" : ""}`}
+                className={`node-group-fold-label minus${groupBy === "none" ? " disabled" : ""}`}
                 onClick={groupBy === "none" ? undefined : collapseAll}
                 title={t("nodes.collapseAll")}
-              >
-                ⊖
-              </span>
+              />
               <span
-                className={`node-group-fold-label${groupBy === "none" ? " disabled" : ""}`}
+                className={`node-group-fold-label plus${groupBy === "none" ? " disabled" : ""}`}
                 onClick={groupBy === "none" ? undefined : expandAll}
                 title={t("nodes.expandAll")}
-              >
-                ⊕
-              </span>
+              />
             </div>
             <GlassSeg
               value={viewMode}

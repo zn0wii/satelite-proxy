@@ -2027,13 +2027,45 @@ tr.row-active {
   padding: 0 0.3rem;
 }
 
+/* CSS-drawn ⊖/⊕ glyphs: Segoe UI Symbol places the Unicode math glyphs
+   off-center inside the em box on Windows, so they don't line up with the
+   neighbouring seg labels (macOS SF Pro happens to render them centered).
+   Drawing them with borders/stripes keeps both platforms pixel-identical. */
 .node-group-fold-label {
+  position: relative;
+  box-sizing: border-box;
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
   color: var(--accent, #5eb89a);
-  font-size: 1rem;
-  line-height: 1;
   cursor: pointer;
   user-select: none;
   transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Horizontal stroke shared by ⊖ and ⊕. */
+.node-group-fold-label::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 55%;
+  height: 1.5px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+/* Vertical stroke, ⊕ only. */
+.node-group-fold-label.plus::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1.5px;
+  height: 55%;
+  background: currentColor;
+  transform: translate(-50%, -50%);
 }
 
 .node-group-fold-label:hover:not(.disabled) {
@@ -2165,6 +2197,10 @@ tr.row-active {
    is padded with filler cells to keep the per-cell indexing aligned. */
 .node-group-row > td {
   height: 30px;
+  /* Flex-center so the caret aligns with the label regardless of the
+     platform font's baseline handling (table cells default to baseline). */
+  display: flex;
+  align-items: center;
   padding: 0 0.75rem;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--muted) 7%, transparent);
@@ -2173,11 +2209,16 @@ tr.row-active {
   user-select: none;
 }
 
+/* Border triangle (same trick as .solid-select-caret) — the ▾ glyph sits
+   above the baseline in Segoe UI, making it look vertically off on Windows. */
 .node-group-caret {
-  display: inline-block;
+  flex-shrink: 0;
+  width: 0;
+  height: 0;
   margin-right: 0.4rem;
-  font-size: 0.7em;
-  color: var(--muted);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--muted);
   transition: transform 0.15s ease;
 }
 

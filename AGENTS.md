@@ -1,7 +1,7 @@
 # AGENTS.md — Satelite Proxy 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
-最后核对：2026-08-30（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2）。
+最后核对：2026-09-01（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2。智能切换被动检测 2026-09 重构：失败判定=≤3s 快死或 ≤15s 零字节（拨号超时带），mihomo 增设内核日志流 `/logs` WS 监听（§5.1 `log_listener.rs`）；同批性能改造=快照流三档变速（需求心跳+TUN 退避）与 passive stats 单趟化，见 §5.1）。
 
 ## 0. 阅读与维护规则（必读）
 
@@ -174,12 +174,13 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.1 入口与生命周期
 
-- `lib.rs` — `run()`：便携模式预检（`portable::patch_context`，见 §9.19）→ 插件注册（opener/dialog/deep-link/single-instance）→ setup（便携时先重建主窗口；加载 store 失败则弹窗退出）→ 托盘 → 启动 6 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
+- `lib.rs` — `run()`：便携模式预检（`portable::patch_context`，见 §9.19）→ 插件注册（opener/dialog/deep-link/single-instance）→ setup（便携时先重建主窗口；加载 store 失败则弹窗退出）→ 托盘 → 启动 7 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
 - 后台任务（均在 setup 中 spawn）：
-  - `conn_journal.rs` — 轮询/WS 订阅 Clash 连接快照（UI 可见时 100ms，托盘时降频），维护活跃+历史连接环形日志
+  - `conn_journal.rs` — 轮询/WS 订阅 Clash 连接快照，维护活跃+历史连接环形日志。**三档变速（2026-09）**：`interval_for(可见, 需求, 帧大小)` 纯函数——UI 可见**且** 4s 内有连接数据命令心跳（`AppState::note_conn_query`，由 `live_connection_*`/`request_views` 入口记录）才 100ms，否则 1s；单帧 >1500 / >4000 连接（`last_snapshot_connections` 原子量）时 TUN 退避至 250/1000ms（mihomo ticker 对 interval≤0 会 panic，下限恒 ≥100ms）；变速重评估 2s 节流（interval 烧进 WS URL，变更=重连，防边界抖动刷socket）。ingest 每连接历史 key 只构建一次（`live_connection_keys` 与 `live_connections` 平行缓存）
+  - `log_listener.rs` — 内核日志流（**仅 mihomo**）：订阅 Clash API `/logs` WS（warning 级，健康时零流量），解析 `logMetadataErr` 拨号失败行 `[TCP|UDP] dial <proxy> (match …) <src> --> <dst> error: …` → `Runtime::record_proxy_dial_failure`（有界环形，120s/512 条）并入 `passive_node_stats`。**为何 mihomo 独有**：mihomo 的连接 tracker 在拨号成功后才创建，拨号失败的连接从不进 `/connections`（连接日志对「节点 TCP 不通」全盲）；sing-box 在拨号前就挂进连接表，journal 已能看到（失败=零字节短命关闭，`request_looks_failed` 启发式：≤3s 快死 或 ≤15s 双向零字节=拨号超时带，2026-09）。归因：`proxy` 组→当前节点 tag、`node-*` 直存、DIRECT/REJECT/smart 池忽略
   - `subscription_auto.rs` — 按 `auto_update` 间隔定时刷新订阅（默认 1440 分钟）
   - `remote_rule_auto.rs` — 应用侧下载远程规则集缓存到本地，sing-box 只加载本地文件
-  - `smart_switch.rs` — 智能选路：被动连接日志感知劣化 → 按需探测 top-K 候选 → 评分+容差+冷却。候选排序用 `probe_nodes_ranked`（TCP-capable 节点=TCP ping 直连，QUIC-only 协议=内核 URL 探测兜底）；**当前节点健康确认仍走内核 URL 探测**（防「TCP 活但代理死」被误判健康），排序对比值也取 ranked 结果保证同口径（URL-vs-TCP 对比会虚高当前节点数值导致来回切）
+  - `smart_switch.rs` — 智能选路：被动劣化感知（sing-box=连接日志零字节关闭，mihomo=内核日志拨号失败，见 `log_listener`/`request_looks_failed`）→ 按需探测 top-K 候选 → 评分+容差+冷却。候选排序用 `probe_nodes_ranked`（TCP-capable 节点=TCP ping 直连，QUIC-only 协议=内核 URL 探测兜底）；**当前节点健康确认仍走内核 URL 探测**（防「TCP 活但代理死」被误判健康），排序对比值也取 ranked 结果保证同口径（URL-vs-TCP 对比会虚高当前节点数值导致来回切）。候选 fail-rate 评级走 `Runtime::passive_stats_for_tags` **单趟扫描**（O(历史+节点数)；逐节点全扫是 O(节点数×3000)，千节点订阅不可接受，2026-09）
   - `rule_apply.rs` — 规则变更的 500ms 防抖合并 + 全局串行 apply-and-restart
   - `state.rs::spawn_core_watchdog` — 内核看门狗：running→error 意外退出（非用户停止）经 `rule_apply::request_forced_restart` **真重启**（`restart_after_unexpected_exit`，仅缓存态=Error 的死核可复活；用户主动停止落在 Stopped 永不自动拉起），10 分钟滚动窗口内最多 3 次防配置错误死循环；决策逻辑 `watchdog_should_restart`/`should_revive_dead_core` 纯函数有单测（背景：曾有机静默 exit(1) 的实战事故；**注意普通 `request_restart` 路径对死核是空转**——`restart_if_running` 要求核心在运行，watchdog 必须走 forced 入口）。每次轮询还把 running/状态/副进程的**任何变化边沿** emit 为 `core-status-changed` 事件（payload `{running, core_state, sidecar_running}`），前端收到即 `refreshProxyStatus()`，消除隐藏窗口/锁忙/captureBusy 跳过轮询时的状态盲区。**同时独立盯 Xray 副进程**（`poll_sidecar`，独立边沿/预算跟踪；仅主核运行时才触发整体重启）
 - `main.rs` — 仅调 `run()`。
@@ -231,7 +232,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 ### 5.6 运行时编排与外部 API
 
 - `runtime.rs` — `Runtime`/`ProxyStatus`（含 `core_type`/`sidecar_running`）：按 `settings.core_type` 分支 config 生成 → 写盘 → core 启停 → 系统代理联动；连接视图缓存与 delta（`LiveConnectionBatch` revision 机制）。**启动就绪判定必须实测端口**（2026-08）：sing-box/mihomo health 等待成功条件 = Clash API `/version` 应答 **且** `dial_mixed_ok()`（mixed 端口 TCP 拨号实测，`readiness_failure_detail` 区分「API 未应答」与「API 活但入站未监听」两种失败）；sing-box 两路径（生成/custom）统一走 `wait_clash_api_ready`（TUN 基础 12s / 非 TUN 6s；检测到 sing-tun 慢网卡 WARN `open interface take too much time to finish!` 且进程存活时证据驱动延长至 45s 硬上限——clash_api 排在 tun inbound 之后启动，wintun 网卡慢时 10s 处掐核属于误杀，且杀/重启反复churn网卡更慢，2026-08 实战事故；失败时经 `map_slow_tun_start_hint` 在含日志尾的完整错误上追加 wintun 冲突指引），mihomo 仍为内联 TUN 10s / 非 TUN 6s；Xray 就绪窗口同为 6/10s、成功条件 = 进程存活 **且** mixed 拨号成功（metrics 命中仅 best-effort warn，不作为就绪条件）；custom 配置路径不拨号（入站形状任意）。失败信息统一附 `core_startup_log_hint` 日志尾并过 `map_tun_permission_hint`（`manager.rs`，pub(crate)）。Xray 分支 `start_xray_proxy`：ensure geodata/wintun → `build_xray_config` → 按上述端口拨号判定就绪，`xray_metrics` 替代 clash_api。mihomo 分支 `start_mihomo_proxy`：ensure mihomo geodata → `build_mihomo_config` → 写 active.yaml → 与 sing-box 同款「ClashApi health + mixed 拨号」等待（`self.api` 即 clash_api，conn_journal/热切/智能切换全复用）。`build_options()` 为三生成器共享的 BuildOptions 构造器。sing-box 分支支持 **Xray 副进程**（§9.20）：`compute_sidecar_plan`（settings+chains+nodes → 委托计划，commands 预览同款复用）→ 主核 health OK 后 `start_xray_sidecar` 写 `xray-sidecar.json` 并经 `Runtime.sidecar`（第二个 `CoreManager` 实例，结构体无静态状态可直接并存）拉起；停/重启/退出先停副进程，主核启动失败或副进程启动失败均整体回滚。
-- `api/clash_api.rs` — Clash 兼容 API 客户端（sing-box 与 mihomo 模式共用；热切需 `Content-Type: application/json`，`send_json` 已带）。**HTTP 用 ureq（非 reqwest::blocking，避免嵌套 Tokio runtime panic，见文件头注释）；WS 用 tungstenite 仅握手**。
+- `api/clash_api.rs` — Clash 兼容 API 客户端（sing-box 与 mihomo 模式共用；热切需 `Content-Type: application/json`，`send_json` 已带）。**HTTP 用 ureq（非 reqwest::blocking，避免嵌套 Tokio runtime panic，见文件头注释）；WS 用 tungstenite 仅握手**。WS URL 构造：`connections_ws_url(interval)`（连接快照流）与 `logs_ws_url(level)`（内核日志流，log_listener 用）。
 - `api/xray_metrics.rs` — Xray 模式 metrics 客户端：轮询 `/debug/vars` 汇总 `stats.outbound[*].uplink/downlink` → TrafficTotals（connections 恒 0；无逐连接 API）。
 - `state.rs` `select_current_node_serialized` — sing-box/mihomo 走 clash select_proxy 热切换（组名 `proxy`）；Xray 无 API → 持久化后返回 restart_needed，由 `rule_apply::request_restart` 重启生效；不支持的节点形状直接报错。
 - `services/latency.rs` — 测速：TCP 协议直连 server:port（内核无关）；UDP 系协议（hysteria2/tuic）走 Clash delay API（sing-box/mihomo 有此 API；Xray 模式下此类节点本就不被支持）。批量探测按输入顺序起测（并发槽空出即从前向后补位）；`probe_nodes_streaming`/`ping_nodes_streaming` 带 `on_result` 回调，每个探测完成即刻回调（commands/latency.rs 据此经 Tauri `Channel<LatencyResult>` 逐节点推给前端）。探测共享结果缓存（成功 30s / 失败 15s，per-key 在途合并；**这也是 smart_switch 后台排序/健康探测读的缓存**）；手动触发的三个测速 command 一律 `use_cache=false`——不读缓存每次真测，结果仍写回缓存供后台复用（2026-08）。

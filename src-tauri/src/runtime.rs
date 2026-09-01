@@ -103,7 +103,7 @@ const STARTUP_WAIT_TUN_BASE: Duration = Duration::from_secs(12);
 const TUN_STARTUP_STALL_CAP: Duration = Duration::from_secs(45);
 
 /// Passive connection-journal stats for one outbound tag (smart switch Level 0).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PassiveNodeStats {
     /// Closed connections in the lookback window on this node.
     pub total: u32,
@@ -138,6 +138,17 @@ impl PassiveNodeStats {
     }
 }
 
+/// One kernel-log dial failure attributed to an outbound tag (mihomo mode,
+/// `log_listener.rs`). Feeds `passive_node_stats` as a suspicious sample.
+#[derive(Debug, Clone)]
+pub struct DialFailureEvent {
+    pub at_ms: i64,
+    /// Outbound tag the failure is attributed to (main node tag at event time).
+    pub tag: String,
+    /// Destination host key (port stripped) for the multi-destination gate.
+    pub dest: String,
+}
+
 pub struct Runtime {
     pub core: CoreManager,
     /// Companion Xray sidecar process (sing-box main mode + delegation
@@ -158,6 +169,9 @@ pub struct Runtime {
     traffic_speed: (u64, u64),
     /// Live connections (last poll)
     live_connections: Vec<ConnectionInfo>,
+    /// History keys of `live_connections`, same order (cached so each frame
+    /// builds every key exactly once — see `ingest_connections`).
+    live_connection_keys: Vec<String>,
     live_revision: u64,
     /// Bumped only when the live id SET changes (adds/removes), not on plain
     /// traffic-counter updates — lets `live_connection_batch` skip the O(N)
@@ -170,6 +184,11 @@ pub struct Runtime {
     request_by_id: HashMap<String, RequestRecord>,
     /// Newest ids at the front.
     request_order: VecDeque<String>,
+    /// Kernel-log dial failures (mihomo mode; see `log_listener.rs`). mihomo
+    /// registers its connection tracker only after the outbound dial
+    /// succeeds, so failed dials never reach `request_by_id` — this ring is
+    /// the only passive signal for them. Bounded by age + count.
+    proxy_dial_failures: VecDeque<DialFailureEvent>,
     /// When journal / sample last applied a snapshot.
     last_sample_at: Option<Instant>,
     /// Monotonic journal sequence (opens).
@@ -271,6 +290,7 @@ impl Runtime {
             traffic_prev: None,
             traffic_speed: (0, 0),
             live_connections: Vec::new(),
+            live_connection_keys: Vec::new(),
             live_revision: 0,
             live_order_revision: 0,
             live_item_revisions: HashMap::new(),
@@ -278,6 +298,7 @@ impl Runtime {
             live_diff_floor: 0,
             request_by_id: HashMap::new(),
             request_order: VecDeque::new(),
+            proxy_dial_failures: VecDeque::new(),
             last_sample_at: None,
             journal_seq: 0,
             core_started_at: None,
@@ -477,6 +498,14 @@ impl Runtime {
         Some(info)
     }
 
+    /// Passive health for one outbound tag — see [`Self::passive_stats_for_tags`].
+    pub fn passive_node_stats(&self, node_tag: &str, lookback_ms: i64) -> PassiveNodeStats {
+        let tag = node_tag.to_string();
+        self.passive_stats_for_tags(std::slice::from_ref(&tag), lookback_ms)
+            .remove(&tag)
+            .unwrap_or_default()
+    }
+
     /// Passive health for smart switch from connection journal (no MITM / no HTTP codes).
     ///
     /// Heuristic "suspicious": closed with almost no bytes either fast (≤3s —
@@ -485,9 +514,29 @@ impl Runtime {
     /// ~5s; those connections never move a byte, see `request_looks_failed`).
     /// Multi-destination and consecutive tail reduce single-site false
     /// positives (docs/auto.md).
-    pub fn passive_node_stats(&self, node_tag: &str, lookback_ms: i64) -> PassiveNodeStats {
+    ///
+    /// Single pass over the journal + dial-failure ring, attributed by exact
+    /// tag equality (`rec.node` ∪ `rec.chains`). Attribution is NOT
+    /// substring-based on purpose: every tag involved is a fixed-shape
+    /// `node-<id16>` from `outbound_tag` (journal `node` comes from
+    /// `pick_node_from_chains`, log events from `log_listener`), so a
+    /// `contains` match could only ever fire on exact equality anyway.
+    /// Requesting many tags costs one O(history) scan total — smart_switch's
+    /// candidate ranking (O(nodes × history) when done per-tag) depends on
+    /// that.
+    pub fn passive_stats_for_tags(
+        &self,
+        tags: &[String],
+        lookback_ms: i64,
+    ) -> HashMap<String, PassiveNodeStats> {
         let now = now_unix_ms();
-        let mut samples: Vec<(i64, bool, String)> = Vec::new(); // closed_at, sus, dest_key
+        let mut wanted: HashSet<&str> = tags.iter().map(String::as_str).collect();
+        // An empty tag is never a real outbound — drop it rather than
+        // matching records with an empty node field.
+        wanted.retain(|t| !t.is_empty());
+        // tag → samples (closed_at, sus, dest_key)
+        let mut by_tag: HashMap<&str, Vec<(i64, bool, String)>> =
+            HashMap::with_capacity(wanted.len());
 
         for rec in self.request_by_id.values() {
             if !rec.closed {
@@ -497,10 +546,18 @@ impl Runtime {
             if now.saturating_sub(closed_at) > lookback_ms {
                 continue;
             }
-            let matches = rec.node == node_tag
-                || rec.chains.iter().any(|c| c == node_tag)
-                || (!node_tag.is_empty() && rec.node.contains(node_tag));
-            if !matches {
+            // Collect the wanted tags this record attributes to (node field
+            // + chain members, deduped) before computing anything heavier.
+            let mut hits: Vec<&str> = Vec::new();
+            if wanted.contains(rec.node.as_str()) {
+                hits.push(rec.node.as_str());
+            }
+            for chain in &rec.chains {
+                if wanted.contains(chain.as_str()) && !hits.contains(&chain.as_str()) {
+                    hits.push(chain.as_str());
+                }
+            }
+            if hits.is_empty() {
                 continue;
             }
             let dur = closed_at.saturating_sub(rec.first_seen);
@@ -512,39 +569,94 @@ impl Runtime {
             } else {
                 "unknown".into()
             };
-            samples.push((closed_at, sus, dest));
-        }
-
-        samples.sort_by_key(|(t, _, _)| *t);
-
-        let mut all_dests = HashSet::new();
-        let mut sus_dests = HashSet::new();
-        let mut suspicious = 0u32;
-        for (_, sus, dest) in &samples {
-            all_dests.insert(dest.clone());
-            if *sus {
-                suspicious = suspicious.saturating_add(1);
-                sus_dests.insert(dest.clone());
+            for tag in hits {
+                by_tag
+                    .entry(tag)
+                    .or_default()
+                    .push((closed_at, sus, dest.clone()));
             }
         }
 
-        // Consecutive suspicious at the most recent end of the window.
-        let mut consecutive_recent_sus = 0u32;
-        for (_, sus, _) in samples.iter().rev() {
-            if *sus {
-                consecutive_recent_sus = consecutive_recent_sus.saturating_add(1);
+        // Kernel-log dial failures (mihomo: failed dials never enter
+        // `/connections`, so they have no journal record — see log_listener).
+        // Each event is one suspicious sample attributed to its outbound tag.
+        for ev in &self.proxy_dial_failures {
+            if now.saturating_sub(ev.at_ms) > lookback_ms {
+                continue;
+            }
+            if wanted.contains(ev.tag.as_str()) {
+                by_tag
+                    .entry(ev.tag.as_str())
+                    .or_default()
+                    .push((ev.at_ms, true, ev.dest.clone()));
+            }
+        }
+
+        let mut out: HashMap<String, PassiveNodeStats> = HashMap::with_capacity(wanted.len());
+        for tag in wanted {
+            let Some(samples) = by_tag.get_mut(tag) else {
+                out.insert(tag.to_string(), PassiveNodeStats::default());
+                continue;
+            };
+            samples.sort_by_key(|(t, _, _)| *t);
+
+            let mut all_dests = HashSet::new();
+            let mut sus_dests = HashSet::new();
+            let mut suspicious = 0u32;
+            for (_, sus, dest) in samples.iter() {
+                all_dests.insert(dest.clone());
+                if *sus {
+                    suspicious = suspicious.saturating_add(1);
+                    sus_dests.insert(dest.clone());
+                }
+            }
+
+            // Consecutive suspicious at the most recent end of the window.
+            let mut consecutive_recent_sus = 0u32;
+            for (_, sus, _) in samples.iter().rev() {
+                if *sus {
+                    consecutive_recent_sus = consecutive_recent_sus.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+
+            out.insert(
+                tag.to_string(),
+                PassiveNodeStats {
+                    total: samples.len() as u32,
+                    suspicious,
+                    dests: all_dests.len() as u32,
+                    sus_dests: sus_dests.len() as u32,
+                    consecutive_recent_sus,
+                },
+            );
+        }
+        out
+    }
+
+    /// Record a kernel-log dial failure for the passive smart-switch health
+    /// check (mihomo mode, `log_listener.rs`). Bounded ring: events expire
+    /// well beyond the passive lookback window (20s) so a consumer polling
+    /// every tick never misses one, and the ring can never grow unbounded.
+    pub fn record_proxy_dial_failure(&mut self, tag: &str, dest: &str) {
+        const KEEP_MS: i64 = 120_000;
+        const MAX_EVENTS: usize = 512;
+        let now = now_unix_ms();
+        while let Some(front) = self.proxy_dial_failures.front() {
+            if now.saturating_sub(front.at_ms) > KEEP_MS
+                || self.proxy_dial_failures.len() >= MAX_EVENTS
+            {
+                self.proxy_dial_failures.pop_front();
             } else {
                 break;
             }
         }
-
-        PassiveNodeStats {
-            total: samples.len() as u32,
-            suspicious,
-            dests: all_dests.len() as u32,
-            sus_dests: sus_dests.len() as u32,
-            consecutive_recent_sus,
-        }
+        self.proxy_dial_failures.push_back(DialFailureEvent {
+            at_ms: now,
+            tag: tag.to_string(),
+            dest: dest.to_string(),
+        });
     }
 
     /// Apply a pre-fetched snapshot (journal / HTTP fallback). Prefer calling I/O outside the lock.
@@ -569,13 +681,20 @@ impl Runtime {
     }
 
     /// Diff-based journal: upsert live, mark disappeared as closed.
+    ///
+    /// Per-frame allocation discipline: the history key of every connection
+    /// is built exactly once (TUN frames carry thousands of rows) — incoming
+    /// keys land in `incoming_keys`, previous-frame keys are cached in
+    /// `live_connection_keys` — every later pass reuses them.
     fn ingest_connections(&mut self, connections: Vec<ConnectionInfo>) {
         let now_ms = now_unix_ms();
         let mut seen: HashSet<String> = HashSet::with_capacity(connections.len());
+        let mut incoming_keys: Vec<String> = Vec::with_capacity(connections.len());
 
         for c in &connections {
             let id = connection_history_key(c);
             seen.insert(id.clone());
+            incoming_keys.push(id.clone());
             if let Some(rec) = self.request_by_id.get_mut(&id) {
                 rec.last_seen = now_ms;
                 rec.closed = false;
@@ -602,8 +721,7 @@ impl Runtime {
                     rec.process = c.process.clone();
                 }
             } else {
-                let mut rec = RequestRecord::from_connection(c, now_ms);
-                rec.id = id.clone();
+                let rec = RequestRecord::from_connection(c, id.clone(), now_ms);
                 self.request_by_id.insert(id.clone(), rec);
                 self.request_order.push_front(id);
                 while self.request_order.len() > MAX_REQUEST_HISTORY {
@@ -615,10 +733,9 @@ impl Runtime {
         }
 
         // Connections that left the live snapshot → Closed event in journal.
-        for prev in &self.live_connections {
-            let id = connection_history_key(prev);
-            if !seen.contains(&id) {
-                if let Some(rec) = self.request_by_id.get_mut(&id) {
+        for id in &self.live_connection_keys {
+            if !seen.contains(id) {
+                if let Some(rec) = self.request_by_id.get_mut(id) {
                     if !rec.closed {
                         self.journal_seq = self.journal_seq.saturating_add(1);
                         rec.history_seq = self.journal_seq;
@@ -633,27 +750,30 @@ impl Runtime {
         if self.live_connections != connections {
             self.live_revision = self.live_revision.saturating_add(1);
             let revision = self.live_revision;
-            let previous: HashMap<String, &ConnectionInfo> = self
+            let previous: HashMap<&str, &ConnectionInfo> = self
                 .live_connections
                 .iter()
-                .map(|connection| (connection_history_key(connection), connection))
+                .zip(self.live_connection_keys.iter())
+                .map(|(connection, id)| (id.as_str(), connection))
                 .collect();
             let mut membership_changed = false;
-            for connection in &connections {
-                let id = connection_history_key(connection);
-                let is_new = previous.get(&id).is_none();
-                if previous.get(&id).is_none_or(|old| *old != connection) {
-                    self.live_item_revisions.insert(id, revision);
+            for (connection, id) in connections.iter().zip(&incoming_keys) {
+                let is_new = !previous.contains_key(id.as_str());
+                if previous
+                    .get(id.as_str())
+                    .is_none_or(|old| *old != connection)
+                {
+                    self.live_item_revisions.insert(id.clone(), revision);
                     if is_new {
                         membership_changed = true;
                     }
                 }
             }
             for id in previous.keys() {
-                if !seen.contains(id) {
+                if !seen.contains(*id) {
                     membership_changed = true;
-                    self.live_item_revisions.remove(id);
-                    self.live_removals.push_back((revision, id.clone()));
+                    self.live_item_revisions.remove(*id);
+                    self.live_removals.push_back((revision, id.to_string()));
                 }
             }
             if membership_changed {
@@ -665,6 +785,7 @@ impl Runtime {
                 }
             }
             self.live_connections = connections;
+            self.live_connection_keys = incoming_keys;
         }
     }
 
@@ -1767,8 +1888,7 @@ impl Runtime {
         }
         self.live_revision = self.live_revision.saturating_add(1);
         let revision = self.live_revision;
-        for connection in &self.live_connections {
-            let id = connection_history_key(connection);
+        for id in self.live_connection_keys.drain(..) {
             self.live_item_revisions.remove(&id);
             self.live_removals.push_back((revision, id));
         }
@@ -2906,6 +3026,17 @@ mod passive_failure_tests {
     use super::*;
 
     fn conn(id: &str, host: &str, node: &str, up: u64, down: u64) -> ConnectionInfo {
+        conn_with_chains(id, host, node, vec![node.into()], up, down)
+    }
+
+    fn conn_with_chains(
+        id: &str,
+        host: &str,
+        node: &str,
+        chains: Vec<String>,
+        up: u64,
+        down: u64,
+    ) -> ConnectionInfo {
         ConnectionInfo {
             id: id.into(),
             destination: format!("{host}:443"),
@@ -2916,7 +3047,7 @@ mod passive_failure_tests {
             conn_type: String::new(),
             source: "127.0.0.1:1".into(),
             process: String::new(),
-            chains: vec![node.into()],
+            chains,
             node: node.into(),
             rule: String::new(),
             rule_payload: String::new(),
@@ -2994,6 +3125,149 @@ mod passive_failure_tests {
         close_with_lifetime(&mut runtime, 8_000);
 
         let stats = runtime.passive_node_stats("node-x", 20_000);
+        assert_eq!(stats.suspicious, 0);
+    }
+
+    #[test]
+    fn multi_tag_query_matches_single_tag_semantics() {
+        let mut runtime = Runtime::new();
+        runtime.ingest_connections(vec![
+            conn("a", "a.example", "node-a", 0, 0),
+            conn("b", "b.example", "node-b", 9_000, 9_000),
+            conn("c", "c.example", "node-c", 0, 0),
+            conn_with_chains(
+                "d",
+                "d.example",
+                "",
+                vec!["proxy".into(), "node-a".into()],
+                0,
+                0,
+            ),
+        ]);
+        close_with_lifetime(&mut runtime, 5_000);
+        runtime.record_proxy_dial_failure("node-c", "log.example");
+
+        let tags = [
+            "node-a".to_string(),
+            "node-b".to_string(),
+            "node-c".to_string(),
+        ];
+        let multi = runtime.passive_stats_for_tags(&tags, 20_000);
+        for tag in &tags {
+            let single = runtime.passive_node_stats(tag, 20_000);
+            assert_eq!(
+                multi.get(tag),
+                Some(&single),
+                "multi-query stats for {tag} must equal single-tag query"
+            );
+        }
+        // Chains attribute: record d ran through the proxy group onto node-a.
+        assert_eq!(multi["node-a"].total, 2);
+        // Log events count toward their own tag only.
+        assert_eq!(multi["node-c"].suspicious, 2);
+        assert_eq!(multi["node-c"].total, 2);
+    }
+
+    #[test]
+    fn multi_tag_query_covers_unseen_tags_and_ignores_empty() {
+        let mut runtime = Runtime::new();
+        runtime.ingest_connections(vec![conn("a", "a.example", "node-a", 0, 0)]);
+        close_with_lifetime(&mut runtime, 5_000);
+
+        let tags = [
+            "node-a".to_string(),
+            "never-seen".to_string(),
+            String::new(),
+        ];
+        let multi = runtime.passive_stats_for_tags(&tags, 20_000);
+        assert_eq!(multi["node-a"].total, 1);
+        assert_eq!(multi["never-seen"], PassiveNodeStats::default());
+        // The empty tag must not absorb records with an empty node field
+        // (record d style) — only real tags are queried.
+        assert!(!multi.contains_key(""));
+    }
+
+    /// Documents the single-pass win: one call for 1000 tags over a full
+    /// journal (~O(history)) instead of 1000 scans (~O(tags × history)).
+    #[test]
+    #[ignore = "perf smoke, run with --release -- --ignored"]
+    fn multi_tag_query_single_pass_perf() {
+        let mut runtime = Runtime::new();
+        let tags: Vec<String> = (0..1_000).map(|i| format!("node-{i:016x}")).collect();
+        let batch: Vec<_> = (0..MAX_REQUEST_HISTORY)
+            .map(|i| {
+                let tag = &tags[i % tags.len()];
+                conn(&format!("c{i}"), &format!("h{i}.example"), tag, 0, 0)
+            })
+            .collect();
+        runtime.ingest_connections(batch);
+        runtime.ingest_connections(Vec::new());
+
+        let started = std::time::Instant::now();
+        let stats = runtime.passive_stats_for_tags(&tags, 120_000);
+        let multi_ms = started.elapsed().as_millis();
+
+        let started = std::time::Instant::now();
+        for tag in tags.iter().step_by(50) {
+            let _ = runtime.passive_node_stats(tag, 120_000);
+        }
+        let per_tag_scaled = started.elapsed().as_millis() * 50;
+
+        assert_eq!(stats.len(), 1_000);
+        assert!(stats.values().all(|s| s.total > 0));
+        println!("multi-pass(all tags)={multi_ms}ms vs per-tag(scaled x50)={per_tag_scaled}ms");
+        assert!(
+            (multi_ms as i128) < (per_tag_scaled as i128).max(1),
+            "single pass must beat per-tag scans"
+        );
+    }
+
+    #[test]
+    fn kernel_log_dial_failures_drive_passive_stats_without_journal() {
+        // mihomo shape: dial failures never enter /connections (tracker is
+        // created post-dial), so the journal stays empty and the kernel-log
+        // ring is the only signal.
+        let mut runtime = Runtime::new();
+        for (dest, n) in [
+            ("github.com", 2),
+            ("ipwho.is", 1),
+            ("api.myip.com", 1),
+            ("ip-api.com", 1),
+        ] {
+            for _ in 0..n {
+                runtime.record_proxy_dial_failure("node-dead", dest);
+            }
+        }
+        // An unrelated tag's failures must not bleed into this query.
+        runtime.record_proxy_dial_failure("node-other", "evil.example");
+
+        let stats = runtime.passive_node_stats("node-dead", 20_000);
+        assert_eq!(stats.total, 5);
+        assert_eq!(stats.suspicious, 5);
+        assert_eq!(stats.sus_dests, 4);
+        assert!(stats.soft_degraded(5, 0.15));
+        assert!(stats.hard_degraded());
+    }
+
+    #[test]
+    fn dial_failure_ring_expires_and_blends_with_journal() {
+        let mut runtime = Runtime::new();
+        runtime.ingest_connections(vec![conn("ok", "ok.example", "node-m", 9_000, 9_000)]);
+        close_with_lifetime(&mut runtime, 1_000);
+        runtime.record_proxy_dial_failure("node-m", "fail.example");
+
+        let stats = runtime.passive_node_stats("node-m", 60_000);
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.suspicious, 1);
+        assert_eq!(stats.fail_rate(), 0.5);
+
+        // Aged-out events leave the ring entirely.
+        let now = now_unix_ms();
+        for ev in runtime.proxy_dial_failures.iter_mut() {
+            ev.at_ms = now - 300_000;
+        }
+        let stats = runtime.passive_node_stats("node-m", 60_000);
+        assert_eq!(stats.total, 1);
         assert_eq!(stats.suspicious, 0);
     }
 }

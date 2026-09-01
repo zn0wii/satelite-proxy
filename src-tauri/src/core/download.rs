@@ -674,6 +674,14 @@ fn extract_from_zip(kind: CoreKind, archive: &Path, dest: &Path, bin_dir: &Path)
         } else if kind == CoreKind::Xray && (file_name == "geosite.dat" || file_name == "geoip.dat")
         {
             dat_indexes.push((i, file_name.to_string()));
+        } else if cfg!(target_os = "windows")
+            && kind == CoreKind::SingBox
+            && file_name == "libcronet.dll"
+        {
+            // Required at runtime by naive outbounds (loaded from the
+            // executable directory); official sing-box Windows archives ship
+            // it alongside the binary. Staging counterpart: `paths.rs`.
+            dat_indexes.push((i, file_name.to_string()));
         }
     }
     let idx = target_index

@@ -17,6 +17,8 @@ mod paths;
 
 pub use assets::ensure_geodata;
 #[cfg(target_os = "windows")]
+pub use assets::ensure_libcronet;
+#[cfg(target_os = "windows")]
 pub use assets::ensure_wintun;
 pub use assets::prefetch_runtime_assets;
 pub use assets::{download_missing_geodata, geodata_state};

@@ -194,6 +194,29 @@ fn stage_bundled_core(app_data_dir: &Path, bundled: &Path, kind: CoreKind) -> Ap
             }
         }
     }
+    // sing-box (Windows): the naive outbound loads Cronet dynamically from
+    // the executable directory — without libcronet.dll beside the staged
+    // binary, any config containing a naive node FATALs at startup
+    // ("cronet: library not found"). Official Windows archives ship the DLL;
+    // core downloads extract it (see `extract_from_zip`), bundled installs
+    // stage it here. Refreshed in lockstep with the binary (this point is
+    // only reached when the staged binary actually changed).
+    #[cfg(target_os = "windows")]
+    if kind == CoreKind::SingBox {
+        if let Some(parent) = bundled.parent() {
+            let src = parent.join("libcronet.dll");
+            if src.is_file() {
+                let target = core_dir(app_data_dir).join("libcronet.dll");
+                let needs_copy = match (std::fs::metadata(&target), std::fs::metadata(&src)) {
+                    (Ok(t), Ok(s)) => t.len() != s.len(),
+                    _ => true,
+                };
+                if needs_copy {
+                    let _ = std::fs::copy(&src, &target);
+                }
+            }
+        }
+    }
     // Xray: stage geosite/geoip data files shipped alongside the binary so
     // geosite:/geoip: routing works from the app-data asset location, plus
     // wintun.dll (Windows tun adapter driver, not in the Xray release zip).
@@ -465,6 +488,59 @@ mod tests {
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("macos")
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("linux")
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn staging_places_libcronet_next_to_sing_box() {
+        // naive outbounds load Cronet from the executable directory at
+        // runtime; without the DLL the core FATALs on startup for any
+        // config with a naive node. Bundled staging must deliver it into
+        // the same `bin/` the staged binary lands in.
+        let root = std::env::temp_dir().join(format!(
+            "satelite-core-cronet-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let app_data = root.join("app-data");
+        let resources = root.join("resources-root");
+        let platform = detect_platform().expect("supported test platform");
+        let bundled_dir = resources.join("bin").join(platform.asset_suffix);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled dir");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.binary_name()),
+            b"bundled-core",
+        )
+        .expect("write bundled core");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.version_file_name()),
+            b"v-test",
+        )
+        .expect("write version");
+        std::fs::write(bundled_dir.join("libcronet.dll"), b"fake-cronet-bytes")
+            .expect("write fake libcronet");
+
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(staged.is_some());
+        // Which bundled candidate wins is environment-dependent (the dev
+        // source tree outranks the sandbox and carries the real DLL), so the
+        // invariant under test is presence next to the staged binary — not
+        // the exact bytes.
+        let dll = core_dir(&app_data).join("libcronet.dll");
+        assert!(
+            dll.is_file(),
+            "libcronet.dll must be staged next to the binary"
+        );
+        assert!(
+            std::fs::metadata(&dll).is_ok_and(|m| m.len() > 0),
+            "staged libcronet.dll must not be empty"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

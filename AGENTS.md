@@ -222,12 +222,12 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 - `kind.rs` — ★ `CoreKind` 描述符：binary 名、GitHub repo、release 资产命名（**三内核命名规则不同**：sing-box `sing-box-1.13.15-darwin-arm64.tar.gz` vs Xray `Xray-macos-arm64-v8a.zip` vs mihomo `mihomo-darwin-arm64-v1.19.30.gz` 裸 gz 二进制（darwin/linux）/）、版本参数与输出解析（mihomo `-v` → `Mihomo Meta vx.y.z …`）、`check_command_args`/`run_command_args` 完整参数构造（sing-box/Xray `run -c`；mihomo `-f <file> -d <home>`，home 从 config 路径推导）、spawn env（Xray 设 `XRAY_LOCATION_ASSET`；mihomo 无需 env，wintun.dll 放 exe 同目录）、日志前缀、协议支持集（`Protocol::xray_supported`/`mihomo_supported`）。
 - `manager.rs` — 进程生命周期（`CoreKind` 参数化）：sing-box `check -c` / Xray `run -test -c` / mihomo `-t -f` 校验 → 启动；**Xray + TUN 跳过预校验**（Xray 的 `-test` 会真建 tun 网卡需管理员，未提权必失败 exit 23；mihomo 的 `-t` 不建网卡可正常预校验）；Windows `CREATE_NO_WINDOW`；CoreState 状态机；优雅停止；TUN 提权链路内核无关（helper 按二进制名推断 kind）。
-- `download.rs` — GitHub Releases 下载/更新（按 kind 选 repo/资产/提取目标；Xray zip 额外提取 geodata；mihomo zip 仅含版本化 exe）。
-- `assets.rs` — Xray 资产：`ensure_geodata`（staged→bundled→Loyalsoldier v2ray-rules-dat 下载）、`ensure_wintun`；mihomo 资产：`ensure_mihomo_geodata`（`<data>/mihomo/` 的 Country.mmdb + **GeoSite.dat**（精确大小写）；staged→bundled→MetaCubeX/meta-rules-dat 下载——缺失时 mihomo 会经未启动的代理自下载而超时，故必须预置）。`prefetch_runtime_assets(kind,…)` 在**内核下载/更新完成后**即时预取该内核的运行时依赖（Xray→geodata、mihomo→geodata、两者 Windows→wintun；走下载代理，失败仅 warn），启动时的 `ensure_*` 降级为兜底（§9.22）。
+- `download.rs` — GitHub Releases 下载/更新（按 kind 选 repo/资产/提取目标；Xray zip 额外提取 geodata；sing-box Windows zip 额外提取 `libcronet.dll`；mihomo zip 仅含版本化 exe）。
+- `assets.rs` — Xray 资产：`ensure_geodata`（staged→bundled→Loyalsoldier v2ray-rules-dat 下载）、`ensure_wintun`；mihomo 资产：`ensure_mihomo_geodata`（`<data>/mihomo/` 的 Country.mmdb + **GeoSite.dat**（精确大小写）；staged→bundled→MetaCubeX/meta-rules-dat 下载——缺失时 mihomo 会经未启动的代理自下载而超时，故必须预置）；Windows sing-box：`ensure_libcronet` 启动兜底（**naive 出站运行期从 exe 目录动态加载 Cronet，DLL 缺失则含 naive 节点的配置启动即 FATAL**——新装由 staging/zip 提取落位，存量 bin 已有二进制不再走 stage，由此补齐；两处 sing-box 启动路径均调用）。`prefetch_runtime_assets(kind,…)` 在**内核下载/更新完成后**即时预取该内核的运行时依赖（Xray→geodata、mihomo→geodata、两者 Windows→wintun；走下载代理，失败仅 warn），启动时的 `ensure_*` 降级为兜底（§9.22）。
 - `job.rs` — Windows Job Object 绑定子进程，父进程异常退出时内核随之死亡（防端口占用残留）。
 - `elevate.rs` / `macos_auth.rs` / `macos_net.rs` — TUN 提权（Windows UAC / macOS 授权）。
 - `memory.rs` — 内存占用探测（Windows 用 NT 进程表 RSS）。
-- `paths.rs` — 内核二进制/版本文件路径解析（resource 目录 → data 目录 staging；bundled 布局三内核共用 sing-box 式平台目录名，release 资产名才按 kind 区分）。sing-box 保持 `bin/sing-box`+`version.txt` 存量布局；Xray 用 `bin/xray`+`xray-version.txt`；mihomo 用 `bin/mihomo`+`mihomo-version.txt`，home 目录 `mihomo_home_dir` = `<data>/mihomo`。
+- `paths.rs` — 内核二进制/版本文件路径解析（resource 目录 → data 目录 staging；bundled 布局三内核共用 sing-box 式平台目录名，release 资产名才按 kind 区分；Windows staged sing-box 同步落位 `libcronet.dll`，见 `assets.rs` 条目的 naive 说明）。sing-box 保持 `bin/sing-box`+`version.txt` 存量布局；Xray 用 `bin/xray`+`xray-version.txt`；mihomo 用 `bin/mihomo`+`mihomo-version.txt`，home 目录 `mihomo_home_dir` = `<data>/mihomo`。
 
 ### 5.6 运行时编排与外部 API
 

@@ -81,6 +81,14 @@
 
 > Satelite Proxy 仍在持续开发中，升级前请备份重要的配置文件。
 
+### macOS 提示「已损坏，无法打开」
+
+未签名应用会被 macOS 的 Gatekeeper 隔离标记拦下。终端执行以下命令后再打开即可：
+
+```bash
+sudo xattr -d com.apple.quarantine /Applications/Satelite.app
+```
+
 ## 🛠 技术栈
 
 - **内核**：[sing-box](https://github.com/SagerNet/sing-box)（默认）· [Xray](https://github.com/XTLS/Xray-core) · [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta）

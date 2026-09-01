@@ -217,24 +217,38 @@ export function NodesPage() {
     [displayed, groupBy, locale, t],
   );
 
-  // Collapsed group keys (session-only — collapse is a browsing gesture).
-  // Starts every group collapsed when grouping is (re)enabled or the
-  // dimension changes; subsequent data reloads under the same dimension
-  // don't reset groups the user has already opened.
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const collapsedForGroupByRef = useRef<GroupBy | null>(null);
-  useEffect(() => {
-    if (groupBy === "none") {
-      collapsedForGroupByRef.current = null;
-      return;
+  // Collapsed group keys, persisted per grouping dimension (keys from one
+  // dimension aren't meaningful in another). Default is every group
+  // expanded; the user's last collapse state is restored on return.
+  function collapsedStorageKey(by: GroupBy) {
+    return `nodes.collapsedGroups.${by}`;
+  }
+  function loadCollapsed(by: GroupBy): Set<string> {
+    if (by === "none") return new Set();
+    try {
+      const raw = localStorage.getItem(collapsedStorageKey(by));
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      return new Set();
     }
-    if (collapsedForGroupByRef.current === groupBy) return;
-    if (groups.length === 0) return; // wait for data before collapsing
-    collapsedForGroupByRef.current = groupBy;
-    setCollapsedGroups(new Set(groups.map((g) => g.key)));
-  }, [groupBy, groups]);
+  }
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() =>
+    loadCollapsed(groupBy),
+  );
+  // Reload persisted state when the dimension changes (keys don't carry over).
+  const prevGroupByRef = useRef<GroupBy>(groupBy);
+  useEffect(() => {
+    if (prevGroupByRef.current === groupBy) return;
+    prevGroupByRef.current = groupBy;
+    setCollapsedGroups(loadCollapsed(groupBy));
+  }, [groupBy]);
+  useEffect(() => {
+    if (groupBy === "none") return;
+    localStorage.setItem(
+      collapsedStorageKey(groupBy),
+      JSON.stringify([...collapsedGroups]),
+    );
+  }, [groupBy, collapsedGroups]);
   function toggleGroup(key: string) {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -242,6 +256,12 @@ export function NodesPage() {
       else next.add(key);
       return next;
     });
+  }
+  function collapseAll() {
+    setCollapsedGroups(new Set(groups.map((g) => g.key)));
+  }
+  function expandAll() {
+    setCollapsedGroups(new Set());
   }
 
   const listItems = useMemo(() => {
@@ -770,6 +790,22 @@ export function NodesPage() {
                 { value: "country", label: t("nodes.groupCountry") },
               ]}
             />
+            <div className="node-group-fold" role="group" aria-label={t("nodes.groupBy")}>
+              <span
+                className={`node-group-fold-label${groupBy === "none" ? " disabled" : ""}`}
+                onClick={groupBy === "none" ? undefined : collapseAll}
+                title={t("nodes.collapseAll")}
+              >
+                ⊖
+              </span>
+              <span
+                className={`node-group-fold-label${groupBy === "none" ? " disabled" : ""}`}
+                onClick={groupBy === "none" ? undefined : expandAll}
+                title={t("nodes.expandAll")}
+              >
+                ⊕
+              </span>
+            </div>
             <GlassSeg
               value={viewMode}
               ariaLabel="视图"

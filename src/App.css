@@ -2005,6 +2005,34 @@ tr.row-active {
   gap: 0.5rem;
 }
 
+/* Collapse-all / expand-all pair next to the group seg — always present,
+   dims when grouping is off instead of disappearing (avoids layout shift). */
+.node-group-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.3rem;
+}
+
+.node-group-fold-label {
+  color: var(--accent, #5eb89a);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.node-group-fold-label:hover:not(.disabled) {
+  opacity: 0.75;
+}
+
+.node-group-fold-label.disabled {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .segmented.compact {
   display: inline-grid;
   grid-auto-flow: column;

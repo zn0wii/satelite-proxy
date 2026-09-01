@@ -33,6 +33,7 @@ ureq = { version = "2.12", default-features = true, features = ["json"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 flate2 = "1"
+if-addrs = "0.15.0"
 tar = "0.4"
 zip = "2"
 tauri-plugin-deep-link = "2"

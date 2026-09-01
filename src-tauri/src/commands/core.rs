@@ -482,24 +482,62 @@ fn parse_version(v: &str) -> Vec<u32> {
         .collect()
 }
 
-/// The machine's LAN IPv4 (of the default-route interface), for the
-/// dashboard's listen card. The UDP "connect" trick only makes the OS pick
-/// a route — no packet is sent — so it works offline as long as an
-/// interface with a default route exists. `None` when there is no such
-/// address (e.g. fully offline).
+/// The machine's LAN IPv4, for the dashboard's listen card.
+///
+/// Enumerates real network interfaces instead of the UDP "connect" trick:
+/// once tun mode grabs the default route, that trick returns the tun
+/// interface's own address (sing-box's fixed 172.19.0.1, mihomo's default
+/// 198.18.0.1) instead of the machine's actual LAN IP. Skips loopback and
+/// tun/tap interfaces (by name prefix, since tun adapters aren't otherwise
+/// distinguishable from a real NIC) and returns the first private IPv4
+/// found. `None` when no such address exists (e.g. fully offline).
 #[tauri::command]
 pub fn get_lan_ip() -> Option<String> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    match sock.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
-        _ => None,
-    }
+    let ifaces = if_addrs::get_if_addrs().ok()?;
+    ifaces.into_iter().find_map(|iface| {
+        if is_virtual_interface(&iface.name) {
+            return None;
+        }
+        match iface.ip() {
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() && v4.is_private() => {
+                Some(v4.to_string())
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Name prefixes used by tun/tap adapters created by sing-box and mihomo
+/// (utunN/tunN on macOS/Linux, "Meta"/"sing-tun" on Windows via wintun).
+fn is_virtual_interface(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["utun", "tun", "tap", "ppp", "meta", "wintun"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer_version;
+    use super::{is_newer_version, is_virtual_interface};
+
+    #[test]
+    fn recognizes_known_tun_interface_names() {
+        // Regression: after enabling tun mode, the old UDP-connect trick
+        // returned the tun adapter's own address (sing-box 172.19.0.1,
+        // mihomo 198.18.0.1) instead of the real LAN IP, because the
+        // default route now points at the tun interface.
+        assert!(is_virtual_interface("utun7"));
+        assert!(is_virtual_interface("tun0"));
+        assert!(is_virtual_interface("Meta"));
+        assert!(is_virtual_interface("wintun"));
+    }
+
+    #[test]
+    fn does_not_flag_real_nics() {
+        assert!(!is_virtual_interface("en0"));
+        assert!(!is_virtual_interface("eth0"));
+        assert!(!is_virtual_interface("Wi-Fi"));
+    }
 
     #[test]
     fn bundled_ahead_of_latest_release_is_not_an_update() {

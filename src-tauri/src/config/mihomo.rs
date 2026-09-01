@@ -284,10 +284,18 @@ fn url_test_group(name: &str, members: Vec<String>, probe_url: &str) -> Mapping 
 /// mihomo tun block. mihomo works best with fake-ip DNS for tun —
 /// `build_dns` forces fake-ip whenever tun is on. `stack` defaults to
 /// system in mihomo; `strict-route` etc. stay at defaults intentionally.
+/// `route-exclude-address` mirrors the sing-box builder's
+/// `route_exclude_address`: without it, auto-route can pull host →
+/// 127.0.0.1 traffic (clash_api, the dev server, any local port) into the
+/// tun interface instead of leaving it on loopback.
 fn tun_block() -> Mapping {
     let mut t = Mapping::new();
     t.insert(str_yaml("enable"), Yaml::Bool(true));
     t.insert(str_yaml("auto-route"), Yaml::Bool(true));
+    t.insert(
+        str_yaml("route-exclude-address"),
+        Yaml::Sequence(vec![str_yaml("127.0.0.0/8"), str_yaml("::1/128")]),
+    );
     t.insert(
         str_yaml("dns-hijack"),
         Yaml::Sequence(vec![str_yaml("any:53")]),
@@ -1735,6 +1743,14 @@ mod tests {
         let doc = parse(&built);
         assert_eq!(doc["tun"]["enable"].as_bool(), Some(true));
         assert_eq!(doc["tun"]["auto-route"].as_bool(), Some(true));
+        assert_eq!(
+            doc["tun"]["route-exclude-address"][0].as_str(),
+            Some("127.0.0.0/8")
+        );
+        assert_eq!(
+            doc["tun"]["route-exclude-address"][1].as_str(),
+            Some("::1/128")
+        );
         assert_eq!(doc["tun"]["dns-hijack"][0].as_str(), Some("any:53"));
         assert_eq!(doc["dns"]["enhanced-mode"].as_str(), Some("fake-ip"));
         assert!(doc["dns"]["fake-ip-range"].as_str().is_some());

@@ -248,11 +248,15 @@ fn build_default(
     );
     rules.extend(fakeip_rules(&settings.fake_ip, TAG_LOCAL));
 
+    // `independent_cache` was removed in sing-box 1.14 with no replacement —
+    // the cache is now always keyed by transport name, making the field
+    // unnecessary. Omitted unconditionally: on pre-1.14 cores this is
+    // exactly the "independent cache" behavior (the field's default), so
+    // dropping it is a no-op there too.
     let dns = json!({
         "servers": servers,
         "rules": rules,
         "final": final_tag,
-        "independent_cache": settings.cache,
         "strategy": "prefer_ipv4"
     });
     BuiltDns {
@@ -336,6 +340,15 @@ mod tests {
             .find(|s| s["tag"] == TAG_REMOTE)
             .unwrap();
         assert_eq!(remote["detour"], json!("proxy"));
+    }
+
+    #[test]
+    fn independent_cache_is_never_emitted() {
+        // Removed in sing-box 1.14 with no replacement — the cache is now
+        // always keyed by transport name, so omitting the field matches the
+        // old default (`cache: true`, independent caching) on every core.
+        let b = build_dns_section(&DnsSettings::default(), false, &[]);
+        assert!(b.dns.get("independent_cache").is_none());
     }
 
     #[test]

@@ -286,8 +286,8 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
         Ok(bytes) => bytes,
         Err(error) => return fail(app, id, error),
     };
-    let (format, source_rule_count, binary_scan) = match validate_source(&bytes) {
-        Ok(count) => (RuleSetFileFormat::Source, Some(count), None),
+    let (format, source_scan, binary_scan) = match validate_source(&bytes) {
+        Ok((count, contains_ip)) => (RuleSetFileFormat::Source, Some((count, contains_ip)), None),
         Err(_) if bytes.starts_with(b"SRS") => {
             // Structural parse validates the binary container without the
             // core, and is the only validation possible for AdGuard
@@ -328,14 +328,15 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
         return fail(app, id, error);
     }
 
-    let rule_count = match source_rule_count {
-        Some(count) => count,
+    let (rule_count, contains_ip) = match source_scan {
+        Some(scan) => scan,
         None => {
             let parsed = binary_scan.expect("binary sets are scanned before writing");
             if parsed.has_adguard {
                 // AdGuard rule-sets cannot be decompiled by sing-box; the
-                // structural scan above already validated the file.
-                parsed.display_count
+                // structural scan above already validated the file. Their
+                // content is domain-only (`ad_guard_domain` lines), never IP.
+                (parsed.display_count, false)
             } else {
                 let resource_dir = app.path().resource_dir().ok();
                 let (core, _) = crate::core::resolve_core_bin(
@@ -356,7 +357,7 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
                         .map_err(|error| error.to_string())
                         .and_then(|result| result);
                         match result {
-                            Ok(count) => count,
+                            Ok(scan) => scan,
                             Err(error) => {
                                 let _ = std::fs::remove_file(&path);
                                 return fail(app, id, error);
@@ -365,7 +366,10 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
                     }
                     // No core available to decompile with: the structural
                     // scan already verified the file, accept it as-is.
-                    None => parsed.display_count,
+                    // Content type is unknown; keep the DNS-side reference
+                    // (assume domain-only) rather than pessimistically
+                    // dropping it.
+                    None => (parsed.display_count, false),
                 }
             }
         }
@@ -389,6 +393,7 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
             remote.download_error = None;
             remote.last_update = Some(attempt);
             remote.rule_count = Some(rule_count);
+            remote.contains_ip = Some(contains_ip);
             Ok((set.clone(), old_path))
         })
         .map_err(|error| error.to_string());
@@ -437,7 +442,12 @@ async fn download(url: &str, proxy_port: Option<u16>) -> Result<Vec<u8>, String>
         .await
 }
 
-fn validate_source(bytes: &[u8]) -> Result<u32, String> {
+/// Validates a source-format rule-set and returns its display count plus
+/// whether any rule (including nested logical ones) carries an `ip_cidr`
+/// condition. `contains_ip` feeds the config builder's decision to skip a
+/// DNS-side `rule_set` reference for new-enough sing-box cores — see
+/// `rules_contain_ip_cidr`.
+fn validate_source(bytes: &[u8]) -> Result<(u32, bool), String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("远程规则集不是有效的 sing-box source JSON: {error}"))?;
     let rules = value
@@ -453,7 +463,8 @@ fn validate_source(bytes: &[u8]) -> Result<u32, String> {
             total.checked_add(crate::domain::remote_rule_display_count(rule))
         })
         .ok_or_else(|| "远程规则集条目数量过多".to_string())?;
-    u32::try_from(count).map_err(|_| "远程规则集条目数量过多".to_string())
+    let count = u32::try_from(count).map_err(|_| "远程规则集条目数量过多".to_string())?;
+    Ok((count, crate::domain::rules_contain_ip_cidr(rules)))
 }
 
 /// Decompile and validate a binary `.srs` with the active sing-box core.
@@ -563,7 +574,7 @@ mod tests {
     fn accepts_sing_box_source_json() {
         assert_eq!(
             validate_source(br#"{"version":3,"rules":[{"domain_suffix":["example.com"]}]}"#),
-            Ok(1)
+            Ok((1, false))
         );
     }
 
@@ -573,7 +584,7 @@ mod tests {
             validate_source(
                 br#"{"version":3,"rules":[{"domain_suffix":["a.com","b.com"],"ip_cidr":["10.0.0.0/8"]}]}"#
             ),
-            Ok(3)
+            Ok((3, true))
         );
     }
 
@@ -603,6 +614,6 @@ mod tests {
         std::fs::write(&path, SRS).unwrap();
         let result = decompile_srs(&core, &path).and_then(|bytes| validate_source(&bytes));
         let _ = std::fs::remove_file(path);
-        assert_eq!(result, Ok(1));
+        assert_eq!(result, Ok((1, false)));
     }
 }

@@ -1202,6 +1202,7 @@ mod tests {
             last_update: None,
             last_attempt: None,
             rule_count: Some(2),
+            contains_ip: None,
         });
 
         let mut dns = DnsSettings::default();

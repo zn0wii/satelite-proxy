@@ -391,6 +391,17 @@ pub struct RemoteRuleSetConfig {
     /// Number of expanded display entries in the latest validated cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_count: Option<u32>,
+    /// Whether the latest validated cache carries any `ip_cidr` condition.
+    /// `None` until a download completes (never fetched yet). sing-box
+    /// 1.14+ rejects a DNS rule that references a rule-set containing
+    /// `ip_cidr` (Legacy Address Filter Fields) — the config builder uses
+    /// `Some(true)` to skip the DNS-side reference for such sets instead of
+    /// letting `sing-box check` fail. `None`/`Some(false)` both keep the
+    /// DNS-side reference: unknown content is assumed domain-only (the
+    /// common case, and the one the user actually wants remote-DNS
+    /// resolution for) rather than pessimistically dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains_ip: Option<bool>,
 }
 
 fn default_remote_format() -> String {
@@ -474,6 +485,7 @@ impl RuleSet {
             last_update: None,
             last_attempt: None,
             rule_count: None,
+            contains_ip: None,
         });
         set.strategy = RuleSetStrategy::from_target(target);
         if let Some(dns_strategy) = set.strategy.recommended_dns_strategy() {
@@ -655,6 +667,26 @@ pub fn remote_rule_is_complex(rule: &serde_json::Value) -> bool {
         })
 }
 
+/// Whether any rule (at any nesting depth, e.g. inside a `logical` group)
+/// carries an `ip_cidr` condition. sing-box 1.14+ rejects a DNS rule that
+/// references a rule-set containing this field (Legacy Address Filter
+/// Fields) — the config builder uses this to decide whether a remote
+/// rule-set's DNS-side reference is safe to keep. Recurses structurally
+/// instead of parsing headless-rule semantics, so nested `logical`/`rules`
+/// groups are covered without modeling their shape.
+pub fn rules_contain_ip_cidr(rules: &[serde_json::Value]) -> bool {
+    fn value_contains_ip_cidr(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(object) => object
+                .iter()
+                .any(|(field, nested)| field == "ip_cidr" || value_contains_ip_cidr(nested)),
+            serde_json::Value::Array(items) => items.iter().any(value_contains_ip_cidr),
+            _ => false,
+        }
+    }
+    rules.iter().any(value_contains_ip_cidr)
+}
+
 /// Count the rows produced when a source rule is expanded for display.
 pub fn remote_rule_display_count(rule: &serde_json::Value) -> usize {
     if remote_rule_is_complex(rule) {
@@ -770,6 +802,42 @@ pub fn format_clash_rules_list(set_name: &str, rules: &[Rule]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rules_contain_ip_cidr_detects_top_level_field() {
+        let rules =
+            vec![serde_json::json!({"domain_suffix": ["a.com"], "ip_cidr": ["10.0.0.0/8"]})];
+        assert!(rules_contain_ip_cidr(&rules));
+    }
+
+    #[test]
+    fn rules_contain_ip_cidr_detects_nested_logical_rule() {
+        let rules = vec![serde_json::json!({
+            "type": "logical",
+            "mode": "and",
+            "rules": [
+                {"domain_suffix": ["a.com"]},
+                {"ip_cidr": ["10.0.0.0/8"]}
+            ]
+        })];
+        assert!(rules_contain_ip_cidr(&rules));
+    }
+
+    #[test]
+    fn rules_contain_ip_cidr_false_for_domain_only_rules() {
+        let rules = vec![
+            serde_json::json!({"domain_suffix": ["a.com"]}),
+            serde_json::json!({
+                "type": "logical",
+                "mode": "or",
+                "rules": [
+                    {"domain": ["b.com"]},
+                    {"domain_keyword": ["c"]}
+                ]
+            }),
+        ];
+        assert!(!rules_contain_ip_cidr(&rules));
+    }
 
     #[test]
     fn smart_keywords_whitelist_or_blacklist_or() {

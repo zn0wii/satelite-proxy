@@ -440,7 +440,7 @@ fn mihomo_geodata_info(app_data_dir: &std::path::Path) -> GeodataInfo {
             })
     };
     GeodataInfo {
-        geosite: find("geosite.dat"),
+        geosite: find("GeoSite.dat"),
         geoip: find("Country.mmdb"),
     }
 }

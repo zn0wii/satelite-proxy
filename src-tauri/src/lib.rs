@@ -425,6 +425,7 @@ pub fn run() {
             commands::download_core,
             commands::fetch_core_latest,
             commands::refresh_geodata,
+            commands::reset_core_to_bundled,
             commands::set_core_type,
             commands::test_nodes_latency,
             commands::ping_nodes_latency,

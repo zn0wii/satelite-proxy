@@ -271,6 +271,47 @@ pub fn inspect_core_bin(
     }
 }
 
+/// Remove a user-downloaded core so resolution falls back to the bundled
+/// copy ("restore factory core"). The bundled binary is verified to exist
+/// up front — the downloaded one is never dropped without a replacement.
+/// The next start stages the bundled binary back into `bin/` via the
+/// regular first-run path (`resolve_core_bin` → `stage_bundled_core`).
+///
+/// A running Windows core holds its image locked against deletion (but not
+/// against rename): when the direct delete fails, the binary is renamed
+/// aside (`<stem>.previous.exe`, same convention as download swaps) so
+/// `inspect_core_bin` reports the bundled copy immediately; the running
+/// process keeps executing the renamed image until its next (re)start.
+pub fn reset_core_to_bundled(
+    app_data_dir: &Path,
+    resource_dir: Option<&Path>,
+    kind: CoreKind,
+) -> AppResult<()> {
+    if find_bundled_core(resource_dir, kind).is_none() {
+        return Err(AppError::Core(format!(
+            "no bundled {} in this installation",
+            kind.display_name()
+        )));
+    }
+    let dest = core_bin_path(app_data_dir, kind);
+    if dest.is_file() {
+        if std::fs::remove_file(&dest).is_err() {
+            let previous = super::download::previous_core_path(kind, &dest);
+            let _ = std::fs::remove_file(&previous);
+            std::fs::rename(&dest, &previous).map_err(|e| {
+                AppError::Core(format!(
+                    "retire downloaded {} binary: {e}",
+                    kind.display_name()
+                ))
+            })?;
+        }
+    }
+    // The version file belongs to the downloaded install; the bundled source
+    // reads its own copy next to the resource binary.
+    let _ = std::fs::remove_file(version_file_path(app_data_dir, kind));
+    Ok(())
+}
+
 pub fn installed_core_version(app_data_dir: &Path, kind: CoreKind) -> Option<String> {
     let vf = version_file_path(app_data_dir, kind);
     if let Ok(s) = std::fs::read_to_string(vf) {
@@ -424,5 +465,60 @@ mod tests {
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("macos")
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("linux")
         );
+    }
+
+    #[test]
+    fn reset_retires_downloaded_core_and_falls_back_to_bundled() {
+        let root = std::env::temp_dir().join(format!(
+            "satelite-core-reset-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let app_data = root.join("app-data");
+        let resources = root.join("resources-root");
+        let platform = detect_platform().expect("supported test platform");
+        let bundled_dir = resources.join("bin").join(platform.asset_suffix);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled dir");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.binary_name()),
+            b"bundled",
+        )
+        .expect("write bundled core");
+        std::fs::create_dir_all(core_dir(&app_data)).expect("create bin dir");
+        std::fs::write(
+            core_bin_path(&app_data, CoreKind::SingBox),
+            b"user download",
+        )
+        .expect("write downloaded core");
+        write_version_file(&app_data, CoreKind::SingBox, "1.14.0").expect("write version");
+
+        // Reset → downloaded binary + its version file are gone; inspection
+        // reports the bundled copy, and resolution stages it back on next use.
+        // (The no-bundled guard branch is untestable here: the dev source
+        // tree itself is a bundled candidate and carries the real binary.)
+        reset_core_to_bundled(&app_data, Some(&resources), CoreKind::SingBox).expect("reset");
+        let (path, source) = inspect_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(path.is_some());
+        assert!(!core_bin_path(&app_data, CoreKind::SingBox).exists());
+        assert!(!version_file_path(&app_data, CoreKind::SingBox).exists());
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert_eq!(staged, Some(core_bin_path(&app_data, CoreKind::SingBox)));
+
+        // Resetting again retires the staged copy too — the data-dir binary
+        // always loses — but resolution just re-stages it, so the core stays
+        // usable either way.
+        reset_core_to_bundled(&app_data, Some(&resources), CoreKind::SingBox)
+            .expect("reset already-bundled");
+        assert!(!core_bin_path(&app_data, CoreKind::SingBox).exists());
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(staged.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

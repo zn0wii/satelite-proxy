@@ -533,7 +533,9 @@ fn staged_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
     return dest.with_file_name(format!("{stem}.new"));
 }
 
-fn previous_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
+// pub(crate): `paths::reset_core_to_bundled` reuses the same aside-name
+// convention when retiring a locked (running) downloaded binary.
+pub(crate) fn previous_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
     let stem = kind.binary_name().trim_end_matches(".exe");
     #[cfg(target_os = "windows")]
     return dest.with_file_name(format!("{stem}.previous.exe"));

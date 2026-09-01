@@ -546,6 +546,13 @@ export function downloadCore(kind?: CoreKind | null, tag?: string | null) {
   });
 }
 
+/** Restore the bundled core over a user-downloaded one (core card factory
+ *  reset): drops the downloaded binary so the bundled copy is used again.
+ *  Restarts a running core of that kind. */
+export function resetCoreToBundled(kind?: CoreKind | null) {
+  return invoke<void>("reset_core_to_bundled", { kind: kind ?? null });
+}
+
 export function fetchCoreLatest(kind?: CoreKind | null) {
   return invoke<{
     version: string;

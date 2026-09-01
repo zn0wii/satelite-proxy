@@ -8,6 +8,7 @@ import {
   checkCoreUpdate,
   diagnoseNetwork,
   downloadCore,
+  resetCoreToBundled,
   getAppInstallPath,
   getCoreInfo,
   getProxyStatus,
@@ -623,7 +624,10 @@ export function SettingsPage() {
     }
   }
 
-  async function onDownloadCore(kind: CoreKind) {
+  /** Downloads a core (latest, or an exact tag for factory restore).
+   *  Returns whether the install succeeded — callers may follow up with a
+   *  restart when the new binary must take effect immediately. */
+  async function onDownloadCore(kind: CoreKind, tag?: string | null): Promise<boolean> {
     setCoreBusyKind(kind);
     setCoreError(null);
     const status = await getProxyStatus().catch(() => null);
@@ -638,10 +642,12 @@ export function SettingsPage() {
       via_proxy: viaProxy,
     });
     try {
-      await downloadCore(kind, null);
+      await downloadCore(kind, tag ?? null);
       await reloadCore();
+      return true;
     } catch (e) {
       setCoreError(typeof e === "string" ? e : String(e));
+      return false;
     } finally {
       setCoreBusyKind(null);
       setCoreProgress(null);
@@ -650,6 +656,42 @@ export function SettingsPage() {
 
   async function onCheckCoreUpdate(kind: CoreKind) {
     await runCoreUpdateCheck(kind, cores[kind]?.version ?? null, true);
+  }
+
+  /** Core card "factory reset": with a bundled copy, drop the user-downloaded
+   *  binary so the bundled one takes over (backend restarts a running core of
+   *  the same kind). Without one (default installs bundle only sing-box),
+   *  restore = re-downloading the pinned factory version through the normal
+   *  download pipeline, progress bar included. */
+  async function onRestoreCore(kind: CoreKind) {
+    const info = cores[kind];
+    if (info?.bundled_version) {
+      if (!confirm(t("settings.coreRestoreConfirm", { v: info.bundled_version }))) return;
+      setCoreBusyKind(kind);
+      setCoreError(null);
+      try {
+        await resetCoreToBundled(kind);
+        await reloadCore();
+      } catch (e) {
+        setCoreError(typeof e === "string" ? e : String(e));
+      } finally {
+        setCoreBusyKind(null);
+      }
+      return;
+    }
+    const factory = info?.factory_version;
+    if (!factory) return;
+    if (!confirm(t("settings.coreRestoreDlConfirm", { v: factory }))) return;
+    const ok = await onDownloadCore(kind, factory);
+    // Mirror the bundled path: when this kind is the running active core,
+    // restart so the factory binary takes effect immediately (a plain
+    // "update core" download deliberately leaves that to the user).
+    if (ok && (settings?.core_type ?? "singbox") === kind) {
+      const status = await getProxyStatus().catch(() => null);
+      if (status?.running) {
+        await restartProxy();
+      }
+    }
   }
 
   /** Switch the active core; a running core restarts onto the new binary. */
@@ -676,6 +718,9 @@ export function SettingsPage() {
       coreProgress && (coreProgress.kind ?? "singbox") === kind
         ? coreProgress
         : null;
+    // Factory-reset target: the bundled copy when the installer ships one,
+    // otherwise the pinned factory version (re-downloaded on restore).
+    const restoreTarget = info?.bundled_version ?? info?.factory_version ?? null;
     return (
       <div
         className={`card kernel-card${active ? " core-active" : ""}`}
@@ -758,19 +803,37 @@ export function SettingsPage() {
               ? t("settings.coreChecking")
               : t("settings.coreCheck")}
           </GlassButton>
+          {/* One stable label in every state — the previous state-dependent
+             wording (下载/更新内核/重新下载) flip-flopped with the
+             staged/downloaded source and read like random renames. Update
+             availability is already signaled by the pill in the meta row. */}
           <GlassButton
             icon="⤓"
             disabled={busy || checking}
             onClick={() => void onDownloadCore(kind)}
           >
-            {busy
-              ? t("settings.coreDownloading")
-              : info?.source === "downloaded"
-                ? info.update_available
-                  ? t("settings.coreUpdate")
-                  : t("settings.coreRedownload")
-                : t("settings.coreDownload")}
+            {busy ? t("settings.coreDownloading") : t("settings.coreDownload")}
           </GlassButton>
+          {/* Factory reset: always available on an installed core — the
+             staged-vs-downloaded `source` flips whenever the kernel restarts
+             (resolve re-stages the bundled binary into bin/), so keying
+             visibility off it made the button appear/vanish unpredictably.
+             Re-clicking at the target version is a harmless re-stage /
+             factory re-download. Only a missing core has nothing to reset. */}
+          {info?.installed && restoreTarget ? (
+            <GlassButton
+              icon="⟲"
+              disabled={busy || checking}
+              title={
+                info.bundled_version
+                  ? t("settings.coreRestoreHint", { v: info.bundled_version })
+                  : t("settings.coreRestoreDlHint", { v: restoreTarget })
+              }
+              onClick={() => void onRestoreCore(kind)}
+            >
+              {t("settings.coreRestore")}
+            </GlassButton>
+          ) : null}
         </div>
 
         {busy && progress && (

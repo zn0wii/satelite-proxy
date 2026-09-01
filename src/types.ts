@@ -430,6 +430,9 @@ export interface CoreInfo {
   /** bundled | downloaded | missing */
   source: string;
   bundled_version?: string | null;
+  /** Pinned factory version (backend `fallback_version`); restore target
+   *  for cores with no bundled copy — re-downloads this exact tag. */
+  factory_version?: string | null;
 }
 
 export interface CoreDownloadResult {

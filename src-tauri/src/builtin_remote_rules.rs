@@ -136,7 +136,9 @@ pub fn seed(
         let Ok(bytes) = std::fs::read(&stable) else {
             continue;
         };
-        let Ok(parsed) = crate::srs::parse(&bytes) else {
+        // `parse_with_rules` (not plain `parse`): the IP scan reads
+        // `parsed.rules`, which only the rules-collecting variant fills in.
+        let Ok(parsed) = crate::srs::parse_with_rules(&bytes) else {
             crate::app_log::warn(
                 "builtin_rules",
                 format!("stable cache {} is not valid SRS", stable.display()),
@@ -157,7 +159,11 @@ fn now_secs() -> i64 {
 
 /// Whether a parsed `.srs` carries an `ip_cidr` condition. AdGuard sets are
 /// domain-only by construction (`ad_guard_domain` lines) and never scanned.
-fn parsed_srs_contains_ip(parsed: &crate::srs::ParsedSrs) -> bool {
+///
+/// Only meaningful on a `parse_with_rules` result: plain `srs::parse` never
+/// fills `rules` in, so this would read `None` as "no ip conditions" and
+/// mislabel an IP-only set as domain-only.
+pub(crate) fn parsed_srs_contains_ip(parsed: &crate::srs::ParsedSrs) -> bool {
     !parsed.has_adguard
         && parsed
             .rules
@@ -198,7 +204,9 @@ pub fn restore_set(
     let Ok(bytes) = std::fs::read(&path) else {
         return set;
     };
-    let Ok(parsed) = crate::srs::parse(&bytes) else {
+    // `parse_with_rules`: the IP scan reads the collected rules (see
+    // `parsed_srs_contains_ip`).
+    let Ok(parsed) = crate::srs::parse_with_rules(&bytes) else {
         return set;
     };
     let contains_ip = parsed_srs_contains_ip(&parsed);
@@ -210,6 +218,14 @@ pub fn restore_set(
 mod tests {
     use super::*;
     use crate::domain::build_builtin_remote_set;
+
+    /// `sing-box rule-set compile` output of
+    /// `{"version":3,"rules":[{"ip_cidr":["1.0.1.0/24","1.0.2.0/23"]}]}`.
+    const IP_ONLY_SRS: &[u8] = &[
+        0x53, 0x52, 0x53, 0x02, 0x78, 0xda, 0x62, 0x64, 0x60, 0x63, 0x64, 0x80, 0x00, 0x46, 0x16,
+        0x46, 0x06, 0x46, 0x06, 0x16, 0x46, 0x06, 0xe6, 0xff, 0xff, 0x19, 0x00, 0x01, 0x00, 0x00,
+        0xff, 0xff, 0x06, 0x43, 0x02, 0x16,
+    ];
 
     // Minimal valid binary rule-set produced by `sing-box rule-set compile`
     // (one domain rule); the same blob is used in `remote_rule_auto` tests.
@@ -278,6 +294,31 @@ mod tests {
         // install must not hit the network on its first tick.
         assert!(remote.last_attempt.is_some());
         assert!(remote.last_update.is_some());
+
+        sandbox.cleanup();
+    }
+
+    #[test]
+    fn seed_scans_ip_only_cache_with_collected_rules() {
+        // Regression (sing-box 1.14, 2026-09): `parsed_srs_contains_ip` reads
+        // `parsed.rules`, which only `parse_with_rules` fills in — seeding
+        // must mark the IP-only geoip set `Some(true)`, or the config builder
+        // emits a DNS-side reference sing-box 1.14 rejects (Legacy Address
+        // Filter Fields) whenever a fakeip rule exists.
+        let sandbox = Sandbox::new("ip-only");
+        let spec = &BUILTIN_REMOTE_RULE_SETS[1]; // system-geoip-cn (ip_only)
+        sandbox.bundle(spec, IP_ONLY_SRS);
+        let mut store = crate::storage::AppStore::default();
+        store.rule_sets.push(build_builtin_remote_set(spec));
+
+        seed(
+            &sandbox.app_data,
+            Some(sandbox.resources.parent().unwrap()),
+            &mut store,
+        );
+
+        let set = store.rule_sets.iter().find(|s| s.id == spec.id).unwrap();
+        assert_eq!(set.remote.as_ref().unwrap().contains_ip, Some(true));
 
         sandbox.cleanup();
     }

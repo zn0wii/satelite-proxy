@@ -3,8 +3,9 @@
 use crate::config::dns_build::{build_dns_section, build_hosts_route_rules};
 use crate::config::punycode::to_ascii_domain;
 use crate::domain::{
-    AutoSelectMode, DnsSettings, ExtraInbound, OutboundMode, Protocol, ProtocolConfig, ProxyNode,
-    Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType, TlsConfig, Transport,
+    builtin_remote_ip_only, AutoSelectMode, DnsSettings, ExtraInbound, OutboundMode, Protocol,
+    ProtocolConfig, ProxyNode, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType, TlsConfig,
+    Transport,
 };
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
@@ -596,15 +597,20 @@ pub(crate) fn clamp_rule_pin_to_set(set: &RuleSet, rule: &mut Rule) {
 /// is always skipped on the DNS side: DNS resolution never has a destination
 /// IP to evaluate `ip_cidr` against, so the reference is dead weight even on
 /// pre-1.14 cores that merely tolerate it — sing-box 1.14+ additionally
-/// rejects it outright as Legacy Address Filter Fields. This holds even if
-/// the same set also has domain rows. A domain-only rule-set that happens to
-/// route through proxy still needs its DNS-side reference (that's how "this
-/// rule-set uses remote DNS" is expressed), so the skip is keyed off content,
-/// not source: inline sets look at their own `RuleType::IpCidr` rows; remote
-/// sets look at `remote.contains_ip` from the last successful download
-/// (`None` — not yet downloaded — keeps the reference, treating unknown
-/// content as the more common domain-only case rather than pessimistically
-/// dropping it).
+/// rejects it outright (FATAL at check/startup) as Legacy Address Filter
+/// Fields **whenever a fakeip rule is also present**, the classic
+/// "resolve-real-then-check-geoip" split the deprecation targets. This holds
+/// even if the same set also has domain rows. A domain-only rule-set that
+/// happens to route through proxy still needs its DNS-side reference (that's
+/// how "this rule-set uses remote DNS" is expressed), so the skip is keyed
+/// off content, not source: inline sets look at their own `RuleType::IpCidr`
+/// rows; remote sets look at `remote.contains_ip` from the last successful
+/// download (`None` — not yet downloaded — keeps the reference, treating
+/// unknown content as the more common domain-only case rather than
+/// pessimistically dropping it). Bundled sets short-circuit all of that with
+/// static knowledge (`builtin_remote_ip_only`): their content is known at
+/// compile time, and their `contains_ip` metadata may be missing on stores
+/// downloaded before the field existed.
 fn build_grouped_rule_sets(
     sets: &[RuleSet],
     nodes: &[ProxyNode],
@@ -617,8 +623,11 @@ fn build_grouped_rule_sets(
 
     for set in sets.iter().filter(|set| set.enabled) {
         let skip_dns_rule = match &set.remote {
-            Some(remote) => remote.contains_ip == Some(true),
-            None => set.rules.iter().any(|rule| rule.rule_type == RuleType::IpCidr),
+            Some(remote) => builtin_remote_ip_only(&set.id).or(remote.contains_ip) == Some(true),
+            None => set
+                .rules
+                .iter()
+                .any(|rule| rule.rule_type == RuleType::IpCidr),
         };
 
         if let Some(remote) = &set.remote {
@@ -2308,6 +2317,62 @@ mod tests {
         let (_, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
         assert_eq!(routes.len(), 1);
         assert_eq!(dns.len(), 1);
+    }
+
+    #[test]
+    fn builtin_geoip_dns_reference_skipped_without_download_metadata() {
+        // Regression (sing-box 1.14, 2026-09): stores seeded before the
+        // `contains_ip` metadata existed carry `None` for every builtin set.
+        // sing-box 1.14 FATALs at startup ("Legacy Address Filter Fields")
+        // on the geoip set's DNS-side reference whenever a fakeip rule
+        // exists, so the bundled specs must decide statically — no download
+        // metadata involved.
+        let sets: Vec<RuleSet> = crate::domain::BUILTIN_REMOTE_RULE_SETS
+            .iter()
+            .map(crate::domain::build_builtin_remote_set)
+            .map(|mut set| {
+                let remote = set.remote.as_mut().unwrap();
+                remote.local_path = Some(
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                remote.contains_ip = None;
+                set
+            })
+            .collect();
+        let (_, routes, dns) = build_grouped_rule_sets(&sets, &[], &[], &Default::default());
+        assert_eq!(routes.len(), 3);
+        let dns_tags: Vec<&str> = dns
+            .iter()
+            .filter_map(|rule| rule["rule_set"][0].as_str())
+            .collect();
+        assert!(dns_tags.contains(&"system-geosite-cn"));
+        assert!(dns_tags.contains(&"system-geolocation-not-cn"));
+        assert!(
+            !dns_tags.contains(&"system-geoip-cn"),
+            "IP-only builtin set must never carry a DNS-side reference: {dns_tags:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_ip_only_verdict_beats_stale_metadata() {
+        // Static spec knowledge wins over `remote.contains_ip`: an entry
+        // mislabeled `Some(false)` by an older build must still be skipped.
+        let mut set = crate::domain::build_builtin_remote_set(
+            crate::domain::builtin_remote_spec("system-geoip-cn").unwrap(),
+        );
+        let remote = set.remote.as_mut().unwrap();
+        remote.local_path = Some(
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+        remote.contains_ip = Some(false);
+        let (_, _, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
+        assert!(dns.is_empty());
     }
 
     #[test]

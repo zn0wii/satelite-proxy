@@ -8,6 +8,7 @@ mod conn_journal;
 mod core;
 mod domain;
 mod error;
+mod log_listener;
 mod log_retention;
 mod portable;
 mod proxy;
@@ -223,6 +224,11 @@ pub fn run() {
             // Connection journal: WebSocket snapshots @100ms + ring history.
             // Clash API only yields live sockets; low-interval stream reduces misses.
             conn_journal::spawn_connection_journal(app.handle().clone());
+
+            // Kernel log stream (mihomo): `/logs` WS dial failures feed the
+            // passive smart-switch stats — mihomo never lists failed dials
+            // in /connections (see log_listener.rs).
+            log_listener::spawn_log_listener(app.handle().clone());
 
             // Profile auto-update (per-subscription interval, default 1440 min).
             subscription_auto::spawn(app.handle().clone());

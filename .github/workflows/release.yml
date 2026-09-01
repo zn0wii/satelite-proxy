@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            core-dir: darwin-arm64
+            fetch-core: scripts/fetch-bundled-core-darwin-arm64.sh
+            singbox-config: src-tauri/tauri.singbox-darwin-arm64.conf.json
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            core-dir: darwin-amd64
+            fetch-core: scripts/fetch-bundled-core-darwin-amd64.sh
+            singbox-config: src-tauri/tauri.singbox-darwin-amd64.conf.json
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            core-dir: windows-amd64
+            fetch-core: scripts/fetch-bundled-core-windows-amd64.ps1
+            singbox-config: src-tauri/tauri.singbox-windows.conf.json
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches package.json version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME (version $TAG_VERSION) does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Fetch bundled sing-box core (Unix)
+        if: runner.os != 'Windows'
+        run: ${{ matrix.fetch-core }}
+
+      - name: Fetch bundled sing-box core (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh ${{ matrix.fetch-core }}
+
+      - name: Fetch bundled rule sets
+        run: scripts/fetch-bundled-rule-sets.sh
+        shell: bash
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Satelite ${{ github.ref_name }}"
+          releaseBody: "Automatic release"
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} --config ${{ matrix.singbox-config }}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "resources": [
+      "resources/bin/linux-amd64/sing-box",
+      "resources/bin/linux-amd64/version.txt",
+      "resources/rule-sets",
+      "resources/dns"
+    ]
+  }
+}

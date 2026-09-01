@@ -29,6 +29,11 @@ jobs:
             core-dir: windows-amd64
             fetch-core: scripts/fetch-bundled-core-windows-amd64.ps1
             singbox-config: src-tauri/tauri.singbox-windows.conf.json
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            core-dir: linux-amd64
+            fetch-core: scripts/fetch-bundled-core-linux-amd64.sh
+            singbox-config: src-tauri/tauri.singbox-linux-amd64.conf.json
 
     runs-on: ${{ matrix.platform }}
 
@@ -65,6 +70,12 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Fetch bundled sing-box core (Unix)
         if: runner.os != 'Windows'
         run: ${{ matrix.fetch-core }}
@@ -91,3 +102,41 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} --config ${{ matrix.singbox-config }}
+
+  windows-portable:
+    needs: release
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build portable zip
+        shell: pwsh
+        run: scripts/build-windows.ps1 -Bundle portable
+
+      - name: Upload portable zip to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" src-tauri/target/release/bundle/portable/*.zip --clobber

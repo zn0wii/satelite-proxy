@@ -1094,7 +1094,7 @@ button {
   padding: 0 1px;
 }
 
-tr.row-active {
+.row-active {
   background: var(--primary-muted);
 }
 
@@ -2208,14 +2208,50 @@ tr.row-active {
   height: 49px;
 }
 
-/* —— Nodes page grouping (subscription / protocol / country) ——
-   Header rows share the node row height so the fixed-size virtualizer
-   math stays exact; the grid header spans all columns at card height and
-   is padded with filler cells to keep the per-cell indexing aligned. */
-.node-group-row > td {
-  height: 30px;
+/* —— Nodes page list view (div/grid layout, replaces native <table>) ——
+   Group header rows need to grow past a single line without fighting
+   table row-height rules, so the whole list is div-based; columns are
+   aligned via a shared grid-template-columns instead of table auto-layout. */
+.node-list {
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+.node-list-head {
+  display: grid;
+  color: var(--muted);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--border);
+}
+
+.node-list-head > span {
+  padding: 0.45rem 0.55rem;
+}
+
+.node-list-row {
+  display: grid;
+}
+
+.node-list-row > span {
+  display: flex;
+  align-items: center;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+.node-list-group-row {
   /* Flex-center so the caret aligns with the label regardless of the
-     platform font's baseline handling (table cells default to baseline). */
+     platform font's baseline handling. */
   display: flex;
   align-items: center;
   padding: 0 0.75rem;
@@ -2260,15 +2296,20 @@ tr.row-active {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  min-width: 0;
+  text-align: left;
 }
 
 .node-group-flag {
   font-size: 1.05em;
+  flex-shrink: 0;
 }
 
 .node-group-count {
   color: var(--muted);
   font-size: 0.75rem;
+  flex-shrink: 0;
+  margin-left: 0.35rem;
 }
 
 
@@ -2283,23 +2324,15 @@ tr.row-active {
     0 0 10px color-mix(in srgb, var(--success) 20%, transparent);
 }
 
-.spot-armed .node-virtual-row > td {
+.spot-armed .node-list-row {
   border-top: 1px solid var(--success-border);
   border-bottom: 1px solid var(--success-border);
-}
-
-.spot-armed .node-virtual-row > td:first-child {
   border-left: 1px solid var(--success-border);
-  border-radius: var(--radius) 0 0 var(--radius);
-}
-
-.spot-armed .node-virtual-row > td:last-child {
   border-right: 1px solid var(--success-border);
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-radius: var(--radius);
 }
 
-
-.node-virtual-spacer > td {
+.node-virtual-spacer {
   padding: 0;
   border: 0;
 }

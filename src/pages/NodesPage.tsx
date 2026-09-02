@@ -28,6 +28,10 @@ const GRID_ROW_HEIGHT = 94;
 
 /** Slim group header band height (px). */
 const NODE_GROUP_H = 30;
+/** List view column template — shared by the head row and every data row so
+ *  they align without relying on native <table> auto-layout (dropped so the
+ *  group header row can span full width and grow past a single line). */
+const NODE_LIST_COLS = "40px minmax(0,1.44fr) 90px minmax(0,1fr) 70px 90px";
 /** .node-grid-virtual row gap (10px, tighter than the resting 0.65rem) —
  *  a spanning header row is followed by the gap before the next card row,
  *  so its pitch includes it. */
@@ -586,26 +590,27 @@ export function NodesPage() {
     }
   }
 
-  /** Slim collapsible group header row (list). */
+  /** Slim collapsible group header row (list). Plain div, not a table row —
+   *  spans the full row width so it can grow past a single line later
+   *  without fighting native <table> row-height rules. */
   function renderGroupRow(item: Extract<ListItem, { type: "group" }>) {
     const open = !collapsedGroups.has(item.key);
     return (
-      <tr
+      <div
         key={item.key}
-        className="node-group-row"
+        className="node-list-group-row"
+        style={{ height: NODE_GROUP_H }}
         onClick={() => toggleGroup(item.key)}
         title={t("nodes.groupToggleHint")}
       >
-        <td colSpan={6}>
-          {/* CSS-drawn caret — the ▾ glyph renders off-center in Segoe UI. */}
-          <span className={`node-group-caret${open ? "" : " closed"}`} />
-          <span className="node-group-label">
-            {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
-            {item.label}
-          </span>
-          <span className="node-group-count mono">{item.count}</span>
-        </td>
-      </tr>
+        {/* CSS-drawn caret — the ▾ glyph renders off-center in Segoe UI. */}
+        <span className={`node-group-caret${open ? "" : " closed"}`} />
+        <span className="node-group-label">
+          {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
+          {item.label}
+        </span>
+        <span className="node-group-count mono">{item.count}</span>
+      </div>
     );
   }
 
@@ -634,9 +639,13 @@ export function NodesPage() {
                 const active = n.id === currentId;
                 const isTesting = testingIds.has(n.id);
                 return (
-                  <tr
+                  <div
                     key={n.id}
-                    className={`node-virtual-row ${active ? "row-active" : ""}`}
+                    className={`node-list-row node-virtual-row ${active ? "row-active" : ""}`}
+                    style={{
+                      gridTemplateColumns: NODE_LIST_COLS,
+                      cursor: customRuntime ? "default" : "pointer",
+                    }}
                     onClick={
                       customRuntime
                         ? undefined
@@ -644,29 +653,28 @@ export function NodesPage() {
                           ? () => void onTestOne(n.id)
                           : () => void onSelect(n.id)
                     }
-                    style={{ cursor: customRuntime ? "default" : "pointer" }}
                     title={
                       !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
                     }
                   >
-                    <td>{active ? "●" : "○"}</td>
-                    <td>
+                    <span>{active ? "●" : "○"}</span>
+                    <span>
                       <div className="node-list-name">{n.name}</div>
                       {n.subscription_name ? (
                         <div className="node-sub-label" title={n.subscription_name}>
                           {n.subscription_name}
                         </div>
                       ) : null}
-                    </td>
-                    <td>
+                    </span>
+                    <span>
                       <code>{n.protocol}</code>
                       {delegatedProtocols.has(n.protocol) ? (
                         <span className="pill sidecar-tag">Xray</span>
                       ) : null}
-                    </td>
-                    <td>{n.server}</td>
-                    <td>{n.port}</td>
-                    <td className="node-list-latency">
+                    </span>
+                    <span>{n.server}</span>
+                    <span>{n.port}</span>
+                    <span className="node-list-latency">
                       <LatencyDisplay
                         ms={n.latency_ms}
                         latencyAt={n.latency_at}
@@ -674,8 +682,8 @@ export function NodesPage() {
                         unsupported={unsupportedIds.has(n.id)}
                         unsupportedLabel={pingNote}
                       />
-                    </td>
-                  </tr>
+                    </span>
+                  </div>
                 );
   }
 
@@ -882,22 +890,18 @@ export function NodesPage() {
         </div>
       ) : viewMode === "list" ? (
         <div className={`card table-wrap${clickTest ? " spot-armed" : ""}`}>
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 40 }}></th>
-                <th>{t("nodes.sortName")}</th>
-                <th>proto</th>
-                <th>host</th>
-                <th>port</th>
-                <th style={{ width: 90 }}>{t("nodes.sortLatency")}</th>
-              </tr>
-            </thead>
-            <tbody ref={listPx.containerRef as React.RefObject<HTMLTableSectionElement>}>
+          <div className="node-list">
+            <div className="node-list-head" style={{ gridTemplateColumns: NODE_LIST_COLS }}>
+              <span></span>
+              <span>{t("nodes.sortName")}</span>
+              <span>proto</span>
+              <span>host</span>
+              <span>port</span>
+              <span>{t("nodes.sortLatency")}</span>
+            </div>
+            <div ref={listPx.containerRef as React.RefObject<HTMLDivElement>}>
               {listWin.top > 0 && (
-                <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listWin.top }} />
-                </tr>
+                <div className="node-virtual-spacer" aria-hidden="true" style={{ height: listWin.top }} />
               )}
               {listItems
                 .slice(listWin.first, listWin.last)
@@ -909,12 +913,14 @@ export function NodesPage() {
                   ),
                 )}
               {listWin.bottom < (listOffsets[listOffsets.length - 1] ?? 0) && (
-                <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listWin.bottomPad }} />
-                </tr>
+                <div
+                  className="node-virtual-spacer"
+                  aria-hidden="true"
+                  style={{ height: listWin.bottomPad }}
+                />
               )}
-            </tbody>
-          </table>
+            </div>
+          </div>
         </div>
       ) : (
         <div

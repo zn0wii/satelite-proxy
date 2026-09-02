@@ -28,9 +28,19 @@ const GRID_ROW_HEIGHT = 94;
 
 /** Slim group header band height (px). */
 const NODE_GROUP_H = 30;
-/** .node-grid row gap (0.65rem) — a spanning header row is followed by the
- *  gap before the next card row, so its pitch includes it. */
-const GRID_GAP = 10.4;
+/** .node-grid-virtual row gap (10px, tighter than the resting 0.65rem) —
+ *  a spanning header row is followed by the gap before the next card row,
+ *  so its pitch includes it. */
+const GRID_GAP = 10;
+
+/** Cards-per-row in the grid view. Must mirror the .node-grid
+ *  grid-template-columns breakpoints in App.css (≤720px → 2, ≤900px → 3,
+ *  else 4); the pro window is a fixed 960px so this is 4 in practice. */
+function gridColumns() {
+  if (window.innerWidth <= 720) return 2;
+  if (window.innerWidth <= 900) return 3;
+  return 4;
+}
 
 /** Flat render items with per-item heights: the virtualizer runs in pixel
  *  space (itemSize=1) and a prefix-offset window maps px → items, which
@@ -45,7 +55,20 @@ type ListItem =
       h: number;
     }
   | { type: "node"; n: ProxyNode; h: number };
-type GridItem = ListItem;
+/** Grid items are row-granular: one item = one row of cards carrying the
+ *  full row pitch. Charging every card the full row height (the pre-fix
+ *  bug) overstated the virtual total ~cols× and the initial window only
+ *  rendered a couple of rows past the fold. */
+type GridItem =
+  | {
+      type: "group";
+      key: string;
+      label: string;
+      flag?: string;
+      count: number;
+      h: number;
+    }
+  | { type: "row"; nodes: ProxyNode[]; h: number };
 
 /** Render latency cell: spinner / ms / timeout / needs-core / dash */
 function LatencyDisplay({
@@ -150,6 +173,15 @@ export function NodesPage() {
   useEffect(() => {
     localStorage.setItem("nodes.groupBy.v2", groupBy);
   }, [groupBy]);
+
+  // Grid column count follows the CSS breakpoints (see gridColumns); kept
+  // as state so a resize re-chunks the virtual row items.
+  const [gridCols, setGridCols] = useState(gridColumns);
+  useEffect(() => {
+    const update = () => setGridCols(gridColumns());
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   const reload = useCallback(async () => {
     setError(null);
@@ -290,9 +322,17 @@ export function NodesPage() {
 
   const gridItems = useMemo(() => {
     const out: GridItem[] = [];
+    const pushRows = (list: ProxyNode[]) => {
+      for (let i = 0; i < list.length; i += gridCols) {
+        out.push({
+          type: "row",
+          nodes: list.slice(i, i + gridCols),
+          h: GRID_ROW_HEIGHT,
+        });
+      }
+    };
     if (groups.length === 0) {
-      for (const n of displayed)
-        out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
+      pushRows(displayed);
       return out;
     }
     for (const g of groups) {
@@ -306,13 +346,10 @@ export function NodesPage() {
         count: g.nodes.length,
         h: NODE_GROUP_H + GRID_GAP,
       });
-      if (open) {
-        for (const n of g.nodes)
-          out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
-      }
+      if (open) pushRows(g.nodes);
     }
     return out;
-  }, [groups, displayed, collapsedGroups]);
+  }, [groups, displayed, collapsedGroups, gridCols]);
 
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
 
@@ -887,7 +924,7 @@ export function NodesPage() {
               .map((item) =>
                 item.type === "group"
                   ? renderGroupHead(item)
-                  : renderNodeCard(item.n),
+                  : item.nodes.map((n) => renderNodeCard(n)),
               )}
           </div>
           {gridWin.bottom < (gridOffsets[gridOffsets.length - 1] ?? 0) && (

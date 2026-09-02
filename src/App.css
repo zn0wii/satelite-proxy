@@ -694,6 +694,12 @@ button {
      pages (rules <-> dns) don't wobble the content box width sideways. */
   scrollbar-gutter: stable;
   overscroll-behavior-x: none;
+  /* Virtualized lists (useVirtualRange) swap rows and resize spacers
+     above the viewport on every scroll; Chromium's scroll anchoring
+     "compensates" those DOM changes by adjusting scrollTop and fights the
+     virtualizer's own exact compensation — visible as jerky, non-linear
+     scrolling. The virtualizer owns scroll position; disable anchoring. */
+  overflow-anchor: none;
   padding: 0.75rem 1.5rem 1.75rem;
   background: transparent;
 }

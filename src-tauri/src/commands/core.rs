@@ -29,6 +29,10 @@ pub struct CoreInfo {
     /// `bundled` | `downloaded` | `missing`
     pub source: String,
     pub bundled_version: Option<String>,
+    /// Pinned factory version (`CoreKind::fallback_version`, kept in sync
+    /// with the fetch-bundled-* scripts). Restore target for cores with no
+    /// bundled copy: the card re-downloads this exact tag.
+    pub factory_version: Option<String>,
 }
 
 /// Local core status only (no network). Prefer this for page load.
@@ -63,6 +67,7 @@ pub fn get_core_info(
             CoreSource::Missing => "missing".into(),
         },
         bundled_version,
+        factory_version: Some(kind.fallback_version().into()),
     })
 }
 
@@ -333,6 +338,39 @@ pub async fn set_core_type(
     })
     .await
     .map_err(|e| format!("core type switch task: {e}"))?
+}
+
+/// Restore the bundled core over a user-downloaded one (core card "factory
+/// reset"): drops the downloaded binary + version file so resolution falls
+/// back to the bundled copy, which is re-staged on the next start. Only a
+/// running core of this same kind is restarted — resetting one core must
+/// not disrupt traffic flowing through another.
+#[tauri::command(async)]
+pub async fn reset_core_to_bundled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<(), String> {
+    let kind = parse_kind(kind);
+    let app_data_dir = state.app_data_dir.clone();
+    let resource_dir = app.path().resource_dir().ok();
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::reset_core_to_bundled(&app_data_dir, resource_dir.as_deref(), kind)
+            .map_err(|e| e.to_string())?;
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        let active_kind = state
+            .with_store(|store| Ok(store.settings.core_type.clone()))
+            .unwrap_or_else(|_| "singbox".into());
+        if active_kind == kind.as_str() && state.is_core_running() {
+            crate::rule_apply::request_restart(worker_app.clone(), Vec::new());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("core reset task: {e}"))?
 }
 
 #[derive(Debug, Serialize)]

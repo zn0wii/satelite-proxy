@@ -467,6 +467,64 @@ fn validate_source(bytes: &[u8]) -> Result<(u32, bool), String> {
     Ok((count, crate::domain::rules_contain_ip_cidr(rules)))
 }
 
+/// IP scan for a cached source-format rule-set: `Some(verdict)` when the
+/// file is valid source JSON with a non-empty rules array, `None` otherwise
+/// (unknown content keeps the conservative "assume domain-only" default).
+fn source_cache_contains_ip(bytes: &[u8]) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let rules = value.get("rules")?.as_array()?;
+    if rules.is_empty() {
+        return None;
+    }
+    Some(crate::domain::rules_contain_ip_cidr(rules))
+}
+
+/// One-shot startup heal for rule sets cached by builds that predate the
+/// `contains_ip` metadata: those entries carry `None`, which the config
+/// builder reads as "assume domain-only" — wrong for IP-only sets, where
+/// sing-box 1.14+ FATALs on the DNS-side `rule_set` reference once a fakeip
+/// rule exists (Legacy Address Filter Fields). Re-scans each cached file
+/// once and records the verdict; read/parse failures leave `None` untouched
+/// so download-path semantics stay conservative. Runs after seeding so
+/// freshly seeded entries (already scanned with the real rules) are skipped.
+pub(crate) fn heal_contains_ip(store: &mut crate::storage::AppStore) {
+    for set in store.rule_sets.iter_mut() {
+        let Some(remote) = set.remote.as_mut() else {
+            continue;
+        };
+        if remote.contains_ip.is_some() {
+            continue;
+        }
+        let Some(path) = remote
+            .local_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let verdict = if remote.format == "binary" {
+            // `parse_with_rules`: the IP scan reads the collected rules —
+            // plain `parse` never fills them in (see `parsed_srs_contains_ip`).
+            crate::srs::parse_with_rules(&bytes)
+                .ok()
+                .map(|parsed| crate::builtin_remote_rules::parsed_srs_contains_ip(&parsed))
+        } else {
+            source_cache_contains_ip(&bytes)
+        };
+        if let Some(contains_ip) = verdict {
+            remote.contains_ip = Some(contains_ip);
+        }
+    }
+}
+
 /// Decompile and validate a binary `.srs` with the active sing-box core.
 /// The temporary JSON is created beside the input and always removed.
 pub(crate) fn decompile_srs(core: &Path, input: &Path) -> Result<Vec<u8>, String> {
@@ -568,6 +626,150 @@ mod tests {
         assert!(ActiveDownload::acquire(&id).is_err());
         drop(guard);
         assert!(ActiveDownload::acquire(&id).is_ok());
+    }
+
+    /// `sing-box rule-set compile` output of
+    /// `{"version":3,"rules":[{"ip_cidr":["1.0.1.0/24","1.0.2.0/23"]}]}`.
+    const IP_ONLY_SRS: &[u8] = &[
+        0x53, 0x52, 0x53, 0x02, 0x78, 0xda, 0x62, 0x64, 0x60, 0x63, 0x64, 0x80, 0x00, 0x46, 0x16,
+        0x46, 0x06, 0x46, 0x06, 0x16, 0x46, 0x06, 0xe6, 0xff, 0xff, 0x19, 0x00, 0x01, 0x00, 0x00,
+        0xff, 0xff, 0x06, 0x43, 0x02, 0x16,
+    ];
+
+    #[test]
+    fn heal_contains_ip_backfills_stale_remote_sets() {
+        // Regression (sing-box 1.14, 2026-09): sets downloaded before the
+        // `contains_ip` metadata existed carry `None`; the builder then
+        // assumes domain-only and emits a DNS-side `rule_set` reference that
+        // sing-box 1.14 rejects as Legacy Address Filter Fields once a
+        // fakeip rule exists. The heal re-scans each cache once.
+        let dir = std::env::temp_dir().join(format!(
+            "satelite-heal-contains-ip-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ip_srs = dir.join("geoip.srs");
+        std::fs::write(&ip_srs, IP_ONLY_SRS).unwrap();
+        let domain_json = dir.join("block.json");
+        std::fs::write(
+            &domain_json,
+            br#"{"version":3,"rules":[{"domain_suffix":["ads.example"]}]}"#,
+        )
+        .unwrap();
+        let mixed_json = dir.join("mixed.json");
+        std::fs::write(
+            &mixed_json,
+            br#"{"version":3,"rules":[{"domain_suffix":["a.com"]},{"ip_cidr":["1.0.1.0/24"]}]}"#,
+        )
+        .unwrap();
+        let junk_srs = dir.join("junk.srs");
+        std::fs::write(&junk_srs, b"<html>not srs</html>").unwrap();
+
+        let mut binary_ip = RuleSet::new_remote(
+            "Binary IP",
+            "https://e.com/cn.srs",
+            crate::domain::RuleTarget::Direct,
+        );
+        {
+            let remote = binary_ip.remote.as_mut().unwrap();
+            remote.format = "binary".into();
+            remote.local_path = Some(ip_srs.to_string_lossy().to_string());
+            remote.contains_ip = None;
+        }
+        let mut source_domain = RuleSet::new_remote(
+            "Source Domain",
+            "https://e.com/b.json",
+            crate::domain::RuleTarget::Proxy,
+        );
+        {
+            let remote = source_domain.remote.as_mut().unwrap();
+            remote.format = "source".into();
+            remote.local_path = Some(domain_json.to_string_lossy().to_string());
+            remote.contains_ip = None;
+        }
+        let mut source_mixed = RuleSet::new_remote(
+            "Source Mixed",
+            "https://e.com/m.json",
+            crate::domain::RuleTarget::Proxy,
+        );
+        {
+            let remote = source_mixed.remote.as_mut().unwrap();
+            remote.format = "source".into();
+            remote.local_path = Some(mixed_json.to_string_lossy().to_string());
+            remote.contains_ip = None;
+        }
+        let mut already_labeled = RuleSet::new_remote(
+            "Labeled",
+            "https://e.com/l.json",
+            crate::domain::RuleTarget::Proxy,
+        );
+        {
+            let remote = already_labeled.remote.as_mut().unwrap();
+            remote.format = "source".into();
+            remote.local_path = Some(domain_json.to_string_lossy().to_string());
+            remote.contains_ip = Some(false);
+        }
+        let mut junk = RuleSet::new_remote(
+            "Junk",
+            "https://e.com/j.srs",
+            crate::domain::RuleTarget::Proxy,
+        );
+        {
+            let remote = junk.remote.as_mut().unwrap();
+            remote.format = "binary".into();
+            remote.local_path = Some(junk_srs.to_string_lossy().to_string());
+            remote.contains_ip = None;
+        }
+        let mut missing_file = RuleSet::new_remote(
+            "Missing",
+            "https://e.com/x.json",
+            crate::domain::RuleTarget::Proxy,
+        );
+        {
+            let remote = missing_file.remote.as_mut().unwrap();
+            remote.format = "source".into();
+            remote.local_path = Some(
+                dir.join("does-not-exist.json")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            remote.contains_ip = None;
+        }
+
+        let mut store = crate::storage::AppStore::default();
+        store.rule_sets = vec![
+            binary_ip,
+            source_domain,
+            source_mixed,
+            already_labeled,
+            junk,
+            missing_file,
+        ];
+        heal_contains_ip(&mut store);
+
+        let verdict = |name: &str| {
+            store
+                .rule_sets
+                .iter()
+                .find(|set| set.name == name)
+                .and_then(|set| set.remote.as_ref())
+                .and_then(|remote| remote.contains_ip)
+        };
+        assert_eq!(verdict("Binary IP"), Some(true));
+        assert_eq!(verdict("Source Domain"), Some(false));
+        assert_eq!(verdict("Source Mixed"), Some(true));
+        // Already-labeled entries are not re-scanned; unreadable caches and
+        // missing files keep `None` (conservative domain-only assumption).
+        assert_eq!(verdict("Labeled"), Some(false));
+        assert_eq!(verdict("Junk"), None);
+        assert_eq!(verdict("Missing"), None);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -1175,6 +1175,13 @@ impl Runtime {
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::SingBox);
         let bin = bin.ok_or_else(|| AppError::Core("sing-box binary not found".into()))?;
 
+        // Bootstrap libcronet.dll for installs whose sing-box binary already
+        // predates the staging/zip-extraction of it — naive outbounds load
+        // Cronet from the executable directory and FATAL without it. Cheap
+        // no-op once present (see assets::ensure_libcronet).
+        #[cfg(target_os = "windows")]
+        crate::core::ensure_libcronet(app_data_dir, resource_dir);
+
         // Reuse the persisted clash_api secret so it survives restarts, or
         // clear it when the user has the secret toggle off (see
         // resolve_clash_api_secret / api_secret_enabled).
@@ -1766,6 +1773,13 @@ impl Runtime {
 
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::SingBox);
         let bin = bin.ok_or_else(|| AppError::Core("sing-box binary not found".into()))?;
+
+        // Bootstrap libcronet.dll for installs whose sing-box binary already
+        // predates the staging/zip-extraction of it — naive outbounds load
+        // Cronet from the executable directory and FATAL without it. Cheap
+        // no-op once present (see assets::ensure_libcronet).
+        #[cfg(target_os = "windows")]
+        crate::core::ensure_libcronet(app_data_dir, resource_dir);
 
         let log_dir = app_data_dir.join("logs");
         let elevated = insight.has_tun;

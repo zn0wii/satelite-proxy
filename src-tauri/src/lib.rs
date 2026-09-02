@@ -202,6 +202,13 @@ pub fn run() {
                         resource_dir.as_deref(),
                         store,
                     );
+                    // Backfill `contains_ip` for remote sets cached by builds
+                    // that predate the field — the builder needs it to drop
+                    // the DNS-side reference of IP-only sets, which sing-box
+                    // 1.14+ rejects outright (Legacy Address Filter Fields,
+                    // FATAL once a fakeip rule exists). Must run before the
+                    // auto-proxy start below builds its first config.
+                    crate::remote_rule_auto::heal_contains_ip(store);
                     Ok(())
                 }) {
                     app_log::warn(
@@ -418,6 +425,7 @@ pub fn run() {
             commands::download_core,
             commands::fetch_core_latest,
             commands::refresh_geodata,
+            commands::reset_core_to_bundled,
             commands::set_core_type,
             commands::test_nodes_latency,
             commands::ping_nodes_latency,

@@ -585,6 +585,13 @@ pub struct BuiltinRemoteRuleSpec {
     pub url: &'static str,
     /// Whole-set route strategy.
     pub target: RuleTarget,
+    /// Content is known IP-only at compile time (geoip). Overrides whatever
+    /// `remote.contains_ip` metadata says — sing-box 1.14 FATALs on a DNS rule
+    /// referencing an `ip_cidr` rule-set once a fakeip rule exists (Legacy
+    /// Address Filter Fields), so the builder must be able to skip the DNS
+    /// side of the geoip set even on stores downloaded before that field
+    /// existed. See `builtin_remote_ip_only`.
+    pub ip_only: bool,
 }
 
 /// Factory remote rule sets, in match-priority order (store order wins).
@@ -599,6 +606,7 @@ pub const BUILTIN_REMOTE_RULE_SETS: [BuiltinRemoteRuleSpec; 3] = [
         url:
             "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-!cn.srs",
         target: RuleTarget::Proxy,
+        ip_only: false,
     },
     BuiltinRemoteRuleSpec {
         id: "system-geoip-cn",
@@ -606,6 +614,7 @@ pub const BUILTIN_REMOTE_RULE_SETS: [BuiltinRemoteRuleSpec; 3] = [
         file: "system-geoip-cn.srs",
         url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs",
         target: RuleTarget::Direct,
+        ip_only: true,
     },
     BuiltinRemoteRuleSpec {
         id: "system-geosite-cn",
@@ -613,11 +622,20 @@ pub const BUILTIN_REMOTE_RULE_SETS: [BuiltinRemoteRuleSpec; 3] = [
         file: "system-geosite-cn.srs",
         url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs",
         target: RuleTarget::Direct,
+        ip_only: false,
     },
 ];
 
 pub fn is_builtin_remote_id(id: &str) -> bool {
     BUILTIN_REMOTE_RULE_SETS.iter().any(|spec| spec.id == id)
+}
+
+/// Statically-known "IP-only content" verdict for a bundled set (`None` for
+/// non-builtin ids). Takes precedence over the store's `remote.contains_ip`
+/// metadata, which can be missing (sets downloaded before the field existed)
+/// or mislabeled by older builds.
+pub fn builtin_remote_ip_only(id: &str) -> Option<bool> {
+    builtin_remote_spec(id).map(|spec| spec.ip_only)
 }
 
 pub fn builtin_remote_spec(id: &str) -> Option<&'static BuiltinRemoteRuleSpec> {

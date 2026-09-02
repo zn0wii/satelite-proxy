@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 interface VirtualRangeOptions {
   itemCount: number;
@@ -79,8 +80,20 @@ export function useVirtualRange({
           : { startRow, endRow },
       );
     };
+    // Scroll-driven re-renders must land in the SAME frame as the scroll
+    // offset change. React 18 otherwise schedules the state update on a
+    // later task, so the browser paints one frame of "scrolled but not
+    // re-windowed" content — rows then snap back into place a frame later,
+    // which reads as jerky / accelerating scrolling (react-window flushes
+    // synchronously in scroll handlers for the same reason). Equal-state
+    // setRows bail out, so idle frames stay cheap. Only event callbacks
+    // may flush: the layout-effect path runs inside React's lifecycle,
+    // where flushSync is forbidden.
+    const updateSync = () => {
+      flushSync(update);
+    };
     const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(update);
+      if (!frame) frame = requestAnimationFrame(updateSync);
     };
 
     update();
@@ -96,7 +109,6 @@ export function useVirtualRange({
       window.removeEventListener("resize", schedule);
     };
   }, [enabled, itemSize, overscanRows, scrollerSelector, totalRows]);
-
   return useMemo(() => {
     if (!enabled || !measuredRef.current) {
       return {

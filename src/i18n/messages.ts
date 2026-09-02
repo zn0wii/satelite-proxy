@@ -310,11 +310,19 @@ const en = {
   "settings.coreMissing": "missing",
   "settings.coreBundledShort": "bundled",
   "settings.coreLatestShort": "latest",
-  "settings.coreCheck": "Check for updates",
+  "settings.coreCheck": "Check",
   "settings.coreChecking": "Checking…",
-  "settings.coreDownload": "Download to app data",
-  "settings.coreUpdate": "Update core",
+  "settings.coreDownload": "Install",
   "settings.coreRedownload": "Re-download",
+  "settings.coreRestore": "Restore",
+  "settings.coreRestoreHint":
+    "Discard the downloaded core and fall back to the bundled one ({v}). A running core restarts automatically.",
+  "settings.coreRestoreConfirm":
+    "Discard the downloaded core and restore the bundled version ({v})? A running core restarts automatically.",
+  "settings.coreRestoreDlHint":
+    "No core is bundled with this install; restore re-downloads the factory version ({v}).",
+  "settings.coreRestoreDlConfirm":
+    "No core is bundled with this install. Re-download the factory version ({v}) from GitHub?",
   "settings.coreDownloading": "Downloading…",
   "settings.corePreparing": "Preparing download…",
   "settings.coreInstalling": "Installing core…",
@@ -441,6 +449,7 @@ const en = {
   "nodes.expandAll": "Expand",
   "nodes.clickTest": "Spot test",
   "nodes.clickTestHint": "When enabled, clicking a node tests its latency instead of selecting it",
+  "nodes.clickTestActive": "Click a node to test latency · turn off via the toggle above",
   "nodes.clickTestLatency": "Click to test latency",
   "nodes.testing": "Testing…",
   "nodes.empty": "No nodes. Import a profile first.",
@@ -1190,9 +1199,17 @@ const zh: Record<MessageKey, string> = {
   "settings.coreLatestShort": "最新",
   "settings.coreCheck": "检测更新",
   "settings.coreChecking": "检测中…",
-  "settings.coreDownload": "下载到数据目录",
-  "settings.coreUpdate": "更新内核",
+  "settings.coreDownload": "下载安装",
   "settings.coreRedownload": "重新下载",
+  "settings.coreRestore": "恢复出厂",
+  "settings.coreRestoreHint":
+    "放弃已下载的内核，恢复为随应用内置的版本（{v}）。内核运行中将自动重启。",
+  "settings.coreRestoreConfirm":
+    "确定放弃已下载的内核、恢复为内置版本（{v}）吗？内核运行中将自动重启。",
+  "settings.coreRestoreDlHint":
+    "当前安装包未内置该内核，恢复出厂将联网重新下载出厂版本（{v}）。",
+  "settings.coreRestoreDlConfirm":
+    "当前安装包未内置该内核，确定联网重新下载出厂版本（{v}）吗？",
   "settings.coreDownloading": "下载中…",
   "settings.corePreparing": "正在准备下载…",
   "settings.coreInstalling": "正在安装内核…",
@@ -1316,6 +1333,7 @@ const zh: Record<MessageKey, string> = {
   "nodes.expandAll": "展开",
   "nodes.clickTest": "单点测试",
   "nodes.clickTestHint": "启用后，点击节点改为测试该节点延迟，而不再选用",
+  "nodes.clickTestActive": "点击节点测延迟 · 再点右上角关闭",
   "nodes.clickTestLatency": "点击测试延迟",
   "nodes.testing": "测试中…",
   "nodes.empty": "暂无节点，请先导入配置",

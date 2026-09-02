@@ -194,6 +194,29 @@ fn stage_bundled_core(app_data_dir: &Path, bundled: &Path, kind: CoreKind) -> Ap
             }
         }
     }
+    // sing-box (Windows): the naive outbound loads Cronet dynamically from
+    // the executable directory — without libcronet.dll beside the staged
+    // binary, any config containing a naive node FATALs at startup
+    // ("cronet: library not found"). Official Windows archives ship the DLL;
+    // core downloads extract it (see `extract_from_zip`), bundled installs
+    // stage it here. Refreshed in lockstep with the binary (this point is
+    // only reached when the staged binary actually changed).
+    #[cfg(target_os = "windows")]
+    if kind == CoreKind::SingBox {
+        if let Some(parent) = bundled.parent() {
+            let src = parent.join("libcronet.dll");
+            if src.is_file() {
+                let target = core_dir(app_data_dir).join("libcronet.dll");
+                let needs_copy = match (std::fs::metadata(&target), std::fs::metadata(&src)) {
+                    (Ok(t), Ok(s)) => t.len() != s.len(),
+                    _ => true,
+                };
+                if needs_copy {
+                    let _ = std::fs::copy(&src, &target);
+                }
+            }
+        }
+    }
     // Xray: stage geosite/geoip data files shipped alongside the binary so
     // geosite:/geoip: routing works from the app-data asset location, plus
     // wintun.dll (Windows tun adapter driver, not in the Xray release zip).
@@ -269,6 +292,47 @@ pub fn inspect_core_bin(
         Some(bundled) => (Some(bundled), CoreSource::Bundled),
         None => (None, CoreSource::Missing),
     }
+}
+
+/// Remove a user-downloaded core so resolution falls back to the bundled
+/// copy ("restore factory core"). The bundled binary is verified to exist
+/// up front — the downloaded one is never dropped without a replacement.
+/// The next start stages the bundled binary back into `bin/` via the
+/// regular first-run path (`resolve_core_bin` → `stage_bundled_core`).
+///
+/// A running Windows core holds its image locked against deletion (but not
+/// against rename): when the direct delete fails, the binary is renamed
+/// aside (`<stem>.previous.exe`, same convention as download swaps) so
+/// `inspect_core_bin` reports the bundled copy immediately; the running
+/// process keeps executing the renamed image until its next (re)start.
+pub fn reset_core_to_bundled(
+    app_data_dir: &Path,
+    resource_dir: Option<&Path>,
+    kind: CoreKind,
+) -> AppResult<()> {
+    if find_bundled_core(resource_dir, kind).is_none() {
+        return Err(AppError::Core(format!(
+            "no bundled {} in this installation",
+            kind.display_name()
+        )));
+    }
+    let dest = core_bin_path(app_data_dir, kind);
+    if dest.is_file() {
+        if std::fs::remove_file(&dest).is_err() {
+            let previous = super::download::previous_core_path(kind, &dest);
+            let _ = std::fs::remove_file(&previous);
+            std::fs::rename(&dest, &previous).map_err(|e| {
+                AppError::Core(format!(
+                    "retire downloaded {} binary: {e}",
+                    kind.display_name()
+                ))
+            })?;
+        }
+    }
+    // The version file belongs to the downloaded install; the bundled source
+    // reads its own copy next to the resource binary.
+    let _ = std::fs::remove_file(version_file_path(app_data_dir, kind));
+    Ok(())
 }
 
 pub fn installed_core_version(app_data_dir: &Path, kind: CoreKind) -> Option<String> {
@@ -424,5 +488,113 @@ mod tests {
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("macos")
                 || p.asset_suffix_for(CoreKind::Xray).starts_with("linux")
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn staging_places_libcronet_next_to_sing_box() {
+        // naive outbounds load Cronet from the executable directory at
+        // runtime; without the DLL the core FATALs on startup for any
+        // config with a naive node. Bundled staging must deliver it into
+        // the same `bin/` the staged binary lands in.
+        let root = std::env::temp_dir().join(format!(
+            "satelite-core-cronet-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let app_data = root.join("app-data");
+        let resources = root.join("resources-root");
+        let platform = detect_platform().expect("supported test platform");
+        let bundled_dir = resources.join("bin").join(platform.asset_suffix);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled dir");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.binary_name()),
+            b"bundled-core",
+        )
+        .expect("write bundled core");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.version_file_name()),
+            b"v-test",
+        )
+        .expect("write version");
+        std::fs::write(bundled_dir.join("libcronet.dll"), b"fake-cronet-bytes")
+            .expect("write fake libcronet");
+
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(staged.is_some());
+        // Which bundled candidate wins is environment-dependent (the dev
+        // source tree outranks the sandbox and carries the real DLL), so the
+        // invariant under test is presence next to the staged binary — not
+        // the exact bytes.
+        let dll = core_dir(&app_data).join("libcronet.dll");
+        assert!(
+            dll.is_file(),
+            "libcronet.dll must be staged next to the binary"
+        );
+        assert!(
+            std::fs::metadata(&dll).is_ok_and(|m| m.len() > 0),
+            "staged libcronet.dll must not be empty"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reset_retires_downloaded_core_and_falls_back_to_bundled() {
+        let root = std::env::temp_dir().join(format!(
+            "satelite-core-reset-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let app_data = root.join("app-data");
+        let resources = root.join("resources-root");
+        let platform = detect_platform().expect("supported test platform");
+        let bundled_dir = resources.join("bin").join(platform.asset_suffix);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled dir");
+        std::fs::write(
+            bundled_dir.join(CoreKind::SingBox.binary_name()),
+            b"bundled",
+        )
+        .expect("write bundled core");
+        std::fs::create_dir_all(core_dir(&app_data)).expect("create bin dir");
+        std::fs::write(
+            core_bin_path(&app_data, CoreKind::SingBox),
+            b"user download",
+        )
+        .expect("write downloaded core");
+        write_version_file(&app_data, CoreKind::SingBox, "1.14.0").expect("write version");
+
+        // Reset → downloaded binary + its version file are gone; inspection
+        // reports the bundled copy, and resolution stages it back on next use.
+        // (The no-bundled guard branch is untestable here: the dev source
+        // tree itself is a bundled candidate and carries the real binary.)
+        reset_core_to_bundled(&app_data, Some(&resources), CoreKind::SingBox).expect("reset");
+        let (path, source) = inspect_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(path.is_some());
+        assert!(!core_bin_path(&app_data, CoreKind::SingBox).exists());
+        assert!(!version_file_path(&app_data, CoreKind::SingBox).exists());
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert_eq!(staged, Some(core_bin_path(&app_data, CoreKind::SingBox)));
+
+        // Resetting again retires the staged copy too — the data-dir binary
+        // always loses — but resolution just re-stages it, so the core stays
+        // usable either way.
+        reset_core_to_bundled(&app_data, Some(&resources), CoreKind::SingBox)
+            .expect("reset already-bundled");
+        assert!(!core_bin_path(&app_data, CoreKind::SingBox).exists());
+        let (staged, source) = resolve_core_bin(&app_data, Some(&resources), CoreKind::SingBox);
+        assert_eq!(source, CoreSource::Bundled);
+        assert!(staged.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

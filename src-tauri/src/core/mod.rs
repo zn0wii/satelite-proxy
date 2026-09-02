@@ -17,6 +17,8 @@ mod paths;
 
 pub use assets::ensure_geodata;
 #[cfg(target_os = "windows")]
+pub use assets::ensure_libcronet;
+#[cfg(target_os = "windows")]
 pub use assets::ensure_wintun;
 pub use assets::prefetch_runtime_assets;
 pub use assets::{download_missing_geodata, geodata_state};
@@ -33,6 +35,6 @@ pub use download::{
 #[cfg(test)]
 pub use paths::find_bundled_core;
 pub use paths::{
-    active_core_version, bundled_core_version, detect_platform, inspect_core_bin, resolve_core_bin,
-    CoreSource,
+    active_core_version, bundled_core_version, detect_platform, inspect_core_bin, reset_core_to_bundled,
+    resolve_core_bin, CoreSource,
 };

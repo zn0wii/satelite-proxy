@@ -813,6 +813,14 @@ export function NodesPage() {
 
           {/* Grouping + view segs glue together on one wrapped row. */}
           <div className="nodes-view-segs">
+            {/* Armed notice for the click-to-test mode — the toolbar toggle
+                is easy to miss once scrolled past; hidden in custom mode
+                together with the toggle (rows aren't clickable there). */}
+            {!customRuntime && clickTest && (
+              <span className="nodes-clicktest-active">
+                {t("nodes.clickTestActive")}
+              </span>
+            )}
             <GlassSeg
               value={groupBy}
               ariaLabel={t("nodes.groupBy")}

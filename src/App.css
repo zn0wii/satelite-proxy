@@ -2024,6 +2024,17 @@ tr.row-active {
   gap: 0.5rem;
 }
 
+/* Spot-test armed notice: small line left of the group seg, same green
+   as the armed LED / outlined cards so the mode stays visible without
+   hovering the toolbar toggle. */
+.nodes-clicktest-active {
+  align-self: center;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--success);
+  white-space: nowrap;
+}
+
 /* Collapse-all / expand-all pair next to the group seg — always present,
    dims when grouping is off instead of disappearing (avoids layout shift). */
 .node-group-fold {

@@ -337,7 +337,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ## 8. 构建细节与产物
 
-- **版本号**：`package.json`（1.0.9）是唯一真源，`tauri.conf.json` 引用它；`Cargo.toml`（1.0.4）落后且不自动同步——发版时手动检查三处。
+- **版本号**：`package.json`（1.0.9）是唯一真源，`tauri.conf.json` 引用它；`Cargo.toml`（1.0.4）落后且不自动同步——发版时手动检查三处。**打 tag / 发版前必须先把 `package.json` 的 `version` 改成与 tag 一致**（如 tag `v1.0.18` → `version: "1.0.18"`），否则 `tauri.conf.json` 引用的版本号不匹配会导致构建失败。
 - **产物路径**：DMG → `src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/`；Windows → `src-tauri/target/release/bundle/nsis/`（或 `.../msi/`）。
 - **Rust 测试布局**：集成测试 `src-tauri/tests/parse_subscription.rs`（fixtures 在 `tests/fixtures/`：clash yaml ×2、singbox json ×1）；`download_core_live.rs` 为 `#[ignore]` 真网测试；单测散落各文件 `#[cfg(test)]`。
 - **换行符**：`.gitattributes` 规定源码 eol=lf、`.ps1/.bat/.cmd` 为 CRLF。

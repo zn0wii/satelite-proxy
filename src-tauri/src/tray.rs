@@ -128,6 +128,9 @@ struct CaptureMenuHandles<R: TauriRuntime> {
 /// instead of showing both "启动代理" and "停止代理" at once.
 struct ToggleMenuHandle<R: TauriRuntime>(MenuItem<R>);
 
+/// "低内存模式" checkbox: mirrors `settings.unload_ui_on_tray`.
+struct LowMemoryMenuHandle<R: TauriRuntime>(CheckMenuItem<R>);
+
 const TOGGLE_START_LABEL: &str = "启动代理";
 const TOGGLE_STOP_LABEL: &str = "停止代理";
 
@@ -159,6 +162,18 @@ fn refresh_toggle_menu<R: TauriRuntime>(app: &AppHandle<R>, running: bool) {
         TOGGLE_START_LABEL
     };
     let _ = handle.0.set_text(label);
+}
+
+/// Re-check the "低内存模式" item to match `settings.unload_ui_on_tray`.
+fn refresh_low_memory_menu<R: TauriRuntime>(app: &AppHandle<R>) {
+    let Some(handle) = app.try_state::<LowMemoryMenuHandle<R>>() else {
+        return;
+    };
+    let enabled = app
+        .try_state::<AppState>()
+        .and_then(|s| s.with_store(|st| Ok(st.settings.unload_ui_on_tray)).ok())
+        .unwrap_or(false);
+    let _ = handle.0.set_checked(enabled);
 }
 
 fn tray_png(style: TrayIconStyle, running: bool) -> (&'static [u8], bool) {
@@ -208,6 +223,7 @@ pub fn refresh_icon<R: TauriRuntime>(app: &AppHandle<R>) {
     let _ = tray.set_icon_with_as_template(Some(icon), as_template);
     refresh_capture_menu(app);
     refresh_toggle_menu(app, running);
+    refresh_low_memory_menu(app);
 }
 
 pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -227,6 +243,20 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let sep = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     app.manage(ToggleMenuHandle::<R>(toggle_i.clone()));
+
+    let low_memory_now = app
+        .try_state::<AppState>()
+        .and_then(|s| s.with_store(|st| Ok(st.settings.unload_ui_on_tray)).ok())
+        .unwrap_or(false);
+    let low_memory_i = CheckMenuItem::with_id(
+        app,
+        "low_memory",
+        "低内存模式",
+        true,
+        low_memory_now,
+        None::<&str>,
+    )?;
+    app.manage(LowMemoryMenuHandle::<R>(low_memory_i.clone()));
 
     let mode = current_capture_mode(app);
     let capture_off_i = CheckMenuItem::with_id(
@@ -275,6 +305,8 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &restart_i,
             &capture_menu,
             &copy_env_i,
+            &sep,
+            &low_memory_i,
             &sep,
             &quit_i,
         ],
@@ -329,6 +361,15 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             "copy_env" => {
                 copy_proxy_env(app);
+            }
+            "low_memory" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let _ = state.with_store_mut(|store| {
+                        store.settings.unload_ui_on_tray = !store.settings.unload_ui_on_tray;
+                        Ok(())
+                    });
+                }
+                refresh_low_memory_menu(app);
             }
             "quit" => {
                 window_ctrl::quit_app(app);

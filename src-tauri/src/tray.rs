@@ -1,13 +1,13 @@
 //! System tray: open window, start/stop, quit (with cleanup).
 
-use crate::domain::TrayIconStyle;
+use crate::domain::{CaptureMode, TrayIconStyle};
 use crate::state::AppState;
 use crate::window_ctrl;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Runtime as TauriRuntime,
 };
@@ -115,6 +115,52 @@ fn copy_proxy_env(app: &AppHandle<impl TauriRuntime>) {
 
 const TRAY_ID: &str = "main";
 
+/// Handles to tray items whose label/checked state depends on runtime
+/// state, kept so `refresh_icon` can re-sync them (menu items expose no
+/// getter back from `TrayIcon`, so we hold them ourselves via `app.manage`).
+struct CaptureMenuHandles<R: TauriRuntime> {
+    off: CheckMenuItem<R>,
+    system: CheckMenuItem<R>,
+    tun: CheckMenuItem<R>,
+}
+
+/// Single start/stop item: label (and action) flips with core run state
+/// instead of showing both "启动代理" and "停止代理" at once.
+struct ToggleMenuHandle<R: TauriRuntime>(MenuItem<R>);
+
+const TOGGLE_START_LABEL: &str = "启动代理";
+const TOGGLE_STOP_LABEL: &str = "停止代理";
+
+fn current_capture_mode(app: &AppHandle<impl TauriRuntime>) -> CaptureMode {
+    app.try_state::<AppState>()
+        .and_then(|s| s.with_store(|st| Ok(st.settings.capture_mode)).ok())
+        .unwrap_or_default()
+}
+
+/// Re-check the submenu item matching the current capture mode; uncheck the rest.
+fn refresh_capture_menu<R: TauriRuntime>(app: &AppHandle<R>) {
+    let Some(handles) = app.try_state::<CaptureMenuHandles<R>>() else {
+        return;
+    };
+    let mode = current_capture_mode(app);
+    let _ = handles.off.set_checked(mode == CaptureMode::Off);
+    let _ = handles.system.set_checked(mode == CaptureMode::System);
+    let _ = handles.tun.set_checked(mode == CaptureMode::Tun);
+}
+
+/// Re-label the start/stop toggle to match current core run state.
+fn refresh_toggle_menu<R: TauriRuntime>(app: &AppHandle<R>, running: bool) {
+    let Some(handle) = app.try_state::<ToggleMenuHandle<R>>() else {
+        return;
+    };
+    let label = if running {
+        TOGGLE_STOP_LABEL
+    } else {
+        TOGGLE_START_LABEL
+    };
+    let _ = handle.0.set_text(label);
+}
+
 fn tray_png(style: TrayIconStyle, running: bool) -> (&'static [u8], bool) {
     match (style, running) {
         (TrayIconStyle::Badge, true) => (include_bytes!("../icons/tray/badge-on.png"), false),
@@ -160,19 +206,78 @@ pub fn refresh_icon<R: TauriRuntime>(app: &AppHandle<R>) {
         return;
     };
     let _ = tray.set_icon_with_as_template(Some(icon), as_template);
+    refresh_capture_menu(app);
+    refresh_toggle_menu(app, running);
 }
 
 pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
-    let start_i = MenuItem::with_id(app, "start", "启动代理", true, None::<&str>)?;
-    let stop_i = MenuItem::with_id(app, "stop", "停止代理", true, None::<&str>)?;
+    let running_now = app
+        .try_state::<AppState>()
+        .map(|s| s.is_core_running())
+        .unwrap_or(false);
+    let toggle_label = if running_now {
+        TOGGLE_STOP_LABEL
+    } else {
+        TOGGLE_START_LABEL
+    };
+    let toggle_i = MenuItem::with_id(app, "toggle", toggle_label, true, None::<&str>)?;
+    let restart_i = MenuItem::with_id(app, "restart", "重启内核", true, None::<&str>)?;
     let copy_env_i = MenuItem::with_id(app, "copy_env", "复制环境变量", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    app.manage(ToggleMenuHandle::<R>(toggle_i.clone()));
+
+    let mode = current_capture_mode(app);
+    let capture_off_i = CheckMenuItem::with_id(
+        app,
+        "capture_off",
+        "关闭",
+        true,
+        mode == CaptureMode::Off,
+        None::<&str>,
+    )?;
+    let capture_system_i = CheckMenuItem::with_id(
+        app,
+        "capture_system",
+        "系统代理",
+        true,
+        mode == CaptureMode::System,
+        None::<&str>,
+    )?;
+    let capture_tun_i = CheckMenuItem::with_id(
+        app,
+        "capture_tun",
+        "TUN（全局）",
+        true,
+        mode == CaptureMode::Tun,
+        None::<&str>,
+    )?;
+    let capture_menu = Submenu::with_id_and_items(
+        app,
+        "capture",
+        "流量接管",
+        true,
+        &[&capture_off_i, &capture_system_i, &capture_tun_i],
+    )?;
+    app.manage(CaptureMenuHandles::<R> {
+        off: capture_off_i,
+        system: capture_system_i,
+        tun: capture_tun_i,
+    });
 
     let menu = Menu::with_items(
         app,
-        &[&show_i, &sep, &start_i, &stop_i, &copy_env_i, &sep, &quit_i],
+        &[
+            &show_i,
+            &sep,
+            &toggle_i,
+            &restart_i,
+            &capture_menu,
+            &copy_env_i,
+            &sep,
+            &quit_i,
+        ],
     )?;
 
     // Prefer app icon; fall back to default tray without custom image if load fails.
@@ -183,16 +288,42 @@ pub fn setup_tray<R: TauriRuntime>(app: &AppHandle<R>) -> tauri::Result<()> {
             "show" => {
                 window_ctrl::show_main(app);
             }
-            "start" => {
+            "toggle" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let res = app.path().resource_dir().ok();
-                    let _ = state.start_proxy(res.as_deref(), true);
+                    if state.is_core_running() {
+                        let _ = state.stop_proxy();
+                    } else {
+                        let res = app.path().resource_dir().ok();
+                        let _ = state.start_proxy(res.as_deref(), true);
+                    }
                 }
                 refresh_icon(app);
             }
-            "stop" => {
+            "restart" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = state.stop_proxy();
+                    let res = app.path().resource_dir().ok();
+                    let _ = state.restart_proxy(res.as_deref());
+                }
+                refresh_icon(app);
+            }
+            "capture_off" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let res = app.path().resource_dir().ok();
+                    let _ = state.set_capture_mode("off", res.as_deref());
+                }
+                refresh_icon(app);
+            }
+            "capture_system" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let res = app.path().resource_dir().ok();
+                    let _ = state.set_capture_mode("system", res.as_deref());
+                }
+                refresh_icon(app);
+            }
+            "capture_tun" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let res = app.path().resource_dir().ok();
+                    let _ = state.set_capture_mode("tun", res.as_deref());
                 }
                 refresh_icon(app);
             }

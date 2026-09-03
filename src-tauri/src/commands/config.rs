@@ -111,6 +111,9 @@ pub fn update_settings(
     let mut bypass_lan_changed = false;
     let mut multi_core_changed = false;
     let theme_changed = theme.is_some();
+    // Caption tint depends on accent/glow_color — re-apply live so the title
+    // bar follows a color change without waiting for a window (re)creation.
+    let mut titlebar_tint_changed = false;
     let settings = state
         .with_store_mut(|store| {
             if let Some(p) = mixed_port {
@@ -227,7 +230,10 @@ pub fn update_settings(
                     "green" | "blue" | "purple" | "pink" | "orange" | "cyan"
                 ) || is_hex
                 {
-                    store.settings.accent = ac;
+                    if store.settings.accent != ac {
+                        titlebar_tint_changed = true;
+                        store.settings.accent = ac;
+                    }
                 }
             }
             if let Some(gl) = glow_color {
@@ -244,7 +250,10 @@ pub fn update_settings(
                     )
                     || is_hex
                 {
-                    store.settings.glow_color = gl;
+                    if store.settings.glow_color != gl {
+                        titlebar_tint_changed = true;
+                        store.settings.glow_color = gl;
+                    }
                 }
             }
             if let Some(hs) = hero_style {
@@ -378,6 +387,10 @@ pub fn update_settings(
     crate::tray::refresh_icon(&app);
     if theme_changed {
         crate::window_ctrl::apply_window_theme(&app);
+    } else if titlebar_tint_changed {
+        // Theme flip already re-tints via apply_window_theme; otherwise only
+        // refresh the caption color, not the whole window theme.
+        crate::window_ctrl::apply_titlebar_accent(&app);
     }
 
     // route.final must restart: sing-box Clash PUT /configs often returns OK without

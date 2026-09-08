@@ -1765,11 +1765,21 @@ button {
   min-width: 9rem;
 }
 
-/* Delegated-protocol badge on node rows (list + grid). */
+/* Delegated-protocol badge on node rows (list + grid): same metrics as the
+   protocol <code> pill, rendered as a square outlined box to its right.
+   The multi-core settings table pairs it with .pill, which overrides most
+   of these back to the pill look there. */
 .sidecar-tag {
-  margin-left: 0.35rem;
-  font-size: 0.62rem;
-  padding: 0.05rem 0.4rem;
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  margin-left: 0.3rem;
+  white-space: nowrap;
 }
 
 /* —— Version tab: app bar (full width under the kernel cards) ——
@@ -2513,6 +2523,14 @@ button.node-card:disabled,
   min-width: 0;
   gap: 0.15rem;
   font-size: 0.75rem;
+}
+
+/* Protocol pill + sidecar badge on one line (node list cells and card meta);
+   without this the badge wraps to a second row and stretches the card. */
+.node-proto-tags {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .node-card-footer {

@@ -15,6 +15,37 @@ export function applyCustomLatency(
   });
 }
 
+/** Sort nodes in place by the given mode — shared by the initial page load
+ * and by in-place re-sorts as streamed latency results land (see
+ * NodesPage's `onTest`). Latency order: ok < timeout < untested, then name. */
+export function sortNodes(nodes: ProxyNode[], sortMode: SortMode): ProxyNode[] {
+  const byName = (a: ProxyNode, b: ProxyNode) => {
+    const an = a.name.toLowerCase();
+    const bn = b.name.toLowerCase();
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  };
+  if (sortMode === "name") {
+    nodes.sort(byName);
+  } else if (sortMode === "latency") {
+    const score = (n: ProxyNode): [number, number] =>
+      n.latency_ms != null
+        ? [0, n.latency_ms]
+        : n.latency_at != null
+          ? [1, 0]
+          : [2, 0];
+    nodes.sort((a, b) => {
+      const sa = score(a);
+      const sb = score(b);
+      return sa[0] !== sb[0] || sa[1] !== sb[1]
+        ? sa[0] !== sb[0]
+          ? sa[0] - sb[0]
+          : sa[1] - sb[1]
+        : byName(a, b);
+    });
+  }
+  return nodes;
+}
+
 /**
  * Client-side mirror of `list_nodes_page` semantics for custom-mode nodes
  * (read-only, extracted from the selected sing-box config on the backend).
@@ -36,31 +67,7 @@ export function filterCustomNodes(
       n.protocol.toLowerCase().includes(q) ||
       (n.subscription_name ?? "").toLowerCase().includes(q),
   );
-  const byName = (a: ProxyNode, b: ProxyNode) => {
-    const an = a.name.toLowerCase();
-    const bn = b.name.toLowerCase();
-    return an < bn ? -1 : an > bn ? 1 : 0;
-  };
-  if (sortMode === "name") {
-    filtered.sort(byName);
-  } else if (sortMode === "latency") {
-    // Same ordering as the backend: ok < timeout < untested, then name.
-    const score = (n: ProxyNode): [number, number] =>
-      n.latency_ms != null
-        ? [0, n.latency_ms]
-        : n.latency_at != null
-          ? [1, 0]
-          : [2, 0];
-    filtered.sort((a, b) => {
-      const sa = score(a);
-      const sb = score(b);
-      return sa[0] !== sb[0] || sa[1] !== sb[1]
-        ? sa[0] !== sb[0]
-          ? sa[0] - sb[0]
-          : sa[1] - sb[1]
-        : byName(a, b);
-    });
-  }
+  sortNodes(filtered, sortMode);
   return {
     nodes: filtered.slice(offset, offset + limit),
     total: filtered.length,

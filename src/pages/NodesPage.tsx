@@ -20,7 +20,7 @@ import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
 import { waitForCoreRestart } from "../coreBusy";
 import { useVirtualRange } from "../hooks/useVirtualRange";
-import { filterCustomNodes, applyCustomLatency, type CustomLatencyMap } from "../customNodes";
+import { filterCustomNodes, applyCustomLatency, sortNodes, type CustomLatencyMap } from "../customNodes";
 import { createLatencyResultBuffer } from "../latencyStream";
 import type { AutoSelectMode, ProxyNode, SortMode, ViewMode } from "../types";
 
@@ -511,8 +511,8 @@ export function NodesPage() {
         for (const id of batch.keys()) next.delete(id);
         return next;
       });
-      setNodes((prev) =>
-        prev.map((n) => {
+      setNodes((prev) => {
+        const next = prev.map((n) => {
           const r = batch.get(n.id);
           if (!r) return n;
           return {
@@ -521,8 +521,11 @@ export function NodesPage() {
             latency_ms: r.latency_ms ?? null,
             latency_at: r.tested_at,
           };
-        }),
-      );
+        });
+        // Re-sort in place as results stream in so the latency sort mode
+        // moves faster nodes to the top live, not just after reload.
+        return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+      });
     });
     latencyBufferRef.current = buffer;
 
@@ -578,13 +581,14 @@ export function NodesPage() {
         return next;
       });
       if (r) {
-        setNodes((prev) =>
-          prev.map((n) =>
+        setNodes((prev) => {
+          const next = prev.map((n) =>
             n.id === id
               ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
               : n,
-          ),
-        );
+          );
+          return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+        });
       }
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
@@ -715,13 +719,14 @@ export function NodesPage() {
         return next;
       });
       if (r) {
-        setNodes((prev) =>
-          prev.map((n) =>
+        setNodes((prev) => {
+          const next = prev.map((n) =>
             n.id === id
               ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
               : n,
-          ),
-        );
+          );
+          return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+        });
       }
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));

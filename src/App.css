@@ -2024,17 +2024,6 @@ button {
   gap: 0.5rem;
 }
 
-/* Spot-test armed notice: small line left of the group seg, same green
-   as the armed LED / outlined cards so the mode stays visible without
-   hovering the toolbar toggle. */
-.nodes-clicktest-active {
-  align-self: center;
-  font-size: 0.68rem;
-  font-weight: 500;
-  color: var(--success);
-  white-space: nowrap;
-}
-
 /* Collapse-all / expand-all pair next to the group seg — always present,
    dims when grouping is off instead of disappearing (avoids layout shift). */
 .node-group-fold {
@@ -2312,25 +2301,6 @@ button {
   margin-left: 0.35rem;
 }
 
-
-/* —— 单点测试 armed: every node wears a green outline so the
-   click-to-test affordance stays visible across the whole list/grid.
-   Cards take a real border + soft glow; table rows draw theirs via the
-   cells (tr can't carry borders reliably under border-collapse). */
-.spot-armed .node-card {
-  border-color: var(--success-border);
-  box-shadow:
-    0 0 0 1px var(--success-border),
-    0 0 10px color-mix(in srgb, var(--success) 20%, transparent);
-}
-
-.spot-armed .node-list-row {
-  border-top: 1px solid var(--success-border);
-  border-bottom: 1px solid var(--success-border);
-  border-left: 1px solid var(--success-border);
-  border-right: 1px solid var(--success-border);
-  border-radius: var(--radius);
-}
 
 .node-virtual-spacer {
   padding: 0;

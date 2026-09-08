@@ -137,11 +137,7 @@ export function NodesPage() {
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     return (localStorage.getItem("nodes.sortMode") as SortMode) || "default";
   });
-  // Click-test mode: node clicks probe latency instead of selecting.
-  const [clickTest, setClickTest] = useState<boolean>(
-    () => localStorage.getItem("nodes.clickTest") === "1",
-  );
-  // "Show favorites only" — persisted like clickTest/viewMode.
+  // "Show favorites only" — persisted like viewMode.
   const [showFavoritesOnly, setShowFavoritesOnly] = useState<boolean>(
     () => localStorage.getItem("nodes.favoritesOnly") === "1",
   );
@@ -242,10 +238,6 @@ export function NodesPage() {
   useEffect(() => {
     localStorage.setItem("nodes.sortMode", sortMode);
   }, [sortMode]);
-
-  useEffect(() => {
-    localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
-  }, [clickTest]);
 
   useEffect(() => {
     localStorage.setItem("nodes.favoritesOnly", showFavoritesOnly ? "1" : "0");
@@ -798,16 +790,7 @@ export function NodesPage() {
                       gridTemplateColumns: NODE_LIST_COLS,
                       cursor: customRuntime ? "default" : "pointer",
                     }}
-                    onClick={
-                      customRuntime
-                        ? undefined
-                        : clickTest
-                          ? () => void onTestOne(n.id)
-                          : () => void onSelect(n.id)
-                    }
-                    title={
-                      !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
-                    }
+                    onClick={customRuntime ? undefined : () => void onSelect(n.id)}
                   >
                     <span className="node-list-lead">
                       {!customRuntime && (
@@ -865,19 +848,16 @@ export function NodesPage() {
                   tabIndex={disabled ? -1 : 0}
                   aria-disabled={disabled}
                   className={`node-card ${active ? "active" : ""}${disabled ? " disabled" : ""}`}
-                  onClick={disabled ? undefined : () => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
+                  onClick={disabled ? undefined : () => void onSelect(n.id)}
                   onKeyDown={
                     disabled
                       ? undefined
                       : (e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            void (clickTest ? onTestOne(n.id) : onSelect(n.id));
+                            void onSelect(n.id);
                           }
                         }
-                  }
-                  title={
-                    !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
                   }
                 >
                   <div className="node-card-top">
@@ -995,36 +975,9 @@ export function NodesPage() {
               {testing && testKind === "ping" ? t("nodes.pinging") : t("nodes.pingTest")}
             </GlassButton>
           )}
-          {/* 单点测试 toggle: state reads from the LED dot alone — gray
-              while off, green while armed (same LED language as the logs
-              page kernel tabs). Label stays constant in both states.
-              Meaningless in custom mode (rows are not clickable there) —
-              hidden with ping. */}
-          {!customRuntime && (
-            <GlassButton
-              icon={
-                <span
-                  className={`seg-dot${clickTest ? " on" : ""}`}
-                  aria-hidden
-                />
-              }
-              onClick={() => setClickTest((v) => !v)}
-              title={t("nodes.clickTestHint")}
-            >
-              {t("nodes.clickTest")}
-            </GlassButton>
-          )}
 
           {/* Grouping + view segs glue together on one wrapped row. */}
           <div className="nodes-view-segs">
-            {/* Armed notice for the click-to-test mode — the toolbar toggle
-                is easy to miss once scrolled past; hidden in custom mode
-                together with the toggle (rows aren't clickable there). */}
-            {!customRuntime && clickTest && (
-              <span className="nodes-clicktest-active">
-                {t("nodes.clickTestActive")}
-              </span>
-            )}
             <GlassSwitch
               checked={showFavoritesOnly}
               onChange={setShowFavoritesOnly}
@@ -1092,7 +1045,7 @@ export function NodesPage() {
             : "—"}
         </div>
       ) : viewMode === "list" ? (
-        <div className={`card table-wrap${clickTest ? " spot-armed" : ""}`}>
+        <div className="card table-wrap">
           <div className="node-list">
             <div className="node-list-head" style={{ gridTemplateColumns: NODE_LIST_COLS }}>
               <span></span>
@@ -1134,7 +1087,7 @@ export function NodesPage() {
             <div style={{ height: gridWin.top }} aria-hidden="true" />
           )}
           <div
-            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}${clickTest ? " spot-armed" : ""}`}
+            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}`}
           >
             {gridItems
               .slice(gridWin.first, gridWin.last)

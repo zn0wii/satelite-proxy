@@ -414,6 +414,7 @@ pub fn run() {
             commands::regenerate_api_secret,
             commands::set_current_node,
             commands::rename_node,
+            commands::toggle_favorite_node,
             commands::generate_singbox_config,
             commands::preview_singbox_config,
             commands::get_active_config_path,

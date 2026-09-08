@@ -200,6 +200,8 @@ export interface ProxyNode {
   /** Present from list_all_nodes — owning subscription. */
   subscription_id?: string;
   subscription_name?: string;
+  /** Present from list_all_nodes — true if the node id is in favorite_nodes. */
+  favorite?: boolean;
 }
 
 export type ViewMode = "list" | "grid";

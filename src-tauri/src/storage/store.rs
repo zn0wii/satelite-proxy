@@ -48,6 +48,15 @@ pub struct AppStore {
     /// User-assigned node names, keyed by `identity|parsed-name`.
     #[serde(default)]
     pub node_aliases: std::collections::BTreeMap<String, String>,
+    /// User-favorited node ids. Keyed by `ProxyNode.id` (a content hash of
+    /// server/port/protocol/credentials — stable across renames and
+    /// resubscribes, see `ProxyNode::compute_id`). Garbage-collected
+    /// whenever the node set shrinks (`remove_subscription`,
+    /// `upsert_subscription`) so a favorite that can no longer be matched
+    /// to any node (ip/port/credential changed, or the subscription/node is
+    /// gone) doesn't linger forever.
+    #[serde(default)]
+    pub favorite_nodes: std::collections::BTreeSet<String>,
     /// Items this build could not parse. Kept so save() writes them back
     /// instead of dropping newer-schema data.
     #[serde(skip)]
@@ -724,6 +733,7 @@ impl AppStore {
                 node,
             });
         }
+        self.gc_favorite_nodes();
         Ok(())
     }
 
@@ -745,6 +755,7 @@ impl AppStore {
             }
         }
         self.ensure_current_node_valid();
+        self.gc_favorite_nodes();
         Ok(())
     }
 
@@ -960,6 +971,31 @@ impl AppStore {
 
     pub fn find_node(&self, id: &str) -> Option<&ProxyNode> {
         self.nodes.iter().find(|n| n.node.id == id).map(|n| &n.node)
+    }
+
+    /// Toggle a node's favorite flag; returns the new state. No-op error if
+    /// the node id doesn't exist (nothing to favorite).
+    pub fn toggle_favorite_node(&mut self, id: &str) -> AppResult<bool> {
+        if !self.nodes.iter().any(|n| n.node.id == id) {
+            return Err(AppError::NotFound(id.to_string()));
+        }
+        let now_favorite = if self.favorite_nodes.remove(id) {
+            false
+        } else {
+            self.favorite_nodes.insert(id.to_string());
+            true
+        };
+        Ok(now_favorite)
+    }
+
+    /// Drop favorites whose node id no longer resolves to a stored node —
+    /// called after any operation that shrinks/replaces `self.nodes`
+    /// (subscription removed, or refreshed and the node's ip/port/
+    /// credentials changed so it hashes to a different id). Keeps
+    /// `favorite_nodes` from growing unboundedly with unreachable ids.
+    fn gc_favorite_nodes(&mut self) {
+        self.favorite_nodes
+            .retain(|id| self.nodes.iter().any(|n| &n.node.id == id));
     }
 
     pub fn node_alias_key(node: &ProxyNode) -> String {
@@ -1800,6 +1836,16 @@ fn store_from_json(value: Value) -> AppStore {
             Err(error) => crate::app_log::warn(
                 "storage",
                 format!("ignored unreadable node_aliases object ({error}); keeping defaults"),
+            ),
+        }
+    }
+
+    if let Some(favorites) = obj.get("favorite_nodes") {
+        match serde_json::from_value::<std::collections::BTreeSet<String>>(favorites.clone()) {
+            Ok(parsed) => store.favorite_nodes = parsed,
+            Err(error) => crate::app_log::warn(
+                "storage",
+                format!("ignored unreadable favorite_nodes array ({error}); keeping defaults"),
             ),
         }
     }
@@ -3326,6 +3372,68 @@ mod tests {
             .unwrap();
         assert_eq!(store.find_node("a").unwrap().name, "Hong Kong");
         assert_eq!(store.find_node("b").unwrap().name, "HK-02");
+    }
+
+    #[test]
+    fn toggle_favorite_node_flips_state_and_rejects_unknown_id() {
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+
+        assert!(store.toggle_favorite_node("a").unwrap());
+        assert!(store.favorite_nodes.contains("a"));
+        assert!(!store.toggle_favorite_node("a").unwrap());
+        assert!(!store.favorite_nodes.contains("a"));
+
+        assert!(store.toggle_favorite_node("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn favorite_survives_rename_and_resubscribe_but_not_a_ip_port_change() {
+        // Business intent: a favorite is keyed on the node's stable content-hash
+        // id (server/port/protocol/credentials), so a subscription refresh that
+        // only changes display name/remark must NOT lose the favorite — but a
+        // refresh where the node's underlying id truly changes (ip/port/cred
+        // rotated) has nothing left to point at and must be garbage-collected,
+        // otherwise `favorite_nodes` grows with ids no node will ever have again.
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+        assert!(store.toggle_favorite_node("a").unwrap());
+
+        // Airport renamed the node under the same subscription refresh — id
+        // ("a") stays the same in this test because id is caller-supplied here,
+        // mirroring how `ProxyNode::compute_id` would keep it stable in
+        // production since name isn't a hash input. Favorite must survive.
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01-Renamed")])
+            .unwrap();
+        assert!(store.favorite_nodes.contains("a"));
+
+        // Node's backend identity actually changed (simulated by a new id, as
+        // would happen if ip/port/credentials rotated) — the old favorite id
+        // no longer matches any node and must be purged, not kept forever.
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a-new-ip", "HK-01-Renamed")])
+            .unwrap();
+        assert!(!store.favorite_nodes.contains("a"));
+    }
+
+    #[test]
+    fn favorite_is_gc_ed_when_its_subscription_is_removed() {
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+        assert!(store.toggle_favorite_node("a").unwrap());
+
+        store.remove_subscription("id-s").unwrap();
+        assert!(
+            store.favorite_nodes.is_empty(),
+            "favorite must not linger once its only node is gone"
+        );
     }
 
     #[test]

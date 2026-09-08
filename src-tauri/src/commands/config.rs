@@ -29,6 +29,10 @@ pub struct ListedNode {
     pub node: ProxyNode,
     pub subscription_id: String,
     pub subscription_name: String,
+    /// Not part of `ProxyNode` — favorites are keyed on node id in a
+    /// separate store set (`AppStore::favorite_nodes`) so they survive a
+    /// subscription refresh that rebuilds every `ProxyNode` instance.
+    pub favorite: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -440,6 +444,15 @@ pub fn rename_node(
         .map_err(|e| e.to_string())
 }
 
+/// Toggle a node's favorite flag; returns the new state (true = now
+/// favorited). Fails if the node id doesn't exist in the store.
+#[tauri::command(async)]
+pub fn toggle_favorite_node(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state
+        .with_store_mut(|store| store.toggle_favorite_node(&id))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
     state
@@ -471,6 +484,7 @@ pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, Str
                         .copied()
                         .unwrap_or("")
                         .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect())
         })
@@ -543,6 +557,7 @@ pub fn list_nodes_page(
                         .copied()
                         .unwrap_or("")
                         .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect();
             sort_listed_nodes(&mut nodes, sort_mode.as_deref());
@@ -606,6 +621,7 @@ pub fn list_node_ids(
                         .copied()
                         .unwrap_or("")
                         .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect();
             sort_listed_nodes(&mut nodes, sort_mode.as_deref());
@@ -630,6 +646,10 @@ fn extract_custom_nodes(
                 node,
                 subscription_id: sub_id.to_string(),
                 subscription_name: sub_name.to_string(),
+                // Custom-config nodes are parsed on demand from a raw config
+                // body, never stored in `AppStore.nodes` — there's no store
+                // access here and no id they could match in `favorite_nodes`.
+                favorite: false,
             })
             .collect()),
         Err(AppError::NoProxies) => Ok(Vec::new()),

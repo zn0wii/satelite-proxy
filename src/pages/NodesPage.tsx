@@ -10,8 +10,10 @@ import {
   setCurrentNode,
   testCustomNodesLatency,
   testNodesLatency,
+  toggleFavoriteNode,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
+import { GlassSwitch } from "../components/GlassSwitch";
 import { ErrorModal } from "../components/ErrorModal";
 import { useI18n } from "../i18n";
 import { groupNodes, type GroupBy } from "../nodeGroups";
@@ -139,6 +141,14 @@ export function NodesPage() {
   const [clickTest, setClickTest] = useState<boolean>(
     () => localStorage.getItem("nodes.clickTest") === "1",
   );
+  // "Show favorites only" — persisted like clickTest/viewMode.
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState<boolean>(
+    () => localStorage.getItem("nodes.favoritesOnly") === "1",
+  );
+  // Right-click context menu: node id + viewport position, or null when closed.
+  const [contextMenu, setContextMenu] = useState<
+    { id: string; x: number; y: number } | null
+  >(null);
 
   const [customRuntime, setCustomRuntime] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
@@ -239,7 +249,14 @@ export function NodesPage() {
     localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
   }, [clickTest]);
 
-  const displayed = nodes;
+  useEffect(() => {
+    localStorage.setItem("nodes.favoritesOnly", showFavoritesOnly ? "1" : "0");
+  }, [showFavoritesOnly]);
+
+  const displayed = useMemo(
+    () => (showFavoritesOnly ? nodes.filter((n) => n.favorite) : nodes),
+    [nodes, showFavoritesOnly],
+  );
 
   // Flat render items: slim collapsible group headers interleave with
   // nodes; each item carries its own height (headers are slimmer than
@@ -590,6 +607,138 @@ export function NodesPage() {
     }
   }
 
+  // Optimistic favorite toggle: flip local state immediately, then confirm
+  // with the backend. Reverts on failure (e.g. node no longer in the store).
+  async function toggleFavorite(id: string) {
+    const prevValue = nodes.find((n) => n.id === id)?.favorite ?? false;
+    setNodes((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, favorite: !prevValue } : n)),
+    );
+    try {
+      const next = await toggleFavoriteNode(id);
+      setNodes((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, favorite: next } : n)),
+      );
+    } catch (e) {
+      setNodes((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, favorite: prevValue } : n)),
+      );
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  // Dismiss the context menu on any outside click / scroll / Escape.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [contextMenu]);
+
+  function openContextMenu(e: React.MouseEvent, id: string) {
+    if (customRuntime) return;
+    e.preventDefault();
+    setContextMenu({ id, x: e.clientX, y: e.clientY });
+  }
+
+  /** Right-click context menu: ping / real-latency test the single node
+   *  under the cursor, or toggle its favorite — mirrors the toolbar batch
+   *  actions but scoped to one id instead of the whole visible list. */
+  function renderContextMenu() {
+    if (!contextMenu) return null;
+    const { id, x, y } = contextMenu;
+    const node = nodes.find((n) => n.id === id);
+    if (!node) return null;
+    const busy = testingIds.has(id);
+    return (
+      <div
+        className="node-ctx-menu"
+        style={{ left: x, top: y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setContextMenu(null);
+            void onTestOnePing(id);
+          }}
+        >
+          {t("nodes.ctxTestPing")}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setContextMenu(null);
+            void onTestOne(id);
+          }}
+        >
+          {t("nodes.ctxTestReal")}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setContextMenu(null);
+            void toggleFavorite(id);
+          }}
+        >
+          {node.favorite ? t("nodes.unfavorite") : t("nodes.favorite")}
+        </button>
+      </div>
+    );
+  }
+
+  /** Single-node ping probe — same direct-TCP path as the toolbar's batch
+   *  ping, scoped to one id (context-menu "test ping"). */
+  async function onTestOnePing(id: string) {
+    if (testing || testingIds.size > 0 || busyId || switching) return;
+    setTestKind("ping");
+    setError(null);
+    setTestingIds(new Set([id]));
+    setNodes((prev) =>
+      prev.map((n) =>
+        n.id === id ? { ...n, latency_ms: undefined, latency_at: undefined } : n,
+      ),
+    );
+    try {
+      const batch = await pingNodesLatency([id], 3000);
+      const r = batch.results.find((x) => x.id === id);
+      setUnsupportedIds((prev) => {
+        const next = new Set(prev);
+        if (r?.method === "unsupported") next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      if (r) {
+        setNodes((prev) =>
+          prev.map((n) =>
+            n.id === id
+              ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
+              : n,
+          ),
+        );
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
   /** Slim collapsible group header row (list). Plain div, not a table row —
    *  spans the full row width so it can grow past a single line later
    *  without fighting native <table> row-height rules. */
@@ -653,11 +802,27 @@ export function NodesPage() {
                           ? () => void onTestOne(n.id)
                           : () => void onSelect(n.id)
                     }
+                    onContextMenu={(e) => openContextMenu(e, n.id)}
                     title={
                       !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
                     }
                   >
-                    <span>{active ? "●" : "○"}</span>
+                    <span className="node-list-lead">
+                      {!customRuntime && (
+                        <button
+                          type="button"
+                          className={`node-fav-btn${n.favorite ? " on" : ""}`}
+                          title={t("nodes.favoriteToggleHint")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleFavorite(n.id);
+                          }}
+                        >
+                          {n.favorite ? "♥" : "♡"}
+                        </button>
+                      )}
+                      <span>{active ? "●" : "○"}</span>
+                    </span>
                     <span>
                       <div className="node-list-name">{n.name}</div>
                       {n.subscription_name ? (
@@ -696,6 +861,7 @@ export function NodesPage() {
                   type="button"
                   className={`node-card ${active ? "active" : ""}`}
                   onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
+                  onContextMenu={(e) => openContextMenu(e, n.id)}
                   disabled={customRuntime || busyId === n.id}
                   title={
                     !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
@@ -709,6 +875,20 @@ export function NodesPage() {
                         <span className="pill sidecar-tag">Xray</span>
                       ) : null}
                     </div>
+                    {!customRuntime && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className={`node-fav-btn${n.favorite ? " on" : ""}`}
+                        title={t("nodes.favoriteToggleHint")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void toggleFavorite(n.id);
+                        }}
+                      >
+                        {n.favorite ? "♥" : "♡"}
+                      </span>
+                    )}
                   </div>
                   <div className="node-card-name" title={n.name}>
                     {n.name}
@@ -829,6 +1009,13 @@ export function NodesPage() {
                 {t("nodes.clickTestActive")}
               </span>
             )}
+            <GlassSwitch
+              checked={showFavoritesOnly}
+              onChange={setShowFavoritesOnly}
+              label={`♥ ${t("nodes.favoritesOnly")}`}
+              title={t("nodes.favoritesOnlyHint")}
+              capsule
+            />
             <GlassSeg
               value={groupBy}
               ariaLabel={t("nodes.groupBy")}
@@ -946,6 +1133,7 @@ export function NodesPage() {
           )}
         </div>
       )}
+      {renderContextMenu()}
     </div>
   );
 }

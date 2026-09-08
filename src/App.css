@@ -2354,6 +2354,7 @@ button.node-card,
 .node-card {
   position: relative;
   text-align: left;
+  cursor: pointer;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface) !important;
@@ -2372,8 +2373,20 @@ button.node-card,
   transition: border-color 0.12s, background 0.12s;
 }
 
+.node-card.disabled {
+  cursor: default;
+}
+
+/* .node-card clips overflow for text ellipsis, which would also clip the
+   ⋮ dropdown poking out past the card's edge. Lift the clip and stack the
+   card above its neighbors only while its own menu is open. */
+.node-card:has(.sub-menu-pop) {
+  overflow: visible;
+  z-index: 5;
+}
+
 button.node-card:hover:not(:disabled),
-.node-card:hover:not(:disabled) {
+.node-card:hover:not(.disabled) {
   background: var(--surface-2) !important;
   border-color: var(--border-strong);
   box-shadow: none;
@@ -2388,7 +2401,7 @@ button.node-card.active,
 }
 
 button.node-card:disabled,
-.node-card:disabled {
+.node-card.disabled {
   opacity: 0.7;
 }
 
@@ -2412,9 +2425,22 @@ button.node-card:disabled,
 
 .node-card-top {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
+  /* Leaves room on the right so the name/meta never runs under the
+     absolutely-positioned corner group. */
+  padding-right: 2.6rem;
+}
+
+/* Heart + ⋮ menu, pinned to the card's top-right corner regardless of how
+   long the protocol/meta content to their left grows. */
+.node-card-corner {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
 }
 
 .node-dot {
@@ -2452,44 +2478,6 @@ button.node-card:disabled,
 .node-fav-btn.on {
   color: #e0455f;
   opacity: 1;
-}
-
-/* Right-click context menu — plain floating panel, positioned at the
-   cursor via inline left/top set from the click event. */
-.node-ctx-menu {
-  position: fixed;
-  z-index: 1000;
-  min-width: 140px;
-  padding: 0.3rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-
-.node-ctx-menu button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 0.4rem 0.6rem;
-  border: none;
-  border-radius: calc(var(--radius) - 2px);
-  background: transparent;
-  color: var(--text);
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-
-.node-ctx-menu button:hover:not(:disabled) {
-  background: var(--surface-2);
-}
-
-.node-ctx-menu button:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .node-card-latency {
@@ -2552,6 +2540,7 @@ button.node-card:disabled,
 .node-card-meta {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 0.15rem;
   font-size: 0.75rem;
 }

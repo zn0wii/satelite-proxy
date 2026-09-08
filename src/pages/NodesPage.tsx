@@ -145,10 +145,8 @@ export function NodesPage() {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState<boolean>(
     () => localStorage.getItem("nodes.favoritesOnly") === "1",
   );
-  // Right-click context menu: node id + viewport position, or null when closed.
-  const [contextMenu, setContextMenu] = useState<
-    { id: string; x: number; y: number } | null
-  >(null);
+  // Node card ⋮ action menu: id of the node whose menu is open, or null.
+  const [menuId, setMenuId] = useState<string | null>(null);
 
   const [customRuntime, setCustomRuntime] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
@@ -627,73 +625,78 @@ export function NodesPage() {
     }
   }
 
-  // Dismiss the context menu on any outside click / scroll / Escape.
+  // Dismiss the ⋮ menu on outside click / Escape — same pattern as the
+  // subscription card's action menu (ConfigPage's data-sub-menu guard).
   useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("keydown", onKey);
+    if (!menuId) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-node-menu]")) return;
+      setMenuId(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuId(null);
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
+      document.removeEventListener("keydown", onKey);
     };
-  }, [contextMenu]);
+  }, [menuId]);
 
-  function openContextMenu(e: React.MouseEvent, id: string) {
-    if (customRuntime) return;
-    e.preventDefault();
-    setContextMenu({ id, x: e.clientX, y: e.clientY });
-  }
-
-  /** Right-click context menu: ping / real-latency test the single node
-   *  under the cursor, or toggle its favorite — mirrors the toolbar batch
-   *  actions but scoped to one id instead of the whole visible list. */
-  function renderContextMenu() {
-    if (!contextMenu) return null;
-    const { id, x, y } = contextMenu;
-    const node = nodes.find((n) => n.id === id);
-    if (!node) return null;
-    const busy = testingIds.has(id);
+  /** Node card ⋮ action menu: ping / real-latency test the single node.
+   *  Favoriting has its own heart icon next to the menu trigger, so it's
+   *  not duplicated here. Same visual pattern as the subscription card's
+   *  action menu (.sub-menu / .sub-menu-pop in App.css). */
+  function renderNodeMenu(n: ProxyNode) {
+    const busy = testingIds.has(n.id);
+    const open = menuId === n.id;
     return (
       <div
-        className="node-ctx-menu"
-        style={{ left: x, top: y }}
+        className="sub-menu"
+        data-node-menu
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
       >
         <button
           type="button"
-          disabled={busy}
-          onClick={() => {
-            setContextMenu(null);
-            void onTestOnePing(id);
-          }}
+          className="sub-menu-trigger"
+          aria-label={t("common.actions")}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setMenuId((id) => (id === n.id ? null : n.id))}
         >
-          {t("nodes.ctxTestPing")}
+          ⋮
         </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => {
-            setContextMenu(null);
-            void onTestOne(id);
-          }}
-        >
-          {t("nodes.ctxTestReal")}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setContextMenu(null);
-            void toggleFavorite(id);
-          }}
-        >
-          {node.favorite ? t("nodes.unfavorite") : t("nodes.favorite")}
-        </button>
+        {open && (
+          <div className="sub-menu-pop" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
+              disabled={busy}
+              onClick={() => {
+                setMenuId(null);
+                void onTestOne(n.id);
+              }}
+            >
+              {t("nodes.ctxTestReal")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
+              disabled={busy}
+              onClick={() => {
+                setMenuId(null);
+                void onTestOnePing(n.id);
+              }}
+            >
+              {t("nodes.ctxTestPing")}
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -802,7 +805,6 @@ export function NodesPage() {
                           ? () => void onTestOne(n.id)
                           : () => void onSelect(n.id)
                     }
-                    onContextMenu={(e) => openContextMenu(e, n.id)}
                     title={
                       !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
                     }
@@ -855,14 +857,25 @@ export function NodesPage() {
   function renderNodeCard(n: ProxyNode) {
               const active = n.id === currentId;
               const isTesting = testingIds.has(n.id);
+              const disabled = customRuntime || busyId === n.id;
               return (
-                <button
+                <div
                   key={n.id}
-                  type="button"
-                  className={`node-card ${active ? "active" : ""}`}
-                  onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
-                  onContextMenu={(e) => openContextMenu(e, n.id)}
-                  disabled={customRuntime || busyId === n.id}
+                  role="button"
+                  tabIndex={disabled ? -1 : 0}
+                  aria-disabled={disabled}
+                  className={`node-card ${active ? "active" : ""}${disabled ? " disabled" : ""}`}
+                  onClick={disabled ? undefined : () => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
+                  onKeyDown={
+                    disabled
+                      ? undefined
+                      : (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            void (clickTest ? onTestOne(n.id) : onSelect(n.id));
+                          }
+                        }
+                  }
                   title={
                     !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
                   }
@@ -876,18 +889,21 @@ export function NodesPage() {
                       ) : null}
                     </div>
                     {!customRuntime && (
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        className={`node-fav-btn${n.favorite ? " on" : ""}`}
-                        title={t("nodes.favoriteToggleHint")}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void toggleFavorite(n.id);
-                        }}
-                      >
-                        {n.favorite ? "♥" : "♡"}
-                      </span>
+                      <div className="node-card-corner">
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          className={`node-fav-btn${n.favorite ? " on" : ""}`}
+                          title={t("nodes.favoriteToggleHint")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleFavorite(n.id);
+                          }}
+                        >
+                          {n.favorite ? "♥" : "♡"}
+                        </span>
+                        {renderNodeMenu(n)}
+                      </div>
                     )}
                   </div>
                   <div className="node-card-name" title={n.name}>
@@ -907,7 +923,7 @@ export function NodesPage() {
                       />
                     </span>
                   </div>
-                </button>
+                </div>
               );
   }
 
@@ -1133,7 +1149,6 @@ export function NodesPage() {
           )}
         </div>
       )}
-      {renderContextMenu()}
     </div>
   );
 }

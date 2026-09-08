@@ -705,8 +705,8 @@ mod tests {
     #[test]
     fn same_name_different_credentials_get_distinct_ids() {
         // Two nodes sharing name/server/port/protocol but differing only by
-        // password: instance_key keeps both, but the plain id hash would
-        // collide → duplicate `node-<id[..16]>` outbound tags.
+        // password: compute_id now hashes credentials too, so they get
+        // distinct ids directly (no more `node-<id[..16]>` tag collision).
         let mk = |password: &str| ProxyNode {
             id: String::new(),
             name: "香港 01".into(),
@@ -748,6 +748,57 @@ mod tests {
             outcome.nodes[0].id[..16.min(outcome.nodes[0].id.len())],
             outcome.nodes[1].id[..16.min(outcome.nodes[1].id.len())]
         );
+    }
+
+    #[test]
+    fn node_id_survives_rename_and_resubscribe() {
+        // The whole point of hashing on backend identity instead of name/sub
+        // id: an airport renaming a node, or the user re-adding the same
+        // subscription under a different URL, must not rotate the node's
+        // id — otherwise manual selections and rule bindings silently break.
+        let mk = |name: &str| ProxyNode {
+            id: String::new(),
+            name: name.into(),
+            protocol: crate::domain::Protocol::Shadowsocks,
+            server: "example.com".into(),
+            port: 8388,
+            tls: None,
+            transport: None,
+            udp: None,
+            config: crate::domain::ProtocolConfig::Shadowsocks {
+                method: "aes-128-gcm".into(),
+                password: "same-pass".into(),
+                plugin: None,
+                plugin_opts: None,
+                shadow_tls: None,
+            },
+            source: None,
+            latency_ms: None,
+            latency_at: None,
+        };
+        let build = |name: &str, sub_url: &str| {
+            build_outcome(
+                "airport".into(),
+                SubscriptionSource::Url {
+                    url: sub_url.into(),
+                },
+                ParseResult {
+                    nodes: vec![mk(name)],
+                    skipped: vec![],
+                    format: SubscriptionFormat::UriList,
+                },
+                None,
+                false,
+            )
+        };
+        // Same node, renamed by the airport on refresh.
+        let before = build("HK-01", "https://sub.example.com/a");
+        let after_rename = build("HK-01-renamed", "https://sub.example.com/a");
+        assert_eq!(before.nodes[0].id, after_rename.nodes[0].id);
+
+        // Same node, subscription re-added under a different URL.
+        let after_resub = build("HK-01", "https://sub.example.com/b");
+        assert_eq!(before.nodes[0].id, after_resub.nodes[0].id);
     }
 
     #[test]
@@ -1118,26 +1169,25 @@ fn build_outcome(
         traffic: remark_traffic,
     };
 
-    // Re-hash node ids with subscription scope for multi-sub stability.
-    let sub_id = subscription.id.clone();
+    // Re-hash node ids on backend identity (server/port/protocol/credentials)
+    // so a subscription refresh that only renames the airport/node, or
+    // rotates the subscription URL, doesn't rotate the node's id — manual
+    // selections and rule bindings survive across refreshes as long as the
+    // underlying host/port/auth stay the same.
     let mut nodes: Vec<ProxyNode> = real_nodes
         .into_iter()
         .map(|mut n| {
-            n.id = ProxyNode::compute_id(
-                &format!("{sub_id}|{}", n.name),
-                &n.server,
-                n.port,
-                n.protocol,
-            );
+            n = n.with_computed_id();
             // latency filled later by probe; clear on fresh parse
             n.latency_ms = None;
             n.latency_at = None;
             n
         })
         .collect();
-    // The id hash ignores credentials, so same-named nodes differing only by
-    // password/uuid would collide on the outbound tag (`node-<id[..16]>`)
-    // and make `sing-box check` fail with `duplicate outbound/endpoint tag`.
+    // Same-server/port/protocol nodes with identical credentials but
+    // different remarks (an airport listing one backend under two names)
+    // would collide on the outbound tag (`node-<id[..16]>`) and make
+    // `sing-box check` fail with `duplicate outbound/endpoint tag`.
     let renamed = ProxyNode::ensure_unique_ids(nodes.iter_mut());
     if renamed > 0 {
         crate::app_log::warn(

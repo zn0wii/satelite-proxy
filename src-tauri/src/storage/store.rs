@@ -2050,8 +2050,14 @@ mod tests {
                 latency_at: None,
             },
         };
-        // Legacy collision: same name/server/port/protocol, different creds.
-        let base = ProxyNode::compute_id("香港 01", "example.com", 8388, Protocol::Shadowsocks);
+        // Legacy collision: same server/port/protocol, different creds, but
+        // manually assigned the same id (simulating stale/corrupt data).
+        let base = ProxyNode::compute_id(
+            "example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pass-a",
+        );
         let path = test_store_path("dup-ids");
         let mut store = AppStore::default();
         store.nodes.push(mk(&base, "pass-a"));

@@ -988,7 +988,12 @@ mod tests {
         // Round-trip: a generated-style config carries internal `node-{id16}`
         // tags; the display name is recovered via the embedded id prefix.
         use crate::domain::Protocol;
-        let id = ProxyNode::compute_id("香港 01", "a.example.com", 8388, Protocol::Shadowsocks);
+        let id = ProxyNode::compute_id(
+            "a.example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pw",
+        );
         let tag = format!("node-{}", &id[..16]);
         let content = format!(
             r#"{{

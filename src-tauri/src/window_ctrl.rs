@@ -149,8 +149,10 @@ fn titlebar_accent_color<R: Runtime>(app: &AppHandle<R>) -> (u8, u8, u8) {
 /// the dashboard hero glow. `DWMWA_CAPTION_COLOR` is unsupported on Windows 10
 /// and earlier Win11 builds — the call fails silently there and the title bar
 /// keeps the OS default light/dark chrome (see `set_theme` above).
+/// Public so `update_settings` can re-tint live when accent/glow_color changes
+/// (theme changes already re-apply via `apply_window_theme`).
 #[cfg(target_os = "windows")]
-fn apply_titlebar_accent<R: Runtime>(app: &AppHandle<R>) {
+pub fn apply_titlebar_accent<R: Runtime>(app: &AppHandle<R>) {
     use windows::Win32::Foundation::{COLORREF, HWND};
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
 
@@ -169,7 +171,7 @@ fn apply_titlebar_accent<R: Runtime>(app: &AppHandle<R>) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply_titlebar_accent<R: Runtime>(_app: &AppHandle<R>) {}
+pub fn apply_titlebar_accent<R: Runtime>(_app: &AppHandle<R>) {}
 
 /// Pin the native window chrome (macOS title bar, Windows caption) to the
 /// app's own theme setting instead of letting it drift with the OS

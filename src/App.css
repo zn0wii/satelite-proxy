@@ -3191,6 +3191,16 @@ tr.rule-row:hover {
   overflow: visible;
 }
 
+/* Row ⋮ popovers open UPWARD: for the first rows they escape the table card
+   into the toolbar band, but .card's isolation traps their z-index inside the
+   card while the toolbar sits at z-index:70 (so its own downward popover can
+   overlay the table). Lift the table card above the toolbar while a row menu
+   is open — same :has idiom as the DNS panels / chain cards. */
+.rules-table-wrap:has(.rule-menu-pop) {
+  position: relative;
+  z-index: 80;
+}
+
 .rules-table {
   table-layout: fixed;
   width: 100%;

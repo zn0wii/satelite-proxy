@@ -175,6 +175,8 @@ export interface SubscriptionDetail {
   auto_update?: boolean;
   auto_update_interval_min?: number;
   traffic?: SubscriptionTraffic | null;
+  /** Custom User-Agent for URL fetches. Empty/absent = built-in default. */
+  user_agent?: string | null;
 }
 
 export interface SubscriptionUrlEntry {

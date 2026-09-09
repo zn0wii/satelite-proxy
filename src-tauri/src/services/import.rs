@@ -39,12 +39,14 @@ pub struct ImportOutcome {
 
 /// `via_proxy`: fetch through local mixed HTTP proxy (127.0.0.1:mixed_port).
 /// `mixed_port`: required when via_proxy is true.
+/// `user_agent`: custom UA override; empty/None falls back to the built-in default.
 pub async fn import_from_url_with_id(
     name: Option<String>,
     url: String,
     existing_id: Option<String>,
     via_proxy: bool,
     mixed_port: Option<u16>,
+    user_agent: Option<String>,
 ) -> AppResult<ImportOutcome> {
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -56,10 +58,16 @@ pub async fn import_from_url_with_id(
         ));
     }
 
+    let custom_ua = user_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     // Many panels only attach `subscription-userinfo` when UA looks like Clash;
     // some also substring-whitelist `clash-verge` or `flclash`. See
     // `subscription_user_agent` for the exact shape.
-    let ua = subscription_user_agent();
+    let ua = custom_ua.clone().unwrap_or_else(subscription_user_agent);
 
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
@@ -139,6 +147,7 @@ pub async fn import_from_url_with_id(
     .await
     .map_err(|error| AppError::Fetch(format!("subscription parse task: {error}")))??;
     outcome.subscription.via_proxy = via_proxy;
+    outcome.subscription.user_agent = custom_ua;
     // Priority: HTTP header > body comment > remark node names
     outcome.subscription.traffic =
         SubscriptionTraffic::merge(traffic, outcome.subscription.traffic);
@@ -1167,6 +1176,7 @@ fn build_outcome(
         auto_update: false,
         auto_update_interval_min: 1440,
         traffic: remark_traffic,
+        user_agent: None,
     };
 
     // Re-hash node ids on backend identity (server/port/protocol/credentials)

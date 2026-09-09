@@ -30,6 +30,7 @@ export interface ConfigFormValues {
   viaProxy?: boolean;
   autoUpdate?: boolean;
   autoUpdateIntervalMin?: number;
+  userAgent?: string;
 }
 
 type AutoUpdateInterval = "disabled" | "1h" | "12h" | "24h";
@@ -89,6 +90,7 @@ export function AddConfigModal({
   const [viaProxy, setViaProxy] = useState(false);
   const [autoUpdateInterval, setAutoUpdateInterval] =
     useState<AutoUpdateInterval>("24h");
+  const [userAgent, setUserAgent] = useState("");
   const [fileLabel, setFileLabel] = useState("");
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -107,6 +109,7 @@ export function AddConfigModal({
       setViaProxy(!!initial.viaProxy);
       setFileLabel("");
       setFileError(null);
+      setUserAgent(initial.userAgent ?? "");
       const interval = initial.autoUpdateIntervalMin ?? 1440;
       setAutoUpdateInterval(
         initial.autoUpdate === false
@@ -129,6 +132,7 @@ export function AddConfigModal({
       setAutoUpdateInterval("24h");
       setFileLabel("");
       setFileError(null);
+      setUserAgent("");
     }
   }, [isOpen, initial]);
 
@@ -179,6 +183,7 @@ export function AddConfigModal({
       autoUpdateIntervalMin: interval,
     };
     if (kind === "url") payload.url = url.trim();
+    if (kind === "url" && userAgent.trim()) payload.userAgent = userAgent.trim();
     if (kind === "text" || kind === "singbox") payload.content = content.trim();
     if (kind === "node") {
       payload.node = {
@@ -340,6 +345,18 @@ export function AddConfigModal({
                   ]}
                 />
               </div>
+              <label className="field">
+                <span>自定义 User-Agent</span>
+                <input
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={userAgent}
+                  onChange={(e) => setUserAgent(e.target.value)}
+                  placeholder="satelite-proxy/0.1 clash-verge/v2.5 flclash/1"
+                  disabled={busy}
+                />
+              </label>
             </>
           )}
 

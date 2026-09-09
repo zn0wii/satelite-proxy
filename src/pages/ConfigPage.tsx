@@ -417,6 +417,7 @@ export function ConfigPage() {
         viaProxy: d.via_proxy,
         autoUpdate: !!d.auto_update,
         autoUpdateIntervalMin: d.auto_update_interval_min ?? 1440,
+        userAgent: d.user_agent ?? "",
       });
       setModalOpen(true);
     } catch (e) {
@@ -446,6 +447,7 @@ export function ConfigPage() {
           viaProxy: payload.viaProxy ?? false,
           autoUpdate,
           autoUpdateIntervalMin,
+          userAgent: payload.userAgent ?? null,
         });
       } else if (payload.kind === "url") {
         await addSubscriptionUrl(
@@ -454,6 +456,7 @@ export function ConfigPage() {
           !!payload.viaProxy,
           autoUpdate,
           autoUpdateIntervalMin,
+          payload.userAgent ?? null,
         );
       } else if (payload.kind === "file") {
         await addSubscriptionFile(

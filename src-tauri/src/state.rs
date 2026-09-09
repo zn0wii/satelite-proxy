@@ -135,6 +135,7 @@ mod kernel_selection_poll_tests {
                         auto_update: false,
                         auto_update_interval_min: 1440,
                         traffic: None,
+                        user_agent: None,
                     },
                     vec![crate::domain::ProxyNode {
                         id: "node-a".into(),

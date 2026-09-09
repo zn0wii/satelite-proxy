@@ -822,10 +822,12 @@ export function NodesPage() {
                       ) : null}
                     </span>
                     <span>
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
+                      <span className="node-proto-tags">
+                        <code>{n.protocol}</code>
+                        {delegatedProtocols.has(n.protocol) ? (
+                          <span className="sidecar-tag">Xray</span>
+                        ) : null}
+                      </span>
                     </span>
                     <span>{n.server}</span>
                     <span>{n.port}</span>
@@ -868,10 +870,12 @@ export function NodesPage() {
                   <div className="node-card-top">
                     <span className="node-dot">{active ? "●" : "○"}</span>
                     <div className="node-card-meta">
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
+                      <div className="node-proto-tags">
+                        <code>{n.protocol}</code>
+                        {delegatedProtocols.has(n.protocol) ? (
+                          <span className="sidecar-tag">Xray</span>
+                        ) : null}
+                      </div>
                     </div>
                     {!customRuntime && (
                       <div className="node-card-corner">

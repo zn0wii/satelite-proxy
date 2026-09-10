@@ -38,4 +38,5 @@ echo "v${VER}" > "$OUT_DIR/xray-version.txt"
 
 echo "Installed:"
 ls -lh "$OUT_DIR/xray" "$OUT_DIR/xray-version.txt" "$OUT_DIR"/geosite.dat "$OUT_DIR"/geoip.dat 2>/dev/null || true
-"$OUT_DIR/xray" -version | head -2
+# Self-check may fail on cross-arch/incompatible-microarch runners; don't fail the build.
+"$OUT_DIR/xray" -version 2>&1 | head -2 || true

@@ -39,4 +39,5 @@ done
 
 echo "Installed:"
 ls -lh "$OUT_DIR"/mihomo "$OUT_DIR"/mihomo-version.txt "$OUT_DIR"/mihomo-geodata/* 2>/dev/null || true
-"$OUT_DIR/mihomo" -v | head -2
+# Self-check may fail on cross-arch/incompatible-microarch runners; don't fail the build.
+"$OUT_DIR/mihomo" -v 2>&1 | head -2 || true

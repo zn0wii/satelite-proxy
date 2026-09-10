@@ -1,7 +1,7 @@
 # AGENTS.md — Satelite Proxy 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
-最后核对：2026-09-01（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2。智能切换被动检测 2026-09 重构：失败判定=≤3s 快死或 ≤15s 零字节（拨号超时带），mihomo 增设内核日志流 `/logs` WS 监听（§5.1 `log_listener.rs`）；同批性能改造=快照流三档变速（需求心跳+TUN 退避）与 passive stats 单趟化，见 §5.1）。
+最后核对：2026-09-10（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2。智能切换被动检测 2026-09 重构：失败判定=≤3s 快死或 ≤15s 零字节（拨号超时带），mihomo 增设内核日志流 `/logs` WS 监听（§5.1 `log_listener.rs`）；同批性能改造=快照流三档变速（需求心跳+TUN 退避）与 passive stats 单趟化，见 §5.1。CI 与本地打包脚本默认改为三内核四平台全打包，Linux 补齐 xray/mihomo 基础设施，mihomo geodata 改为固定快照机制，sing-box 版本号三处统一为 v1.13.18，见 §9.19）。
 
 ## 0. 阅读与维护规则（必读）
 
@@ -58,44 +58,56 @@ cd src-tauri && cargo fmt / cargo clippy          # 标准 Rust 工具链
 
 ```bash
 # macOS DMG（产物: src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/）
-./scripts/build-dmg.sh                        # 按本机架构，仅 sing-box 内核（默认）
+./scripts/build-dmg.sh                        # 按本机架构，三内核（默认）
 ./scripts/build-dmg.sh --arch arm64
 ./scripts/build-dmg.sh --arch intel           # 交叉编译；等价 build-dmg-intel.sh
-./scripts/build-dmg.sh --all-cores            # 额外打包 Xray + mihomo（缺失自动 fetch）
+./scripts/build-dmg.sh --singbox-only         # 瘦身：只打 sing-box（缺失自动 fetch）
 
 # Windows（产物: src-tauri/target/release/bundle/nsis/ 或 .../msi/）
-pwsh scripts/build-windows.ps1                        # NSIS 安装包，仅 sing-box（默认）
+pwsh scripts/build-windows.ps1                        # NSIS 安装包，三内核（默认）
 pwsh scripts/build-windows.ps1 -Bundle msi            # MSI
-pwsh scripts/build-windows.ps1 -AllCores              # 额外打包 Xray + mihomo（缺失自动 fetch）
+pwsh scripts/build-windows.ps1 -SingboxOnly           # 瘦身：只打 sing-box（缺失自动 fetch）
 
 # Windows 便携版（产物: src-tauri/target/release/bundle/portable/Satelite_<版本>_x64_portable.zip）
-pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19）
-pwsh scripts/build-windows.ps1 -Bundle portable -AllCores  # 三内核便携版
+pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19），三内核
+pwsh scripts/build-windows.ps1 -Bundle portable -SingboxOnly  # 单内核便携版
 
-打包默认只含 sing-box 内核（经 `tauri.singbox-<平台>.conf.json` overlay 瘦身 resources，
-否则缺失文件会让 bundler 失败）；`--all-cores`/`-AllCores` 才把 Xray+mihomo（含 geodata）
-打进安装包，缺失时自动调 fetch 脚本。三入口切内核 UI 不受影响——未打包的内核可经设置页下载。
+CI（`.github/workflows/release.yml`）与本地脚本默认均打三内核（sing-box + Xray + mihomo，
+含各自 geodata），四平台一致；`tauri.<平台>.conf.json`（macOS 走 `tauri.conf.json`/
+`tauri.macos-intel.conf.json`）为全内核基础配置。`tauri.singbox-<平台>.conf.json` overlay
+瘦身 resources 只含 sing-box，供 `--singbox-only`/`-SingboxOnly` 选用（体积敏感场景）。
+三入口切内核 UI 不受影响——未打包的内核可经设置页下载。
 ```
 
-打包脚本会自动拉取对应平台的官方 sing-box 并打进安装包，无需手动准备。
+打包脚本会自动拉取对应平台的官方内核并打进安装包，无需手动准备（mihomo geodata 例外，见下）。
 
 ### 资源预取（可选，离线/加速用）
 
 ```bash
 scripts/fetch-bundled-core-darwin-arm64.sh        # macOS arm64 sing-box（默认 v1.13.18）
 scripts/fetch-bundled-core-darwin-amd64.sh        # macOS Intel
-pwsh scripts/fetch-bundled-core-windows-amd64.ps1 # Windows sing-box v1.13.15 + libcronet.dll，支持 -Proxy
+scripts/fetch-bundled-core-linux-amd64.sh         # Linux amd64 sing-box
+pwsh scripts/fetch-bundled-core-windows-amd64.ps1 # Windows sing-box v1.13.18 + libcronet.dll，支持 -Proxy
 scripts/fetch-bundled-xray-darwin-arm64.sh        # macOS arm64 Xray（默认 v26.3.27）+ geosite/geoip.dat
 scripts/fetch-bundled-xray-darwin-amd64.sh        # macOS Intel Xray
+scripts/fetch-bundled-xray-linux-amd64.sh         # Linux amd64 Xray
 pwsh scripts/fetch-bundled-xray-windows-amd64.ps1 # Windows Xray + geodata + wintun.dll（TUN 用），支持 -Proxy
 scripts/fetch-bundled-mihomo-darwin-arm64.sh       # macOS arm64 mihomo（默认 v1.19.30）+ mihomo-geodata/（mmdb+GeoSite.dat）
 scripts/fetch-bundled-mihomo-darwin-amd64.sh       # macOS Intel mihomo
+scripts/fetch-bundled-mihomo-linux-amd64.sh        # Linux amd64 mihomo
 pwsh scripts/fetch-bundled-mihomo-windows-amd64.ps1 # Windows mihomo + mihomo-geodata/（wintun.dll 与 Xray 共用），支持 -Proxy
+scripts/fetch-bundled-mihomo-geodata.sh           # 一次性刷新 mihomo geodata 固定快照（见下）
 scripts/fetch-bundled-rule-sets.sh                # 3 条内置 .srs 规则集（校验 SRS 魔数，--force 重下）
 scripts/memory-profile/                           # WebView2 内存剖析（CDP 堆采样 + 进程树 RSS，见其 README 与 docs/webview2-memory-optimization-plan.md）
 ```
 
-- 这些二进制**不入 git**（`.gitignore` 排除 `resources/bin/**/sing-box*`、`xray*`、`mihomo*`、`*.dat`、`wintun.dll`、`mihomo-geodata/`、`libcronet.*`、`resources/rule-sets/*.srs`），本地缺失属正常
+- 各平台 `fetch-bundled-mihomo-*` 脚本的 geodata（Country.mmdb + GeoSite.dat）**不联网下载**，而是从
+  `src-tauri/resources/geodata/mihomo/`（git 跟踪的固定快照）复制。上游 MetaCubeX/meta-rules-dat 只维护
+  滚动的 `latest` release、没有版本化 tag，无法像内核二进制一样 pin URL；刷新快照需手动执行
+  `scripts/fetch-bundled-mihomo-geodata.sh` 后 `git add` 提交。
+
+- 这些二进制**不入 git**（`.gitignore` 排除 `resources/bin/**/sing-box*`、`xray*`、`mihomo*`、`*.dat`、`wintun.dll`、`mihomo-geodata/`、`libcronet.*`、`resources/rule-sets/*.srs`），本地缺失属正常；
+  唯独 `src-tauri/resources/geodata/mihomo/`（country.mmdb + geosite.dat 快照）**入 git**，不在排除列表内
 - 图标再生成：`python scripts/generate-icons.py`（依赖 Pillow，产出应用图标 + 8 种托盘图标）
 
 ## 2. 项目是什么
@@ -341,7 +353,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 - **产物路径**：DMG → `src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/`；Windows → `src-tauri/target/release/bundle/nsis/`（或 `.../msi/`）。
 - **Rust 测试布局**：集成测试 `src-tauri/tests/parse_subscription.rs`（fixtures 在 `tests/fixtures/`：clash yaml ×2、singbox json ×1）；`download_core_live.rs` 为 `#[ignore]` 真网测试；单测散落各文件 `#[cfg(test)]`。
 - **换行符**：`.gitattributes` 规定源码 eol=lf、`.ps1/.bat/.cmd` 为 CRLF。
-- **内核版本**：macOS 预取脚本默认 sing-box v1.13.18，Windows v1.13.15，两者独立演进，升级时分别改脚本；Xray 各平台统一 v26.3.27（`scripts/fetch-bundled-xray-*` + `core/kind.rs::fallback_version` 两处同步）；mihomo 各平台统一 v1.19.30（`scripts/fetch-bundled-mihomo-*` + `core/kind.rs::fallback_version` 两处同步）。
+- **内核版本**：sing-box 各平台统一 v1.13.18（`scripts/fetch-bundled-core-*` + `core/kind.rs::fallback_version` 两处同步）；Xray 各平台统一 v26.3.27（`scripts/fetch-bundled-xray-*` + `core/kind.rs::fallback_version` 两处同步）；mihomo 各平台统一 v1.19.30（`scripts/fetch-bundled-mihomo-*` + `core/kind.rs::fallback_version` 两处同步）；升级时三处（各平台脚本 + kind.rs）联动改，缺一处会导致运行时兜底版本与安装包内实际版本不一致。
 
 ## 9. 约定与坑（agent 必读）
 

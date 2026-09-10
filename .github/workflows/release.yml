@@ -14,26 +14,74 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS arm64
           - platform: macos-latest
             target: aarch64-apple-darwin
             core-dir: darwin-arm64
+            variant: fullcores
             fetch-core: scripts/fetch-bundled-core-darwin-arm64.sh
-            singbox-config: src-tauri/tauri.singbox-darwin-arm64.conf.json
+            fetch-xray: scripts/fetch-bundled-xray-darwin-arm64.sh
+            fetch-mihomo: scripts/fetch-bundled-mihomo-darwin-arm64.sh
+            tauri-config: src-tauri/tauri.fullcores-darwin-arm64.conf.json
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            core-dir: darwin-arm64
+            variant: singbox
+            fetch-core: scripts/fetch-bundled-core-darwin-arm64.sh
+            fetch-xray: ""
+            fetch-mihomo: ""
+            tauri-config: src-tauri/tauri.singbox-darwin-arm64.conf.json
+          # macOS intel
           - platform: macos-latest
             target: x86_64-apple-darwin
             core-dir: darwin-amd64
+            variant: fullcores
             fetch-core: scripts/fetch-bundled-core-darwin-amd64.sh
-            singbox-config: src-tauri/tauri.singbox-darwin-amd64.conf.json
+            fetch-xray: scripts/fetch-bundled-xray-darwin-amd64.sh
+            fetch-mihomo: scripts/fetch-bundled-mihomo-darwin-amd64.sh
+            tauri-config: src-tauri/tauri.macos-intel.conf.json
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            core-dir: darwin-amd64
+            variant: singbox
+            fetch-core: scripts/fetch-bundled-core-darwin-amd64.sh
+            fetch-xray: ""
+            fetch-mihomo: ""
+            tauri-config: src-tauri/tauri.singbox-darwin-amd64.conf.json
+          # Windows amd64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             core-dir: windows-amd64
+            variant: fullcores
             fetch-core: scripts/fetch-bundled-core-windows-amd64.ps1
-            singbox-config: src-tauri/tauri.singbox-windows.conf.json
+            fetch-xray: scripts/fetch-bundled-xray-windows-amd64.ps1
+            fetch-mihomo: scripts/fetch-bundled-mihomo-windows-amd64.ps1
+            tauri-config: src-tauri/tauri.windows.conf.json
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            core-dir: windows-amd64
+            variant: singbox
+            fetch-core: scripts/fetch-bundled-core-windows-amd64.ps1
+            fetch-xray: ""
+            fetch-mihomo: ""
+            tauri-config: src-tauri/tauri.singbox-windows.conf.json
+          # Linux amd64
           - platform: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             core-dir: linux-amd64
+            variant: fullcores
             fetch-core: scripts/fetch-bundled-core-linux-amd64.sh
-            singbox-config: src-tauri/tauri.singbox-linux-amd64.conf.json
+            fetch-xray: scripts/fetch-bundled-xray-linux-amd64.sh
+            fetch-mihomo: scripts/fetch-bundled-mihomo-linux-amd64.sh
+            tauri-config: src-tauri/tauri.linux.conf.json
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            core-dir: linux-amd64
+            variant: singbox
+            fetch-core: scripts/fetch-bundled-core-linux-amd64.sh
+            fetch-xray: ""
+            fetch-mihomo: ""
+            tauri-config: src-tauri/tauri.singbox-linux-amd64.conf.json
 
     runs-on: ${{ matrix.platform }}
 
@@ -84,6 +132,22 @@ jobs:
         if: runner.os == 'Windows'
         run: pwsh ${{ matrix.fetch-core }}
 
+      - name: Fetch bundled Xray core (Unix)
+        if: runner.os != 'Windows' && matrix.fetch-xray != ''
+        run: ${{ matrix.fetch-xray }}
+
+      - name: Fetch bundled Xray core (Windows)
+        if: runner.os == 'Windows' && matrix.fetch-xray != ''
+        run: pwsh ${{ matrix.fetch-xray }}
+
+      - name: Fetch bundled mihomo core (Unix)
+        if: runner.os != 'Windows' && matrix.fetch-mihomo != ''
+        run: ${{ matrix.fetch-mihomo }}
+
+      - name: Fetch bundled mihomo core (Windows)
+        if: runner.os == 'Windows' && matrix.fetch-mihomo != ''
+        run: pwsh ${{ matrix.fetch-mihomo }}
+
       - name: Fetch bundled rule sets
         run: scripts/fetch-bundled-rule-sets.sh
         shell: bash
@@ -101,7 +165,7 @@ jobs:
           releaseBody: "Automatic release"
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }} --config ${{ matrix.singbox-config }}
+          args: --target ${{ matrix.target }} --config ${{ matrix.tauri-config }}
 
   windows-portable:
     needs: release
@@ -130,11 +194,15 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Build portable zip
+      - name: Build fullcores portable zip
         shell: pwsh
         run: scripts/build-windows.ps1 -Bundle portable
 
-      - name: Upload portable zip to release
+      - name: Build singbox-only portable zip
+        shell: pwsh
+        run: scripts/build-windows.ps1 -Bundle portable -SingboxOnly
+
+      - name: Upload portable zips to release
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,8 @@
 # Fetch and stage the bundled mihomo core for Windows (amd64).
 # Downloads mihomo.exe from the mihomo-windows-amd64-v{ver}.zip release
-# asset plus MetaCubeX geodata (Country.mmdb + GeoSite.dat) into
+# asset; geodata (Country.mmdb + GeoSite.dat) is copied from the
+# repo-committed snapshot in resources/geodata/mihomo/ (see
+# scripts/fetch-bundled-mihomo-geodata.sh) into
 # src-tauri/resources/bin/windows-amd64/mihomo-geodata/.
 # wintun.dll (Windows tun) is shared with the Xray staging — this script
 # only fetches it when missing.
@@ -67,19 +69,21 @@ if (-not (Test-Path (Join-Path $DEST "wintun.dll"))) {
   Copy-Item -Force (Join-Path $TMP "wintun\wintun\bin\amd64\wintun.dll") (Join-Path $DEST "wintun.dll")
 }
 
-# mihomo geodata: Country.mmdb (MaxMind) + GeoSite.dat (MetaCubeX; note the
-# exact casing — mihomo looks for GeoSite.dat and macOS is case-sensitive).
-foreach ($file in @(@{ Name = "Country.mmdb"; Url = "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb" },
-                    @{ Name = "GeoSite.dat"; Url = "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat" })) {
+# mihomo geodata: Country.mmdb + GeoSite.dat, staged from the repo-committed
+# snapshot (see resources/geodata/mihomo/ and
+# scripts/fetch-bundled-mihomo-geodata.sh) — upstream meta-rules-dat only
+# ships a rolling "latest" release, so a live fetch here would defeat the
+# pinned-version guarantee.
+$SnapshotDir = Join-Path $ROOT "src-tauri\resources\geodata\mihomo"
+foreach ($file in @(@{ Name = "Country.mmdb"; Snapshot = "country.mmdb" },
+                    @{ Name = "GeoSite.dat"; Snapshot = "geosite.dat" })) {
   $target = Join-Path $GEO $file.Name
   if (Test-Path $target) { continue }
-  Write-Host "Downloading $($file.Url)"
-  try {
-    Invoke-WebRequest -Uri $file.Url -OutFile $target @webParams
-  } catch {
-    & curl.exe -sSL -x "$Proxy" -o "$target" "$($file.Url)"
-    if ($LASTEXITCODE -ne 0) { throw "curl $($file.Name) download failed (exit $LASTEXITCODE)" }
+  $source = Join-Path $SnapshotDir $file.Snapshot
+  if (-not (Test-Path $source)) {
+    throw "missing $source - run scripts/fetch-bundled-mihomo-geodata.sh once and commit the result"
   }
+  Copy-Item -Force $source $target
 }
 
 Write-Host "Staged mihomo v$Version -> $DEST"

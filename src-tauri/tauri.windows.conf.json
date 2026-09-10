@@ -1,5 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Satelite-fullcores",
   "bundle": {
     "resources": [
       "resources/bin/windows-amd64/sing-box.exe",

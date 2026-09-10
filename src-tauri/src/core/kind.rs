@@ -78,7 +78,7 @@ impl CoreKind {
     /// Pinned version used only when the GitHub API is unreachable.
     pub fn fallback_version(self) -> &'static str {
         match self {
-            Self::SingBox => "v1.13.15",
+            Self::SingBox => "v1.13.18",
             Self::Xray => "v26.3.27",
             Self::Mihomo => "v1.19.30",
         }

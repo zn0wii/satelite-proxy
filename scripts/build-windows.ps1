@@ -1,17 +1,17 @@
 # Build the frontend + Tauri app and package it as a Windows installer.
 # Usage:
-#   pwsh scripts/build-windows.ps1                 # NSIS (.exe) setup, sing-box core only (default)
+#   pwsh scripts/build-windows.ps1                 # NSIS (.exe) setup, all three cores (default)
 #   pwsh scripts/build-windows.ps1 -Bundle msi     # MSI installer
 #   pwsh scripts/build-windows.ps1 -Bundle portable # extract-and-run zip (data lives next to the exe)
-#   pwsh scripts/build-windows.ps1 -AllCores       # also bundle the Xray + mihomo cores
+#   pwsh scripts/build-windows.ps1 -SingboxOnly    # slim build: sing-box only, drop Xray + mihomo
 #   pwsh scripts/build-windows.ps1 -Proxy http://127.0.0.1:7890
 [CmdletBinding()]
 param(
   [ValidateSet("nsis", "msi", "portable")]
   [string]$Bundle = "nsis",
-  [switch]$AllCores,
+  [switch]$SingboxOnly,
   [string]$Proxy  = $env:HTTPS_PROXY,
-  [string]$CoreVersion = "1.13.15"
+  [string]$CoreVersion = "1.13.18"
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,10 +56,10 @@ if (-not (Test-Path $CoreExe)) {
   & (Join-Path $PSScriptRoot "fetch-bundled-core-windows-amd64.ps1") -Version $CoreVersion -Proxy $Proxy
 }
 
-# --- 2b. Extra cores (Xray + mihomo) or the sing-box-only config overlay -----
+# --- 2b. Extra cores (Xray + mihomo, default) or the sing-box-only config overlay -----
 $TauriConfigArgs = @()
-if ($AllCores) {
-  Write-Host "AllCores: bundling Xray + mihomo alongside sing-box..."
+if (-not $SingboxOnly) {
+  Write-Host "Bundling Xray + mihomo alongside sing-box (pass -SingboxOnly to drop them)."
   $XrayExe = Join-Path $ROOT "src-tauri\resources\bin\windows-amd64\xray.exe"
   if (-not (Test-Path $XrayExe)) {
     Write-Host "xray core missing, fetching..."
@@ -73,7 +73,7 @@ if ($AllCores) {
 } else {
   # The base config lists the Xray/mihomo resources too — a missing file
   # fails the bundler, so switch to the sing-box-only overlay instead.
-  Write-Host "Bundling sing-box only (pass -AllCores to include Xray + mihomo)."
+  Write-Host "SingboxOnly: bundling sing-box only."
   $TauriConfigArgs = @("--config", (Join-Path $ROOT "src-tauri\tauri.singbox-windows.conf.json"))
 }
 
@@ -136,13 +136,13 @@ if ($Bundle -eq "portable") {
 
   # Resources: copy exactly what the active config overlay maps, so the
   # portable zip stays in lockstep with the installer contents.
-  $ConfName = if ($AllCores) { "tauri.windows.conf.json" } else { "tauri.singbox-windows.conf.json" }
+  $ConfName = if ($SingboxOnly) { "tauri.singbox-windows.conf.json" } else { "tauri.windows.conf.json" }
   $Conf = Get-Content (Join-Path $ROOT "src-tauri\$ConfName") -Raw | ConvertFrom-Json
   foreach ($Entry in @($Conf.bundle.resources)) {
     # Entries look like "resources/bin/windows-amd64/sing-box.exe" or "resources/rule-sets".
     $Src = Join-Path $ROOT "src-tauri\$Entry"
     if (-not (Test-Path $Src)) {
-      Write-Error "Resource listed in $ConfName is missing: $Entry`nRun the fetch-bundled-* scripts (or drop -AllCores) and retry."
+      Write-Error "Resource listed in $ConfName is missing: $Entry`nRun the fetch-bundled-* scripts (or pass -SingboxOnly) and retry."
       exit 1
     }
     $Dest = Join-Path $Stage $Entry
@@ -188,7 +188,8 @@ portable and installed editions cannot run at the same time.
 
   $OutDir = Join-Path $ROOT "src-tauri\target\release\bundle\portable"
   New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-  $Artifact = Join-Path $OutDir "Satelite_${Version}_x64_portable.zip"
+  $NameTag = if ($SingboxOnly) { "Satelite" } else { "Satelite-fullcores" }
+  $Artifact = Join-Path $OutDir "${NameTag}_${Version}_x64_portable.zip"
   if (Test-Path $Artifact) { Remove-Item -Force $Artifact }
   Compress-Archive -Path $Stage -DestinationPath $Artifact -CompressionLevel Optimal
 } else {

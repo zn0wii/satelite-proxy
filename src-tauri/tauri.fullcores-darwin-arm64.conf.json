@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Satelite-fullcores",
+  "bundle": {
+    "resources": [
+      "resources/bin/darwin-arm64/sing-box",
+      "resources/bin/darwin-arm64/version.txt",
+      "resources/bin/darwin-arm64/xray",
+      "resources/bin/darwin-arm64/xray-version.txt",
+      "resources/bin/darwin-arm64/geosite.dat",
+      "resources/bin/darwin-arm64/geoip.dat",
+      "resources/bin/darwin-arm64/mihomo",
+      "resources/bin/darwin-arm64/mihomo-version.txt",
+      "resources/bin/darwin-arm64/mihomo-geodata/Country.mmdb",
+      "resources/bin/darwin-arm64/mihomo-geodata/geosite.dat",
+      "resources/rule-sets",
+      "resources/dns"
+    ]
+  }
+}

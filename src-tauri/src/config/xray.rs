@@ -23,7 +23,7 @@ use crate::config::punycode::to_ascii_domain;
 use crate::core::kind::CoreKind;
 use crate::domain::{
     DnsAction, DnsRule, DomainMatcher, OutboundMode, ProtocolConfig, ProxyNode, RuleSet,
-    RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
+    RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL,
 };
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Map, Value};
@@ -822,32 +822,39 @@ fn build_dns(
 
     let dns_final = opts.dns.normalize_dns_final();
 
-    // Unified pools (domain::REMOTE/DOMESTIC_DNS_POOL) — the same addresses
-    // sing-box and mihomo resolve from. Remote is DoH over TCP: UDP-less
-    // nodes (socks5 without UDP ASSOCIATE — ssh -D tunnels, cheap relays)
-    // can't carry plaintext-UDP DNS through the proxy, and a dead remote
-    // resolver makes Xray hand unresolved domains to the exit server (read
-    // as a DNS leak by test sites). DoH rides the proxy over TCP, encrypted
-    // end to end; the IP-literal host avoids a bootstrap lookup.
+    // Unified remote pool (user-configurable, see `DnsSettings::remote_dns`;
+    // empty = built-in domain::REMOTE_DNS_POOL) — the same addresses sing-box
+    // and mihomo resolve from. Remote is DoH over TCP: UDP-less nodes (socks5
+    // without UDP ASSOCIATE — ssh -D tunnels, cheap relays) can't carry
+    // plaintext-UDP DNS through the proxy, and a dead remote resolver makes
+    // Xray hand unresolved domains to the exit server (read as a DNS leak by
+    // test sites). DoH rides the proxy over TCP, encrypted end to end;
+    // IP-literal hosts avoid a bootstrap lookup.
     //
     // dns_final is the ONLY fallback: the primary server (index 0) is the
-    // dns_final pool, the second remote entry is in-pool redundancy
-    // (ordered fallback), and every other pool carries skipFallback so it
-    // answers only its own classified domains — never a silent cross-pool
-    // fallback, matching what the DNS-page default resolver promises.
+    // dns_final pool, the second remote entry (when the pool has one) is
+    // in-pool redundancy (ordered fallback), and every other pool carries
+    // skipFallback so it answers only its own classified domains — never a
+    // silent cross-pool fallback, matching what the DNS-page default
+    // resolver promises.
     //
     // Remote servers stay untagged so their queries carry dns.tag and
     // egress through the main outbound; the domestic server is tagged so
     // its queries egress direct.
+    let remote_pool = opts.dns.effective_remote_pool();
     let mut remote = Map::new();
-    remote.insert("address".into(), json!(REMOTE_DNS_POOL[0]));
+    remote.insert("address".into(), json!(remote_pool[0]));
     if !remote_domains.is_empty() {
         remote.insert("domains".into(), json!(remote_domains));
     }
     // Second remote entry: no domains list — pure in-pool fallback for the
-    // primary remote server. Also untagged → also egresses via proxy.
-    let mut remote_backup = Map::new();
-    remote_backup.insert("address".into(), json!(REMOTE_DNS_POOL[1]));
+    // primary remote server. Also untagged → also egresses via proxy. A
+    // single-entry custom pool simply has no backup.
+    let remote_backup = remote_pool.get(1).map(|addr| {
+        let mut backup = Map::new();
+        backup.insert("address".into(), json!(addr));
+        backup
+    });
     // Domestic resolver (tagged → queries route direct).
     let mut domestic = Map::new();
     domestic.insert("address".into(), json!(DOMESTIC_DNS_POOL[0]));
@@ -896,11 +903,13 @@ fn build_dns(
                 servers.push(Value::Object(domestic));
             }
         }
-        // remote (default): primary + in-pool redundancy, then the other
-        // pools as classification-only entries.
+        // remote (default): primary + in-pool redundancy (when the pool has
+        // a second entry), then the other pools as classification-only.
         _ => {
             servers.push(Value::Object(remote));
-            servers.push(Value::Object(remote_backup));
+            if let Some(backup) = remote_backup {
+                servers.push(Value::Object(backup));
+            }
             if !local_domains.is_empty() {
                 servers.push(Value::Object(local));
             }
@@ -1305,8 +1314,8 @@ fn stream_settings(node: &ProxyNode) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::domain::{
-        DnsSettings, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleType, TlsConfig,
-        Transport,
+        DnsSettings, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleType,
+        REMOTE_DNS_POOL, TlsConfig, Transport,
     };
 
     fn vless_node(name: &str, flow: Option<&str>) -> ProxyNode {
@@ -1812,6 +1821,36 @@ mod tests {
             .expect("remote classification entry");
         assert_eq!(remote["skipFallback"], true);
         assert_eq!(remote["domains"], json!(["domain:foreign.example"]));
+    }
+
+    /// A user-configured remote pool replaces the built-in addresses; a
+    /// single-entry pool simply emits no backup server.
+    #[test]
+    fn custom_remote_dns_pool_overrides_builtin() {
+        let nodes = vec![vless_node("n", None)];
+        let mut opts = default_opts();
+        opts.dns.remote_dns = vec!["https://9.9.9.9/dns-query".into()];
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["address"], json!("https://9.9.9.9/dns-query"));
+        assert!(
+            servers
+                .iter()
+                .all(|s| s["address"] != json!(REMOTE_DNS_POOL[0])
+                    && s["address"] != json!(REMOTE_DNS_POOL[1])),
+            "built-in pool addresses must be fully replaced"
+        );
+
+        // Two-entry custom pool keeps the primary + backup form.
+        opts.dns.remote_dns = vec![
+            "https://9.9.9.9/dns-query".into(),
+            "https://94.140.14.14/dns-query".into(),
+        ];
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["address"], json!("https://9.9.9.9/dns-query"));
+        assert_eq!(servers[1]["address"], json!("https://94.140.14.14/dns-query"));
+        assert!(servers[1].get("skipFallback").is_none());
     }
 
     /// Local-classified domains get the system resolver under any dns_final

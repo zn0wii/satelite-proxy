@@ -5006,6 +5006,27 @@ tr.dns-diag-tr:hover {
   padding-top: 0.25rem;
 }
 
+/* —— 远程加密 DNS 池（⋯ 弹窗编辑） —— */
+.dns-remote-pool-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dns-remote-hint {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.dns-remote-error {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #f87171;
+  word-break: break-all;
+}
+
 .field-hint {
   font-size: 0.75rem;
   display: block;

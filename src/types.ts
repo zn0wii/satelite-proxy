@@ -69,6 +69,8 @@ export interface DnsSettings {
   cache: boolean;
   /** Default resolver for domains unmatched by a rule set. */
   dns_final: DnsFinalStrategy;
+  /** User-configured remote DoH pool (proxy-egressed). Empty = built-in. */
+  remote_dns: string[];
 }
 
 /** Derived DNS query-path strategy for one domain (config replay). */

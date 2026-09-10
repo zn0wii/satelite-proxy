@@ -108,6 +108,10 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
   const [fiPoolText, setFiPoolText] = useState("");
   const [fiIpv6, setFiIpv6] = useState(false);
   const [fiBypassText, setFiBypassText] = useState("");
+  // Remote DNS pool modal draft state — mirrors the backend's cap.
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remoteText, setRemoteText] = useState("");
+  const [remoteError, setRemoteError] = useState<string | null>(null);
   // Diagnostics: persisted custom domains + per-run report state.
   const [diagCustom, setDiagCustom] = useState<string[]>(loadCustomDiagDomains);
   const [diagInput, setDiagInput] = useState("");
@@ -156,6 +160,37 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
     setFiIpv6(dns.fake_ip.inet6_enabled);
     setFiBypassText((dns.fake_ip.bypass || []).join("\n"));
     setFakeipOpen(true);
+  }
+
+  function openRemoteModal() {
+    if (!dns) return;
+    setRemoteText((dns.remote_dns || []).join("\n"));
+    setRemoteError(null);
+    setRemoteOpen(true);
+  }
+
+  async function saveRemoteModal() {
+    if (!dns) return;
+    // Same rules the backend enforces: trim, drop empties, cap at 8,
+    // https:// (DoH) only — validate here so the modal can show the bad
+    // line inline instead of failing the whole settings save.
+    const entries: string[] = [];
+    for (const line of remoteText.split(/[\n,]/)) {
+      const entry = line.trim();
+      if (!entry) continue;
+      if (!entry.startsWith("https://")) {
+        setRemoteError(t("dns.remoteDnsInvalid", { v: entry }));
+        return;
+      }
+      if (!entries.includes(entry)) entries.push(entry);
+    }
+    if (entries.length > 8) {
+      setRemoteError(t("dns.remoteDnsMax"));
+      return;
+    }
+    setRemoteError(null);
+    const ok = await save({ ...dns, remote_dns: entries });
+    if (ok) setRemoteOpen(false);
   }
 
   async function saveFakeipModal() {
@@ -330,6 +365,30 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
               />
             </SettingRow>
 
+            <SettingRow
+              title={t("dns.remoteDns")}
+              desc={t("dns.remoteDnsDesc")}
+            >
+              <div className="dns-fakeip-controls">
+                <span className="dns-remote-pool-label">
+                  {(dns.remote_dns || []).length > 0
+                    ? t("dns.remoteDnsCustom", {
+                        n: (dns.remote_dns || []).length,
+                      })
+                    : t("dns.remoteDnsBuiltin")}
+                </span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={t("dns.remoteDnsOptions")}
+                  disabled={busy}
+                  onClick={openRemoteModal}
+                >
+                  ⋯
+                </button>
+              </div>
+            </SettingRow>
+
             <SettingRow title={t("dns.cache")} desc={t("dns.cacheDesc")}>
               <GlassSwitchControl
                 checked={dns.cache}
@@ -396,7 +455,6 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                 </GlassButton>
               </div>
               <GlassButton
-                variant="primary"
                 icon="⌕"
                 disabled={diagBusy || diagAll.length === 0}
                 onClick={() => void onDiagnose()}
@@ -619,6 +677,58 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                     variant="primary"
                     disabled={busy}
                     onClick={() => void saveFakeipModal()}
+                  >
+                    {t("common.save")}
+                  </GlassButton>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {remoteOpen && (
+          <div className="modal-backdrop" onClick={() => setRemoteOpen(false)}>
+            <div
+              className="modal dns-fakeip-modal"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <header className="modal-header">
+                <h2>{t("dns.remoteDnsOptions")}</h2>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setRemoteOpen(false)}
+                >
+                  ×
+                </button>
+              </header>
+              <div className="modal-body">
+                <label className="field dns-field">
+                  <span>{t("dns.remoteDns")}</span>
+                  <textarea
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    rows={4}
+                    value={remoteText}
+                    onChange={(e) => {
+                      setRemoteText(e.target.value);
+                      setRemoteError(null);
+                    }}
+                    placeholder={"https://9.9.9.9/dns-query\nhttps://94.140.14.14/dns-query"}
+                  />
+                </label>
+                <p className="dns-remote-hint">{t("dns.remoteDnsHint")}</p>
+                {remoteError && (
+                  <p className="dns-remote-error">{remoteError}</p>
+                )}
+                <div className="dns-fakeip-modal-actions">
+                  <GlassButton disabled={busy} onClick={() => setRemoteOpen(false)}>
+                    {t("common.cancel")}
+                  </GlassButton>
+                  <GlassButton
+                    variant="primary"
+                    disabled={busy}
+                    onClick={() => void saveRemoteModal()}
                   >
                     {t("common.save")}
                   </GlassButton>

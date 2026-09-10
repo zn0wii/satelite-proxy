@@ -356,21 +356,35 @@ fn parse_ss_uri(line: &str) -> Result<ProxyNode, String> {
     let (body, name_from_frag) = split_fragment(rest);
     let body = body.split('?').next().unwrap_or(body);
 
-    let decoded = if body.contains('@') {
-        body.to_string()
-    } else {
-        let bytes = decode_base64_flexible(body)?;
-        String::from_utf8(bytes).map_err(|e| e.to_string())?
-    };
-
     // method:password@host:port
-    let (userinfo, hostport) = decoded
-        .rsplit_once('@')
-        .ok_or_else(|| "ss: missing @".to_string())?;
-    let (method, password) = userinfo
-        .split_once(':')
-        .ok_or_else(|| "ss: missing method:password".to_string())?;
-    let (server, port) = split_host_port(hostport)?;
+    let (method, password, server, port) = if let Some((userinfo, hostport)) =
+        body.rsplit_once('@')
+    {
+        // SIP002: ss://base64(method:password)@host:port, or legacy plaintext userinfo.
+        let userinfo_plain = if userinfo.contains(':') {
+            userinfo.to_string()
+        } else {
+            let bytes = decode_base64_flexible(userinfo)?;
+            String::from_utf8(bytes).map_err(|e| e.to_string())?
+        };
+        let (method, password) = userinfo_plain
+            .split_once(':')
+            .ok_or_else(|| "ss: missing method:password".to_string())?;
+        let (server, port) = split_host_port(hostport)?;
+        (method.to_string(), password.to_string(), server, port)
+    } else {
+        // Legacy: ss://base64(method:password@host:port)
+        let bytes = decode_base64_flexible(body)?;
+        let decoded = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+        let (userinfo, hostport) = decoded
+            .rsplit_once('@')
+            .ok_or_else(|| "ss: missing @".to_string())?;
+        let (method, password) = userinfo
+            .split_once(':')
+            .ok_or_else(|| "ss: missing method:password".to_string())?;
+        let (server, port) = split_host_port(hostport)?;
+        (method.to_string(), password.to_string(), server, port)
+    };
 
     let name = name_from_frag.unwrap_or_else(|| format!("ss-{server}-{port}"));
 
@@ -384,8 +398,8 @@ fn parse_ss_uri(line: &str) -> Result<ProxyNode, String> {
         transport: None,
         udp: Some(true),
         config: ProtocolConfig::Shadowsocks {
-            method: percent_decode(method),
-            password: percent_decode(password),
+            method: percent_decode(&method),
+            password: percent_decode(&password),
             plugin: None,
             plugin_opts: None,
             shadow_tls: None,
@@ -715,7 +729,10 @@ fn parse_trojan_uri(line: &str) -> Result<ProxyNode, String> {
             })
         }
         "grpc" => Some(Transport::Grpc {
-            service_name: query.get("serviceName").cloned(),
+            service_name: query
+                .get("serviceName")
+                .cloned()
+                .or_else(|| query.get("service_name").cloned()),
         }),
         "http" | "h2" => Some(Transport::Http {
             path: query.get("path").cloned(),
@@ -914,11 +931,23 @@ fn parse_hysteria2_uri(line: &str) -> Result<ProxyNode, String> {
         enabled: true,
         server_name: query.get("sni").cloned(),
         insecure: query.get("insecure").map(|v| v == "1" || v == "true"),
-        alpn: None,
+        alpn: query.get("alpn").map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        }),
         utls_fingerprint: None,
         reality_public_key: None,
         reality_short_id: None,
     });
+
+    let num = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| query.get(*k))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+    };
 
     Ok(ProxyNode {
         id: String::new(),
@@ -931,10 +960,13 @@ fn parse_hysteria2_uri(line: &str) -> Result<ProxyNode, String> {
         udp: Some(true),
         config: ProtocolConfig::Hysteria2 {
             password,
-            up_mbps: None,
-            down_mbps: None,
+            up_mbps: num(&["up", "upmbps", "up_mbps"]),
+            down_mbps: num(&["down", "downmbps", "down_mbps"]),
             obfs: query.get("obfs").cloned(),
-            obfs_password: query.get("obfs-password").cloned(),
+            obfs_password: query
+                .get("obfs-password")
+                .or_else(|| query.get("obfs_password"))
+                .cloned(),
         },
         source: Some("hysteria2".into()),
         latency_ms: None,
@@ -1130,6 +1162,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_ss_sip002() {
+        // SIP002: ss://base64(method:password)@host:port#name — the format
+        // produced by Shadowrocket/v2rayN/Clash share links.
+        let userinfo = general_purpose::STANDARD.encode("aes-256-gcm:p@ssw0rd");
+        let node = parse_uri_line(&format!("ss://{userinfo}@example.com:8388#SIP002")).unwrap();
+        assert_eq!(node.protocol, Protocol::Shadowsocks);
+        assert_eq!(node.server, "example.com");
+        assert_eq!(node.port, 8388);
+        assert_eq!(node.name, "SIP002");
+        match node.config {
+            ProtocolConfig::Shadowsocks {
+                method, password, ..
+            } => {
+                assert_eq!(method, "aes-256-gcm");
+                assert_eq!(password, "p@ssw0rd");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn parse_vmess_json() {
         let json = r#"{"v":"2","ps":"VM-1","add":"vm.example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","aid":"0","net":"ws","type":"none","host":"cdn.example.com","path":"/ray","tls":"tls","sni":"cdn.example.com"}"#;
         let b64 = general_purpose::STANDARD.encode(json);
@@ -1163,6 +1216,21 @@ mod tests {
         let node = parse_uri_line(uri).unwrap();
         assert_eq!(node.protocol, Protocol::Trojan);
         assert_eq!(node.name, "TJ");
+    }
+
+    #[test]
+    fn parse_trojan_grpc_service_name_snake_case() {
+        // Some generators emit service_name instead of serviceName; both
+        // must resolve to a non-empty grpc service name.
+        let uri =
+            "trojan://secret@tj.example.com:443?type=grpc&service_name=my-service&sni=tj.example.com#TJ-GRPC";
+        let node = parse_uri_line(uri).unwrap();
+        match node.transport {
+            Some(Transport::Grpc { service_name }) => {
+                assert_eq!(service_name.as_deref(), Some("my-service"));
+            }
+            other => panic!("expected grpc transport, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1202,6 +1270,27 @@ mod tests {
         let node = parse_uri_line(uri).unwrap();
         assert_eq!(node.protocol, Protocol::Hysteria2);
         assert_eq!(node.name, "HY2");
+    }
+
+    #[test]
+    fn parse_hy2_bandwidth_and_alpn() {
+        // up/down/alpn used to be silently dropped even though they were
+        // present in the query string and the domain types support them.
+        let uri = "hysteria2://pass@hy2.example.com:443?up=100&down=500&alpn=h3&sni=hy2.example.com#HY2-BW";
+        let node = parse_uri_line(uri).unwrap();
+        assert_eq!(
+            node.tls.as_ref().and_then(|t| t.alpn.clone()),
+            Some(vec!["h3".to_string()])
+        );
+        match node.config {
+            ProtocolConfig::Hysteria2 {
+                up_mbps, down_mbps, ..
+            } => {
+                assert_eq!(up_mbps, Some(100));
+                assert_eq!(down_mbps, Some(500));
+            }
+            _ => panic!("expected Hysteria2 config"),
+        }
     }
 
     #[test]

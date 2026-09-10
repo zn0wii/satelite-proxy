@@ -200,7 +200,11 @@ function TrafficBlock({ traffic }: { traffic?: SubscriptionTraffic | null }) {
             {fmtBytes(tr.used)} / {fmtBytes(tr.total)}
           </span>
           {expireLabel && <span className="dot-sep">·</span>}
-          {expireLabel && <span>{expireLabel}</span>}
+          {expireLabel && (
+            <span className="traffic-expire" title={expireLabel}>
+              {expireLabel}
+            </span>
+          )}
         </div>
       </div>
     );
@@ -217,23 +221,17 @@ function TrafficBlock({ traffic }: { traffic?: SubscriptionTraffic | null }) {
           {tr.remaining != null && expireLabel && (
             <span className="dot-sep">·</span>
           )}
-          {expireLabel && <span>{expireLabel}</span>}
+          {expireLabel && (
+            <span className="traffic-expire" title={expireLabel}>
+              {expireLabel}
+            </span>
+          )}
         </div>
       </div>
     );
   }
 
   return null;
-}
-
-function kindLabel(
-  kind: string,
-  t: (key: import("../i18n").MessageKey) => string,
-) {
-  if (kind === "url") return t("config.url");
-  if (kind === "node") return t("config.manual");
-  if (kind === "singbox") return t("config.singbox");
-  return t("config.parse");
 }
 
 function ConfigGroup({
@@ -419,6 +417,7 @@ export function ConfigPage() {
         viaProxy: d.via_proxy,
         autoUpdate: !!d.auto_update,
         autoUpdateIntervalMin: d.auto_update_interval_min ?? 1440,
+        userAgent: d.user_agent ?? "",
       });
       setModalOpen(true);
     } catch (e) {
@@ -448,6 +447,7 @@ export function ConfigPage() {
           viaProxy: payload.viaProxy ?? false,
           autoUpdate,
           autoUpdateIntervalMin,
+          userAgent: payload.userAgent ?? null,
         });
       } else if (payload.kind === "url") {
         await addSubscriptionUrl(
@@ -456,6 +456,7 @@ export function ConfigPage() {
           !!payload.viaProxy,
           autoUpdate,
           autoUpdateIntervalMin,
+          payload.userAgent ?? null,
         );
       } else if (payload.kind === "file") {
         await addSubscriptionFile(
@@ -606,6 +607,12 @@ export function ConfigPage() {
             ) : null}
             <h3 title={item.name}>{item.name}</h3>
             <div className="sub-card-top-right">
+              <span
+                className="sub-card-updated muted"
+                title={formatTime(item.last_update)}
+              >
+                {formatRelative(item.last_update, t)}
+              </span>
               <div
                 className="sub-menu"
                 data-sub-menu
@@ -699,29 +706,8 @@ export function ConfigPage() {
                 {t("config.skipped", { n: item.skipped_count })}
               </span>
             )}
-            {item.auto_update && (
-              <span
-                className="muted"
-                title={t("config.autoUpdateHint", {
-                  n: item.auto_update_interval_min ?? 1440,
-                })}
-              >
-                {t("config.autoUpdateBadge", {
-                  n: item.auto_update_interval_min ?? 1440,
-                })}
-              </span>
-            )}
-            <span className="muted" title={item.source_display}>
-              {kindLabel(item.source_kind, t)}
-            </span>
           </div>
           <TrafficBlock traffic={item.traffic} />
-          <div
-            className="sub-card-foot muted"
-            title={formatTime(item.last_update)}
-          >
-            {formatRelative(item.last_update, t)}
-          </div>
         </div>
       </article>
     );
@@ -754,7 +740,6 @@ export function ConfigPage() {
             {refreshingAll ? t("config.refreshing") : t("config.refreshAll")}
           </GlassButton>
           <GlassButton
-            variant="primary"
             icon="+"
             disabled={busy}
             onClick={openAdd}

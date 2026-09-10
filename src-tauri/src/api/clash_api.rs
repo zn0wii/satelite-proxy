@@ -262,15 +262,31 @@ impl ClashApi {
     /// WebSocket URL for streaming connection snapshots (`interval` in ms).
     /// sing-box Clash API defaults to 1000ms; lower values catch more short-lived conns.
     pub fn connections_ws_url(&self, interval_ms: u64) -> String {
-        let base = self
-            .base
-            .replacen("https://", "wss://", 1)
-            .replacen("http://", "ws://", 1);
+        let base = self.ws_base();
         // token= works for WS without custom headers (also send Authorization).
         format!(
             "{base}/connections?interval={interval_ms}&token={}",
             urlencoding::encode(&self.secret)
         )
+    }
+
+    /// WebSocket URL for the kernel log stream (`/logs`, sing-box & mihomo
+    /// alike). `level` filters server-side — subscribe at `warning` so the
+    /// stream stays silent while everything is healthy (info-level match
+    /// lines would be very chatty, especially under TUN).
+    pub fn logs_ws_url(&self, level: &str) -> String {
+        let base = self.ws_base();
+        format!(
+            "{base}/logs?level={}&token={}",
+            urlencoding::encode(level),
+            urlencoding::encode(&self.secret)
+        )
+    }
+
+    fn ws_base(&self) -> String {
+        self.base
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1)
     }
 }
 
@@ -571,9 +587,12 @@ pub struct RequestRecord {
 }
 
 impl RequestRecord {
-    pub fn from_connection(c: &ConnectionInfo, now_ms: i64) -> Self {
+    /// `id` is the caller's precomputed history key (`connection_history_key`)
+    /// — the journal ingests thousands of these per frame and must not build
+    /// the key twice.
+    pub fn from_connection(c: &ConnectionInfo, id: String, now_ms: i64) -> Self {
         Self {
-            id: c.id.clone(),
+            id,
             history_seq: 0,
             destination: c.destination.clone(),
             host: c.host.clone(),

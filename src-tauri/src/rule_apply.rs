@@ -23,6 +23,9 @@ pub(crate) struct RuleApplyQueue {
     pending: HashMap<String, bool>,
     cleanup_after_apply: Vec<PathBuf>,
     restart_requested: bool,
+    /// Watchdog-set: the queued restart may revive a core that died
+    /// unexpectedly, not just reload a running one. Sticky until consumed.
+    force_restart: bool,
     generic_change: bool,
     revision: u64,
     worker_running: bool,
@@ -33,6 +36,7 @@ struct ApplyBatch {
     toggles: HashMap<String, bool>,
     cleanup_after_apply: Vec<PathBuf>,
     generic_change: bool,
+    force_restart: bool,
 }
 
 impl RuleApplyQueue {
@@ -54,9 +58,11 @@ impl RuleApplyQueue {
 
     /// Queue a restart for a non-toggle rule change, such as a downloaded
     /// remote rule file. Returns true only when a worker must be started.
-    fn enqueue_restart(&mut self, cleanup_after_apply: Vec<PathBuf>) -> bool {
+    /// `force` marks the batch as allowed to revive a dead core (watchdog).
+    fn enqueue_restart(&mut self, cleanup_after_apply: Vec<PathBuf>, force: bool) -> bool {
         self.cleanup_after_apply.extend(cleanup_after_apply);
         self.restart_requested = true;
+        self.force_restart |= force;
         self.generic_change = true;
         self.revision = self.revision.wrapping_add(1);
         if self.worker_running {
@@ -80,6 +86,7 @@ impl RuleApplyQueue {
             toggles: std::mem::take(&mut self.pending),
             cleanup_after_apply: std::mem::take(&mut self.cleanup_after_apply),
             generic_change: std::mem::take(&mut self.generic_change),
+            force_restart: std::mem::take(&mut self.force_restart),
         })
     }
 
@@ -90,6 +97,7 @@ impl RuleApplyQueue {
         }
         self.cleanup_after_apply.extend(batch.cleanup_after_apply);
         self.generic_change |= batch.generic_change;
+        self.force_restart |= batch.force_restart;
         self.restart_requested = true;
         self.revision = self.revision.wrapping_add(1);
     }
@@ -175,12 +183,23 @@ pub fn emit_ready_without_restart(app: &AppHandle, id: &str, enabled: bool) {
 /// Queue a non-toggle rule change for the same globally serialized restart.
 /// This is used after one or more remote rule files have been downloaded.
 pub fn request_restart(app: AppHandle, cleanup_after_apply: Vec<PathBuf>) {
+    request_restart_inner(app, cleanup_after_apply, false);
+}
+
+/// Watchdog variant: same serialized queue, but the batch is allowed to
+/// revive a core that died unexpectedly (regular restarts skip dead cores —
+/// rule edits on a stopped core must not start anything).
+pub fn request_forced_restart(app: AppHandle, cleanup_after_apply: Vec<PathBuf>) {
+    request_restart_inner(app, cleanup_after_apply, true);
+}
+
+fn request_restart_inner(app: AppHandle, cleanup_after_apply: Vec<PathBuf>, force: bool) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let start_worker = state
         .lock_rule_apply_queue()
-        .enqueue_restart(cleanup_after_apply);
+        .enqueue_restart(cleanup_after_apply, force);
     if start_worker {
         spawn_worker(app);
     }
@@ -210,13 +229,18 @@ fn spawn_worker(app: AppHandle) {
         // Rule toggles and generic config edits both rebuild the same running
         // core. Drive the global navbar busy animation only when a restart is
         // actually expected; a stopped core only needs the persisted config.
-        let announce_core_restart = state.is_core_running();
+        // A forced (watchdog) batch may start a dead core — announce that.
+        let announce_core_restart = batch.force_restart || state.is_core_running();
         emit_batch(&app, &batch.toggles, "restarting", None);
         if announce_core_restart {
             emit_config(&app, "restarting", None);
         }
         let resource_dir = app.path().resource_dir().ok();
-        let result = state.restart_if_running(resource_dir.as_deref());
+        let result = if batch.force_restart {
+            state.restart_after_unexpected_exit(resource_dir.as_deref())
+        } else {
+            state.restart_if_running(resource_dir.as_deref())
+        };
 
         match result {
             Ok(_) => {
@@ -355,8 +379,8 @@ mod tests {
     #[test]
     fn remote_updates_and_toggles_share_one_batch() {
         let mut queue = RuleApplyQueue::default();
-        assert!(queue.enqueue_restart(Vec::new()));
-        assert!(!queue.enqueue_restart(Vec::new()));
+        assert!(queue.enqueue_restart(Vec::new(), false));
+        assert!(!queue.enqueue_restart(Vec::new(), false));
         assert!(!queue.enqueue_toggle("a".into(), true));
 
         let batch = queue.take_if_unchanged(queue.revision()).unwrap();
@@ -369,12 +393,12 @@ mod tests {
         let mut queue = RuleApplyQueue::default();
         // Rule edit, DNS save and settings save all request the same generic
         // restart while a toggle and remote cleanup arrive in the same window.
-        assert!(queue.enqueue_restart(Vec::new()));
-        assert!(!queue.enqueue_restart(Vec::new()));
-        assert!(!queue.enqueue_restart(Vec::new()));
+        assert!(queue.enqueue_restart(Vec::new(), false));
+        assert!(!queue.enqueue_restart(Vec::new(), false));
+        assert!(!queue.enqueue_restart(Vec::new(), false));
         assert!(!queue.enqueue_toggle("rule-set".into(), true));
         let old_cache = PathBuf::from("old-remote.json");
-        assert!(!queue.enqueue_restart(vec![old_cache.clone()]));
+        assert!(!queue.enqueue_restart(vec![old_cache.clone()], false));
 
         let batch = queue.take_if_unchanged(queue.revision()).unwrap();
         assert_eq!(batch.toggles.get("rule-set"), Some(&true));
@@ -386,12 +410,12 @@ mod tests {
     #[test]
     fn remote_update_during_restart_forms_one_next_batch() {
         let mut queue = RuleApplyQueue::default();
-        queue.enqueue_restart(Vec::new());
+        queue.enqueue_restart(Vec::new(), false);
         let first = queue.take_if_unchanged(queue.revision()).unwrap();
         assert!(first.toggles.is_empty());
 
-        assert!(!queue.enqueue_restart(Vec::new()));
-        assert!(!queue.enqueue_restart(Vec::new()));
+        assert!(!queue.enqueue_restart(Vec::new(), false));
+        assert!(!queue.enqueue_restart(Vec::new(), false));
         assert!(!queue.finish_if_empty());
         let second = queue.take_if_unchanged(queue.revision()).unwrap();
         assert!(second.toggles.is_empty());
@@ -402,11 +426,32 @@ mod tests {
     fn busy_retry_keeps_remote_cache_cleanup() {
         let mut queue = RuleApplyQueue::default();
         let old = PathBuf::from("old-rule.json");
-        queue.enqueue_restart(vec![old.clone()]);
+        queue.enqueue_restart(vec![old.clone()], false);
         let batch = queue.take_if_unchanged(queue.revision()).unwrap();
         queue.requeue_older_batch(batch);
 
         let retried = queue.take_if_unchanged(queue.revision()).unwrap();
         assert_eq!(retried.cleanup_after_apply, vec![old]);
+    }
+
+    #[test]
+    fn forced_restart_flag_flows_to_the_batch_and_survives_requeue() {
+        let mut queue = RuleApplyQueue::default();
+        // A regular queued restart stays non-forced (must never start a
+        // stopped core just to apply config).
+        assert!(queue.enqueue_restart(Vec::new(), false));
+        let plain = queue.take_if_unchanged(queue.revision()).unwrap();
+        assert!(!plain.force_restart);
+        assert!(queue.finish_if_empty());
+
+        // A watchdog batch carries the force flag...
+        assert!(queue.enqueue_restart(Vec::new(), true));
+        let batch = queue.take_if_unchanged(queue.revision()).unwrap();
+        assert!(batch.force_restart);
+
+        // ...and keeps it when the worker hits a busy core and requeues.
+        queue.requeue_older_batch(batch);
+        let retried = queue.take_if_unchanged(queue.revision()).unwrap();
+        assert!(retried.force_restart);
     }
 }

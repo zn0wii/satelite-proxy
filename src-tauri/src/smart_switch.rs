@@ -807,15 +807,20 @@ async fn tick(state: &AppState) -> Result<(), String> {
         .collect();
     // Weight ranking by each candidate's own recent passive fail rate so a
     // chronically-flaky node doesn't out-rank a merely-slower one just
-    // because its last active probe happened to land low.
+    // because its last active probe happened to land low. One single-pass
+    // scan for every candidate (per-tag scans would be O(nodes × history)
+    // under the runtime lock).
     let fail_rates: HashMap<String, f64> = {
         let rt = state.lock_runtime();
-        candidates
-            .iter()
-            .map(|n| {
-                let tag = outbound_tag(n);
-                let stats = rt.passive_node_stats(&tag, PASSIVE_LOOKBACK_MS);
-                (n.id.clone(), stats.fail_rate())
+        let tags: Vec<String> = candidates.iter().map(outbound_tag).collect();
+        let stats = rt.passive_stats_for_tags(&tags, PASSIVE_LOOKBACK_MS);
+        tags.iter()
+            .zip(candidates.iter())
+            .map(|(tag, n)| {
+                (
+                    n.id.clone(),
+                    stats.get(tag).map(|s| s.fail_rate()).unwrap_or(0.0),
+                )
             })
             .collect()
     };

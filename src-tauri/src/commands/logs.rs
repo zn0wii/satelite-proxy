@@ -29,6 +29,23 @@ pub fn clear_app_logs() -> Result<(), String> {
     Ok(())
 }
 
+/// Frontend crash/error sink: render exceptions (ErrorBoundary catches),
+/// uncaught errors and unhandled rejections land in the app log under the
+/// `webview` target, so a white-screen-class UI failure leaves a diagnosis
+/// trail (Logs page → 应用日志) instead of dying silently.
+#[tauri::command(async)]
+pub fn log_frontend_event(level: Option<String>, message: String) -> Result<(), String> {
+    let level = level
+        .as_deref()
+        .and_then(LogLevel::parse)
+        .unwrap_or(LogLevel::Error);
+    // Frontend strings can be huge (stack traces, component trees) — clamp
+    // so one bad crash can't bloat the log file or the in-memory ring.
+    let message = message.chars().take(4000).collect::<String>();
+    app_log::push(level, "webview", message);
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct CoreLogTail {
     /// Absolute path of the log file (current or last core session).

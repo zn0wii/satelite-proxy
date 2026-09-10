@@ -4,7 +4,9 @@ import {
   getSettings,
   listAllNodes,
   listSubscriptions,
+  onProxySnapshot,
   peekProxyStatus,
+  refreshProxyStatus,
   startProxy,
   stopProxy,
   testNodesLatency,
@@ -134,6 +136,13 @@ export function SimpleConnectPage({ onGoServers, onGoTraffic }: Props) {
     return reloadStatus();
   }, 1000);
 
+  // Watchdog push (`core-status-changed` → refreshProxyStatus): resync the
+  // moment the backend observes a lifecycle edge instead of waiting for the
+  // next poll tick.
+  useEffect(() => {
+    return onProxySnapshot((s) => setProxy(s));
+  }, []);
+
   const onCaptureError = useCallback((msg: string) => {
     setError(msg);
   }, []);
@@ -187,6 +196,9 @@ export function SimpleConnectPage({ onGoServers, onGoTraffic }: Props) {
       }
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
+      // A failed start/stop leaves the backend in Error; resync immediately
+      // so the orbit state cannot linger on a stale RUNNING/starting view.
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }

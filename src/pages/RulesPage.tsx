@@ -1620,7 +1620,6 @@ export function RulesPage({ embedded = false }: Props) {
                   }}
                 />
                 <GlassButton
-                  variant="primary"
                   icon="+"
                   onClick={openCreate}
                   disabled={!viewSetId || !!viewSet?.remote}

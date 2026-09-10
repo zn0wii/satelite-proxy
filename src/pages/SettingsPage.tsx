@@ -8,6 +8,7 @@ import {
   checkCoreUpdate,
   diagnoseNetwork,
   downloadCore,
+  resetCoreToBundled,
   getAppInstallPath,
   getCoreInfo,
   getProxyStatus,
@@ -26,6 +27,12 @@ import { ErrorModal } from "../components/ErrorModal";
 import { TrayIconPicker } from "../components/TrayIconPicker";
 import { DecryptReveal } from "../components/DecryptReveal";
 import { CoreMark } from "../components/CoreMark";
+import {
+  beginCoreDownload,
+  clearCoreDownload,
+  setCoreDownloadError,
+  useCoreDownloadState,
+} from "../coreDownload";
 import buymecoffeeUrl from "../assets/buymecoffee.png";
 import { useI18n, type Locale, type MessageKey } from "../i18n";
 import { ACCENTS, applyGlowToDom, isCustomHexAccent, resolveAccent } from "../theme/accents";
@@ -86,11 +93,6 @@ const ACCENT_LABEL_KEY: Record<string, MessageKey> = {
  *  the stored custom hex (inline style) once a custom accent is active. */
 const CUSTOM_DOT_RAINBOW =
   "conic-gradient(from 90deg, #f66, #fc6, #6c6, #6cd, #66c, #c6c, #f66)";
-
-function fmtCoreBytes(value: number) {
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 export function SettingsPage() {
   const { t, locale, setLocale } = useI18n();
@@ -185,13 +187,18 @@ export function SettingsPage() {
     xray: null,
     mihomo: null,
   });
-  const [coreBusyKind, setCoreBusyKind] = useState<CoreKind | null>(null);
   const [coreCheckingKind, setCoreCheckingKind] = useState<CoreKind | null>(null);
-  const [coreError, setCoreError] = useState<string | null>(null);
   const [coreProxyAvailable, setCoreProxyAvailable] = useState(false);
   const [sidecarRunning, setSidecarRunning] = useState(false);
-  const [coreProgress, setCoreProgress] =
-    useState<CoreDownloadProgress | null>(null);
+  // coreError is shared by every core-related flow on this page (update
+  // check, reload, download, restore) and feeds the single ErrorModal below.
+  const [coreError, setCoreError] = useState<string | null>(null);
+  // Download/restore busy-kind additionally mirrors into the global
+  // coreDownload store so the floating toast (App.tsx) can show progress —
+  // this page itself only needs the busy flag now, the progress bar lives
+  // solely in the toast.
+  const coreDownloadState = useCoreDownloadState();
+  const coreBusyKind = coreDownloadState?.kind ?? null;
 
   // App's own version card: local version is instant (getVersion), the
   // latest GitHub tag needs a network check that routes via the proxy
@@ -393,11 +400,13 @@ export function SettingsPage() {
 
   useEffect(() => {
     // Settings tabs remount pages often; if this unmounts before listen()
-    // resolves, dispose immediately so the listener doesn't leak.
+    // resolves, dispose immediately so the listener doesn't leak. Progress
+    // itself is tracked globally (coreDownload.ts) so it survives this page
+    // unmounting mid-download — this listener only needs the running-status
+    // flag for the "core running" badge.
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<CoreDownloadProgress>("core-download-progress", (event) => {
-      setCoreProgress(event.payload);
       setCoreProxyAvailable(event.payload.via_proxy);
     }).then((dispose) => {
       if (disposed) dispose();
@@ -637,33 +646,67 @@ export function SettingsPage() {
     }
   }
 
-  async function onDownloadCore(kind: CoreKind) {
-    setCoreBusyKind(kind);
+  /** Downloads a core (latest, or an exact tag for factory restore).
+   *  Returns whether the install succeeded — callers may follow up with a
+   *  restart when the new binary must take effect immediately. */
+  async function onDownloadCore(kind: CoreKind, tag?: string | null): Promise<boolean> {
     setCoreError(null);
     const status = await getProxyStatus().catch(() => null);
     const viaProxy = !!status?.running;
     setCoreProxyAvailable(viaProxy);
-    setCoreProgress({
-      kind,
-      stage: "preparing",
-      downloaded: 0,
-      total: null,
-      percent: null,
-      via_proxy: viaProxy,
-    });
+    beginCoreDownload(kind, viaProxy);
     try {
-      await downloadCore(kind, null);
+      await downloadCore(kind, tag ?? null);
       await reloadCore();
+      clearCoreDownload();
+      return true;
     } catch (e) {
-      setCoreError(typeof e === "string" ? e : String(e));
-    } finally {
-      setCoreBusyKind(null);
-      setCoreProgress(null);
+      const message = typeof e === "string" ? e : String(e);
+      setCoreError(message);
+      setCoreDownloadError(kind, message);
+      return false;
     }
   }
 
   async function onCheckCoreUpdate(kind: CoreKind) {
     await runCoreUpdateCheck(kind, cores[kind]?.version ?? null, true);
+  }
+
+  /** Core card "factory reset": with a bundled copy, drop the user-downloaded
+   *  binary so the bundled one takes over (backend restarts a running core of
+   *  the same kind). Without one (default installs bundle only sing-box),
+   *  restore = re-downloading the pinned factory version through the normal
+   *  download pipeline, progress bar included. */
+  async function onRestoreCore(kind: CoreKind) {
+    const info = cores[kind];
+    if (info?.bundled_version) {
+      if (!confirm(t("settings.coreRestoreConfirm", { v: info.bundled_version }))) return;
+      setCoreError(null);
+      beginCoreDownload(kind);
+      try {
+        await resetCoreToBundled(kind);
+        await reloadCore();
+        clearCoreDownload();
+      } catch (e) {
+        const message = typeof e === "string" ? e : String(e);
+        setCoreError(message);
+        setCoreDownloadError(kind, message);
+      }
+      return;
+    }
+    const factory = info?.factory_version;
+    if (!factory) return;
+    if (!confirm(t("settings.coreRestoreDlConfirm", { v: factory }))) return;
+    const ok = await onDownloadCore(kind, factory);
+    // Mirror the bundled path: when this kind is the running active core,
+    // restart so the factory binary takes effect immediately (a plain
+    // "update core" download deliberately leaves that to the user).
+    if (ok && (settings?.core_type ?? "singbox") === kind) {
+      const status = await getProxyStatus().catch(() => null);
+      if (status?.running) {
+        await restartProxy();
+      }
+    }
   }
 
   /** Switch the active core; a running core restarts onto the new binary. */
@@ -683,13 +726,15 @@ export function SettingsPage() {
   function renderCoreRow(kind: CoreKind) {
     const info = cores[kind];
     const busy = coreBusyKind === kind;
+    // Downloads/restores are globally exclusive (single in-flight backend
+    // task, single global store) — disable every core row's actions while
+    // ANY kind is busy, not just this row's own.
+    const anyBusy = coreBusyKind != null;
     const checking = coreCheckingKind === kind;
     const active = (settings?.core_type ?? "singbox") === kind;
-    // Progress events carry the core kind; each row shows only its own.
-    const progress =
-      coreProgress && (coreProgress.kind ?? "singbox") === kind
-        ? coreProgress
-        : null;
+    // Factory-reset target: the bundled copy when the installer ships one,
+    // otherwise the pinned factory version (re-downloaded on restore).
+    const restoreTarget = info?.bundled_version ?? info?.factory_version ?? null;
     return (
       <div
         className={`card kernel-card${active ? " core-active" : ""}`}
@@ -757,6 +802,11 @@ export function SettingsPage() {
           <span className="mono">
             {t("settings.coreLatestShort")} {info?.latest_version ?? "—"}
           </span>
+          {info?.installed_at ? (
+            <span className="mono">
+              {t("settings.coreInstalledAt")} {formatCheckedAt(info.installed_at)}
+            </span>
+          ) : null}
           {info?.update_available ? (
             <span className="pill warn">{t("settings.coreUpdateAvail")}</span>
           ) : null}
@@ -765,67 +815,45 @@ export function SettingsPage() {
         <div className="kernel-row-actions">
           <GlassButton
             icon="↻"
-            disabled={busy || checking || !info}
+            disabled={anyBusy || checking || !info}
             onClick={() => void onCheckCoreUpdate(kind)}
           >
             {checking
               ? t("settings.coreChecking")
               : t("settings.coreCheck")}
           </GlassButton>
+          {/* One stable label in every state — the previous state-dependent
+             wording (下载/更新内核/重新下载) flip-flopped with the
+             staged/downloaded source and read like random renames. Update
+             availability is already signaled by the pill in the meta row. */}
           <GlassButton
-            variant="primary"
             icon="⤓"
-            disabled={busy || checking}
+            disabled={anyBusy || checking}
             onClick={() => void onDownloadCore(kind)}
           >
-            {busy
-              ? t("settings.coreDownloading")
-              : info?.source === "downloaded"
-                ? info.update_available
-                  ? t("settings.coreUpdate")
-                  : t("settings.coreRedownload")
-                : t("settings.coreDownload")}
+            {busy ? t("settings.coreDownloading") : t("settings.coreDownload")}
           </GlassButton>
-        </div>
-
-        {busy && progress && (
-          <div className="core-download-progress" aria-live="polite">
-            <div className="core-download-progress-head">
-              <span className="lat-spinner" aria-hidden />
-              <span>
-                {progress.stage === "preparing"
-                  ? t("settings.corePreparing")
-                  : progress.stage === "installing"
-                    ? t("settings.coreInstalling")
-                    : progress.stage === "assets"
-                      ? t("settings.coreAssets")
-                      : t("settings.coreDownloading")}
-              </span>
-              <span className="mono core-download-percent">
-                {progress.percent != null
-                  ? `${progress.percent}%`
-                  : "…"}
-              </span>
-            </div>
-            <div
-              className={`core-progress-track${progress.percent == null ? " indeterminate" : ""}`}
+          {/* Factory reset: always available on an installed core — the
+             staged-vs-downloaded `source` flips whenever the kernel restarts
+             (resolve re-stages the bundled binary into bin/), so keying
+             visibility off it made the button appear/vanish unpredictably.
+             Re-clicking at the target version is a harmless re-stage /
+             factory re-download. Only a missing core has nothing to reset. */}
+          {info?.installed && restoreTarget ? (
+            <GlassButton
+              icon="⟲"
+              disabled={anyBusy || checking}
+              title={
+                info.bundled_version
+                  ? t("settings.coreRestoreHint", { v: info.bundled_version })
+                  : t("settings.coreRestoreDlHint", { v: restoreTarget })
+              }
+              onClick={() => void onRestoreCore(kind)}
             >
-              <span
-                style={{
-                  width: `${progress.percent ?? 24}%`,
-                }}
-              />
-            </div>
-            {progress.downloaded > 0 && (
-              <div className="muted mono core-download-bytes">
-                {fmtCoreBytes(progress.downloaded)}
-                {progress.total
-                  ? ` / ${fmtCoreBytes(progress.total)}`
-                  : ""}
-              </div>
-            )}
-          </div>
-        )}
+              {t("settings.coreRestore")}
+            </GlassButton>
+          ) : null}
+        </div>
 
         <div className="kernel-row-foot">
           {active && coreProxyAvailable && (
@@ -954,6 +982,32 @@ export function SettingsPage() {
 
   const visibleTab =
     customRuntime && CUSTOM_BLOCKED_TABS.has(tab) ? "app" : tab;
+
+  // ←/→ cycle through the settings sub-tabs, skipping any the custom
+  // runtime blocks. Ignored while typing (input/textarea/select) so text
+  // cursor movement and dropdown navigation are unaffected.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const active = document.activeElement;
+      const tag = active?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((active as HTMLElement | null)?.isContentEditable) return;
+
+      const enabled = tabs.filter(
+        (x) => !(customRuntime && CUSTOM_BLOCKED_TABS.has(x.id)),
+      );
+      const idx = enabled.findIndex((x) => x.id === visibleTab);
+      if (idx === -1) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowRight" ? 1 : -1;
+      const next = enabled[(idx + delta + enabled.length) % enabled.length];
+      setTab(next.id);
+      setError(null);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [tabs, customRuntime, visibleTab]);
 
   // The sponsor easter egg renders on the app tab only; leaving the tab
   // unmounts it — reset the open state so coming back doesn't resurrect
@@ -1751,7 +1805,10 @@ export function SettingsPage() {
           {coreError && (
             <ErrorModal
               message={coreError}
-              onClose={() => setCoreError(null)}
+              onClose={() => {
+                setCoreError(null);
+                clearCoreDownload();
+              }}
             />
           )}
 
@@ -1802,7 +1859,6 @@ export function SettingsPage() {
                 {/* The app has no in-app downloader — "re-download" simply
                    opens the latest GitHub release page in the browser. */}
                 <GlassButton
-                  variant="primary"
                   icon="⤓"
                   onClick={() => void openUrl(RELEASES_URL)}
                 >

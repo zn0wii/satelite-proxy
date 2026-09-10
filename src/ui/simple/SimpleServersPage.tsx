@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addSubscriptionFile,
   addSubscriptionNode,
@@ -30,6 +30,7 @@ import { useI18n } from "../../i18n";
 import { ErrorModal } from "../../components/ErrorModal";
 import { waitForCoreRestart } from "../../coreBusy";
 import { useVirtualRange } from "../../hooks/useVirtualRange";
+import { createLatencyResultBuffer } from "../../latencyStream";
 import type { AutoSelectMode, ProxyNode, SortMode } from "../../types";
 
 const SORT_KEY = "simple.nodes.sortMode";
@@ -100,6 +101,12 @@ export function SimpleServersPage() {
   const [modalInitial, setModalInitial] = useState<ConfigFormValues | null>(
     null,
   );
+  // Batch-test streaming: the rAF buffer between channel messages and state
+  // (see latencyStream.ts); stopped on unmount so no flush lands post-dismount.
+  const latencyBufferRef = useRef<ReturnType<
+    typeof createLatencyResultBuffer
+  > | null>(null);
+  useEffect(() => () => latencyBufferRef.current?.stop(), []);
 
 
   const reload = useCallback(async (append = false) => {
@@ -197,9 +204,11 @@ export function SimpleServersPage() {
 
   async function onTestAll() {
     if (testing || nodeTotal === 0) return;
-    // Custom mode probes the extracted (unsaved) nodes — ids come from the
-    // loaded list because they are not in the node store.
-    const ids = customRuntime ? nodes.map((n) => n.id) : await listNodeIds();
+    // Ids in current display order — the backend launches probes (and
+    // streams results back) top to bottom of the list as shown. Custom mode
+    // probes the extracted (unsaved) nodes — ids come from the loaded list
+    // because they are not in the node store.
+    const ids = customRuntime ? nodes.map((n) => n.id) : await listNodeIds("", sortMode);
     const idSet = new Set(ids);
     setTesting(true);
     setTestingIds(idSet);
@@ -212,24 +221,29 @@ export function SimpleServersPage() {
           : n,
       ),
     );
-    try {
-      const batch = customRuntime
-        ? await testCustomNodesLatency(3000)
-        : await testNodesLatency(ids, 3000);
-      const map = new Map(batch.results.map((r) => [r.id, r]));
+    // Per-node streaming: the backend pushes each result over an IPC channel
+    // the moment its probe completes; the buffer applies them per animation
+    // frame (see latencyStream.ts).
+    const buffer = createLatencyResultBuffer((batch) => {
       if (customRuntime) {
         // Session-only — remember results across filter / sort / page reloads.
         setCustomLatency((prev) => {
           const next = new Map(prev);
-          for (const r of batch.results) {
-            next.set(r.id, { ms: r.latency_ms ?? null, at: r.tested_at });
+          for (const [id, r] of batch) {
+            next.set(id, { ms: r.latency_ms ?? null, at: r.tested_at });
           }
           return next;
         });
       }
+      // Retire the finished spinners as their results land.
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of batch.keys()) next.delete(id);
+        return next;
+      });
       setNodes((prev) =>
         prev.map((n) => {
-          const r = map.get(n.id);
+          const r = batch.get(n.id);
           if (!r) return n;
           return {
             ...n,
@@ -238,7 +252,17 @@ export function SimpleServersPage() {
           };
         }),
       );
+    });
+    latencyBufferRef.current = buffer;
+    try {
+      if (customRuntime) {
+        await testCustomNodesLatency(3000, buffer.push);
+      } else {
+        await testNodesLatency(ids, 3000, buffer.push);
+      }
+      buffer.flushNow();
     } catch (e) {
+      buffer.flushNow();
       setError(typeof e === "string" ? e : String(e));
       if (!customRuntime) await reload();
     } finally {

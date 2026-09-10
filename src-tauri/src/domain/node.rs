@@ -366,22 +366,31 @@ pub struct ProxyNode {
 }
 
 impl ProxyNode {
-    /// Stable id without subscription context (subscription layer may re-hash later).
-    pub fn compute_id(name: &str, server: &str, port: u16, protocol: Protocol) -> String {
+    /// Stable id keyed on backend identity — server/port/protocol/credentials —
+    /// deliberately excluding display name and subscription id. Airport
+    /// remarks and subscription URLs both change across a refresh; the
+    /// underlying node (same host, same auth) shouldn't lose its identity
+    /// just because the airport renamed it or rotated its sub URL.
+    pub fn compute_id(server: &str, port: u16, protocol: Protocol, identity_extra: &str) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(name.as_bytes());
-        hasher.update(b"|");
         hasher.update(server.as_bytes());
         hasher.update(b"|");
         hasher.update(port.to_string().as_bytes());
         hasher.update(b"|");
         hasher.update(protocol.as_str().as_bytes());
+        hasher.update(b"|");
+        hasher.update(identity_extra.as_bytes());
         let digest = hasher.finalize();
         hex::encode(&digest[..16])
     }
 
     pub fn with_computed_id(mut self) -> Self {
-        self.id = Self::compute_id(&self.name, &self.server, self.port, self.protocol);
+        self.id = Self::compute_id(
+            &self.server,
+            self.port,
+            self.protocol,
+            &config_identity(&self.config),
+        );
         self
     }
 
@@ -404,14 +413,15 @@ impl ProxyNode {
 
     /// Ensure node ids are unique on the outbound-tag prefix (`id[..16]`).
     ///
-    /// `compute_id` hashes `name|server|port|protocol` without credentials,
-    /// while import dedupes by `instance_key` (credentials included) — so
-    /// two same-named nodes that differ only by password/uuid survive as
-    /// distinct instances yet hash to the same id, producing duplicate
-    /// `node-<id[..16]>` outbound/endpoint tags and a `sing-box check`
-    /// failure. Later occurrences are re-hashed with a deterministic salt;
-    /// the first keeps its id (list order persists in the store, so this is
-    /// stable across runs). Returns how many ids were rewritten.
+    /// `compute_id` hashes `server|port|protocol|credentials` without the
+    /// display name, while import dedupes by `instance_key` (name included)
+    /// — so an airport that lists the same backend under two remarks (e.g.
+    /// "HK-01" / "HK-01-backup") survives as distinct instances yet hashes
+    /// to the same id, producing duplicate `node-<id[..16]>`
+    /// outbound/endpoint tags and a `sing-box check` failure. Later
+    /// occurrences are re-hashed with a deterministic salt; the first keeps
+    /// its id (list order persists in the store, so this is stable across
+    /// runs). Returns how many ids were rewritten.
     pub fn ensure_unique_ids<'a, I>(nodes: I) -> usize
     where
         I: Iterator<Item = &'a mut ProxyNode>,
@@ -423,10 +433,10 @@ impl ProxyNode {
             while !seen.insert(tag_prefix(&node.id)) {
                 salt += 1;
                 node.id = Self::compute_id(
-                    &format!("dup:{}:{salt}", node.id),
                     &node.server,
                     node.port,
                     node.protocol,
+                    &format!("dup:{}:{salt}", node.id),
                 );
                 renamed += 1;
             }
@@ -690,11 +700,24 @@ mod tests {
 
     #[test]
     fn ensure_unique_ids_renames_only_duplicates() {
-        let base = ProxyNode::compute_id("香港 01", "example.com", 8388, Protocol::Shadowsocks);
-        let other = ProxyNode::compute_id("东京 01", "example.com", 8388, Protocol::Shadowsocks);
+        // Two instances sharing server/port/protocol/credentials (only the
+        // remark differs) collide on id — the airport listed one backend
+        // under two names.
+        let base = ProxyNode::compute_id(
+            "example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pass-a",
+        );
+        let other = ProxyNode::compute_id(
+            "example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pass-c",
+        );
         let mut nodes = vec![
             ss_node(&base, "香港 01", "pass-a"),
-            ss_node(&base, "香港 01", "pass-b"),
+            ss_node(&base, "香港 01-backup", "pass-a"),
             ss_node(&other, "东京 01", "pass-c"),
         ];
 
@@ -714,11 +737,16 @@ mod tests {
 
     #[test]
     fn ensure_unique_ids_is_deterministic() {
-        let base = ProxyNode::compute_id("同号节点", "example.com", 8388, Protocol::Shadowsocks);
+        let base = ProxyNode::compute_id(
+            "example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pass-a",
+        );
         let build = || {
             vec![
                 ss_node(&base, "同号节点", "pass-a"),
-                ss_node(&base, "同号节点", "pass-b"),
+                ss_node(&base, "同号节点-2", "pass-a"),
             ]
         };
         let mut first = build();

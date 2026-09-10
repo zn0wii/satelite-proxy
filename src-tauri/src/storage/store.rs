@@ -48,6 +48,15 @@ pub struct AppStore {
     /// User-assigned node names, keyed by `identity|parsed-name`.
     #[serde(default)]
     pub node_aliases: std::collections::BTreeMap<String, String>,
+    /// User-favorited node ids. Keyed by `ProxyNode.id` (a content hash of
+    /// server/port/protocol/credentials — stable across renames and
+    /// resubscribes, see `ProxyNode::compute_id`). Garbage-collected
+    /// whenever the node set shrinks (`remove_subscription`,
+    /// `upsert_subscription`) so a favorite that can no longer be matched
+    /// to any node (ip/port/credential changed, or the subscription/node is
+    /// gone) doesn't linger forever.
+    #[serde(default)]
+    pub favorite_nodes: std::collections::BTreeSet<String>,
     /// Items this build could not parse. Kept so save() writes them back
     /// instead of dropping newer-schema data.
     #[serde(skip)]
@@ -724,6 +733,7 @@ impl AppStore {
                 node,
             });
         }
+        self.gc_favorite_nodes();
         Ok(())
     }
 
@@ -745,6 +755,7 @@ impl AppStore {
             }
         }
         self.ensure_current_node_valid();
+        self.gc_favorite_nodes();
         Ok(())
     }
 
@@ -960,6 +971,31 @@ impl AppStore {
 
     pub fn find_node(&self, id: &str) -> Option<&ProxyNode> {
         self.nodes.iter().find(|n| n.node.id == id).map(|n| &n.node)
+    }
+
+    /// Toggle a node's favorite flag; returns the new state. No-op error if
+    /// the node id doesn't exist (nothing to favorite).
+    pub fn toggle_favorite_node(&mut self, id: &str) -> AppResult<bool> {
+        if !self.nodes.iter().any(|n| n.node.id == id) {
+            return Err(AppError::NotFound(id.to_string()));
+        }
+        let now_favorite = if self.favorite_nodes.remove(id) {
+            false
+        } else {
+            self.favorite_nodes.insert(id.to_string());
+            true
+        };
+        Ok(now_favorite)
+    }
+
+    /// Drop favorites whose node id no longer resolves to a stored node —
+    /// called after any operation that shrinks/replaces `self.nodes`
+    /// (subscription removed, or refreshed and the node's ip/port/
+    /// credentials changed so it hashes to a different id). Keeps
+    /// `favorite_nodes` from growing unboundedly with unreachable ids.
+    fn gc_favorite_nodes(&mut self) {
+        self.favorite_nodes
+            .retain(|id| self.nodes.iter().any(|n| &n.node.id == id));
     }
 
     pub fn node_alias_key(node: &ProxyNode) -> String {
@@ -1495,20 +1531,48 @@ impl AppStore {
         Ok(chain.clone())
     }
 
+    /// Chain ids this rule set effectively pins in the generated config —
+    /// the same reference semantics the config builders use. A `chain_id`
+    /// left over from an earlier strategy, or one inside a disabled/empty
+    /// set or a disabled rule, produces no route and must not count as a
+    /// reference. Keep in sync with `config::builder`: disabled/empty sets
+    /// are skipped entirely, and only effective rules (the same shape as
+    /// `inline_rule_is_effective`) emit per-rule outbounds.
+    fn chain_refs_in_effective_config(set: &RuleSet) -> Vec<&str> {
+        if !set.enabled || crate::config::rule_set_is_empty_for_config(set) {
+            return Vec::new();
+        }
+        let mut refs: Vec<&str> = Vec::new();
+        if set.strategy == RuleSetStrategy::Chain {
+            if let Some(id) = set.chain_id.as_deref().filter(|s| !s.is_empty()) {
+                refs.push(id);
+            }
+        }
+        refs.extend(
+            set.rules
+                .iter()
+                .filter(|r| {
+                    r.enabled
+                        && r.target == RuleTarget::Chain
+                        && !r.payload.trim().is_empty()
+                        && r.rule_type != RuleType::Geoip
+                })
+                .filter_map(|r| r.chain_id.as_deref().filter(|s| !s.is_empty())),
+        );
+        refs
+    }
+
     /// Distinct rule-set names referencing each chain — the same reference
-    /// detection `delete_chain`'s guard uses (set-level pin OR any single
-    /// rule), deduped per set. Powers the chain list page's "used by N rule
-    /// sets" hint so users can see deletion impact up front.
+    /// detection `delete_chain`'s guard uses, filtered to references that
+    /// actually reach the generated config (see
+    /// [`Self::chain_refs_in_effective_config`]), deduped per set. Powers the
+    /// chain list page's "used by N rule sets" hint so users can see deletion
+    /// impact up front.
     pub fn chain_rule_usage(&self) -> std::collections::BTreeMap<String, Vec<String>> {
         let mut usage: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for set in &self.rule_sets {
-            let mut referenced_ids: Vec<&str> = Vec::new();
-            if let Some(id) = set.chain_id.as_deref() {
-                referenced_ids.push(id);
-            }
-            referenced_ids.extend(set.rules.iter().filter_map(|r| r.chain_id.as_deref()));
-            for id in referenced_ids {
+            for id in Self::chain_refs_in_effective_config(set) {
                 let names = usage.entry(id.to_string()).or_default();
                 if !names.iter().any(|n| n == &set.name) {
                     names.push(set.name.clone());
@@ -1522,19 +1586,8 @@ impl AppStore {
         let referencing_rules: Vec<String> = self
             .rule_sets
             .iter()
-            .flat_map(|set| {
-                let mut names: Vec<String> = Vec::new();
-                if set.chain_id.as_deref() == Some(id) {
-                    names.push(set.name.clone());
-                }
-                names.extend(
-                    set.rules
-                        .iter()
-                        .filter(|r| r.chain_id.as_deref() == Some(id))
-                        .map(|_| set.name.clone()),
-                );
-                names
-            })
+            .filter(|set| Self::chain_refs_in_effective_config(set).contains(&id))
+            .map(|set| set.name.clone())
             .collect();
         if !referencing_rules.is_empty() {
             let mut uniq = referencing_rules;
@@ -1787,6 +1840,16 @@ fn store_from_json(value: Value) -> AppStore {
         }
     }
 
+    if let Some(favorites) = obj.get("favorite_nodes") {
+        match serde_json::from_value::<std::collections::BTreeSet<String>>(favorites.clone()) {
+            Ok(parsed) => store.favorite_nodes = parsed,
+            Err(error) => crate::app_log::warn(
+                "storage",
+                format!("ignored unreadable favorite_nodes array ({error}); keeping defaults"),
+            ),
+        }
+    }
+
     if let Some(settings) = obj.get("settings") {
         match serde_json::from_value::<AppSettings>(settings.clone()) {
             Ok(parsed) => store.settings = parsed,
@@ -2033,8 +2096,14 @@ mod tests {
                 latency_at: None,
             },
         };
-        // Legacy collision: same name/server/port/protocol, different creds.
-        let base = ProxyNode::compute_id("香港 01", "example.com", 8388, Protocol::Shadowsocks);
+        // Legacy collision: same server/port/protocol, different creds, but
+        // manually assigned the same id (simulating stale/corrupt data).
+        let base = ProxyNode::compute_id(
+            "example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pass-a",
+        );
         let path = test_store_path("dup-ids");
         let mut store = AppStore::default();
         store.nodes.push(mk(&base, "pass-a"));
@@ -2472,6 +2541,7 @@ mod tests {
             auto_update: false,
             auto_update_interval_min: 1440,
             traffic: None,
+            user_agent: None,
         }
     }
 
@@ -3306,6 +3376,68 @@ mod tests {
     }
 
     #[test]
+    fn toggle_favorite_node_flips_state_and_rejects_unknown_id() {
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+
+        assert!(store.toggle_favorite_node("a").unwrap());
+        assert!(store.favorite_nodes.contains("a"));
+        assert!(!store.toggle_favorite_node("a").unwrap());
+        assert!(!store.favorite_nodes.contains("a"));
+
+        assert!(store.toggle_favorite_node("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn favorite_survives_rename_and_resubscribe_but_not_a_ip_port_change() {
+        // Business intent: a favorite is keyed on the node's stable content-hash
+        // id (server/port/protocol/credentials), so a subscription refresh that
+        // only changes display name/remark must NOT lose the favorite — but a
+        // refresh where the node's underlying id truly changes (ip/port/cred
+        // rotated) has nothing left to point at and must be garbage-collected,
+        // otherwise `favorite_nodes` grows with ids no node will ever have again.
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+        assert!(store.toggle_favorite_node("a").unwrap());
+
+        // Airport renamed the node under the same subscription refresh — id
+        // ("a") stays the same in this test because id is caller-supplied here,
+        // mirroring how `ProxyNode::compute_id` would keep it stable in
+        // production since name isn't a hash input. Favorite must survive.
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01-Renamed")])
+            .unwrap();
+        assert!(store.favorite_nodes.contains("a"));
+
+        // Node's backend identity actually changed (simulated by a new id, as
+        // would happen if ip/port/credentials rotated) — the old favorite id
+        // no longer matches any node and must be purged, not kept forever.
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a-new-ip", "HK-01-Renamed")])
+            .unwrap();
+        assert!(!store.favorite_nodes.contains("a"));
+    }
+
+    #[test]
+    fn favorite_is_gc_ed_when_its_subscription_is_removed() {
+        let mut store = AppStore::default();
+        store
+            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
+            .unwrap();
+        assert!(store.toggle_favorite_node("a").unwrap());
+
+        store.remove_subscription("id-s").unwrap();
+        assert!(
+            store.favorite_nodes.is_empty(),
+            "favorite must not linger once its only node is gone"
+        );
+    }
+
+    #[test]
     fn set_runtime_source_selects_custom_and_falls_back_on_delete() {
         let mut store = AppStore::default();
         let mut sub = sample_url_sub("s");
@@ -3519,7 +3651,7 @@ mod tests {
 
     #[test]
     fn delete_chain_blocked_while_a_rule_set_references_it() {
-        use crate::domain::{ChainHop, RuleSet, RuleSetStrategy};
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
         let mut store = AppStore::default();
         store.nodes.push(mk_stored_node("n1", "A"));
         store.nodes.push(mk_stored_node("n2", "B"));
@@ -3536,7 +3668,18 @@ mod tests {
                 ],
             )
             .unwrap();
-        let mut set = RuleSet::new_user("规则集", vec![]);
+        // The set must hold at least one effective rule: an empty set emits
+        // nothing to the kernel config, so its whole-set pin is not a live
+        // reference (see chain_usage_ignores_references_that_reach_no_config).
+        let mut set = RuleSet::new_user(
+            "规则集",
+            vec![Rule::new(
+                RuleType::DomainSuffix,
+                "example.com".into(),
+                RuleTarget::Proxy,
+                0,
+            )],
+        );
         set.strategy = RuleSetStrategy::Chain;
         set.chain_id = Some(chain.id.clone());
         store.rule_sets.push(set);
@@ -3609,6 +3752,77 @@ mod tests {
         assert!(names.contains(&"集合A".to_string()));
         assert!(names.contains(&"集合B".to_string()));
         assert!(!names.contains(&"集合C".to_string()));
+    }
+
+    #[test]
+    fn chain_usage_ignores_references_that_reach_no_config() {
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
+        let mut store = AppStore::default();
+        store.nodes.push(mk_stored_node("n1", "A"));
+        store.nodes.push(mk_stored_node("n2", "B"));
+        let chain = store
+            .create_chain(
+                "被引用链",
+                vec![
+                    ChainHop::Node {
+                        node_id: "n1".into(),
+                    },
+                    ChainHop::Node {
+                        node_id: "n2".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        let chain_rule = |name: &str| {
+            let mut r = Rule::new(
+                RuleType::DomainSuffix,
+                format!("{name}.com"),
+                RuleTarget::Chain,
+                0,
+            );
+            r.chain_id = Some(chain.id.clone());
+            r
+        };
+
+        // Whole-set pin but every rule deleted: the empty set reaches no
+        // generated config, so the pin is not a live reference (the reported
+        // bug — usage stayed after the rules were removed).
+        let mut emptied = RuleSet::new_user("已清空", vec![]);
+        emptied.strategy = RuleSetStrategy::Chain;
+        emptied.chain_id = Some(chain.id.clone());
+        // Strategy flipped away from Chain while the stale pin fields linger.
+        let mut flipped = RuleSet::new_user("已改策略", vec![chain_rule("flipped")]);
+        flipped.chain_id = Some(chain.id.clone());
+        flipped.rules[0].target = RuleTarget::Proxy;
+        // Disabled per-rule chain reference inside an otherwise live set.
+        let mut has_disabled = RuleSet::new_user("含停用规则", vec![chain_rule("off")]);
+        has_disabled.rules[0].enabled = false;
+        has_disabled.rules.push(Rule::new(
+            RuleType::DomainSuffix,
+            "live.com".into(),
+            RuleTarget::Proxy,
+            10,
+        ));
+        // Disabled set entirely.
+        let mut disabled_set = RuleSet::new_user("已停用", vec![chain_rule("ds")]);
+        disabled_set.enabled = false;
+        store.rule_sets.push(emptied);
+        store.rule_sets.push(flipped);
+        store.rule_sets.push(has_disabled);
+        store.rule_sets.push(disabled_set);
+
+        let usage = store.chain_rule_usage();
+        assert!(
+            !usage.contains_key(&chain.id),
+            "no live reference remains, usage must be empty: {:?}",
+            usage
+        );
+        // The delete guard shares the same semantics: the chain is deletable.
+        store.delete_chain(&chain.id).expect(
+            "stale/empty references must not block deletion — \
+             usage display and the delete guard must agree",
+        );
+        assert!(store.chains.is_empty());
     }
 
     #[test]

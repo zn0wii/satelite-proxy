@@ -1,6 +1,9 @@
 # Fetch and stage the bundled mihomo core for Windows (amd64).
-# Downloads mihomo.exe from the mihomo-windows-amd64-v{ver}.zip release
-# asset plus MetaCubeX geodata (Country.mmdb + GeoSite.dat) into
+# Downloads mihomo.exe from the mihomo-windows-amd64-compatible-v{ver}.zip
+# release asset (GOAMD64=v1 — the plain amd64 zip is v3/AVX2-only and fatals
+# on pre-Haswell PCs); geodata (Country.mmdb + GeoSite.dat) is copied from the
+# repo-committed snapshot in resources/geodata/mihomo/ (see
+# scripts/fetch-bundled-mihomo-geodata.sh) into
 # src-tauri/resources/bin/windows-amd64/mihomo-geodata/.
 # wintun.dll (Windows tun) is shared with the Xray staging — this script
 # only fetches it when missing.
@@ -18,7 +21,7 @@ $DEST = Join-Path $ROOT "src-tauri\resources\bin\windows-amd64"
 $GEO  = Join-Path $DEST "mihomo-geodata"
 $TMP  = Join-Path $env:TEMP "satelite-mihomo-$Version"
 
-$Url = "https://github.com/MetaCubeX/mihomo/releases/download/v$Version/mihomo-windows-amd64-v$Version.zip"
+$Url = "https://github.com/MetaCubeX/mihomo/releases/download/v$Version/mihomo-windows-amd64-compatible-v$Version.zip"
 
 $webParams = @{ UseBasicParsing = $true }
 if ($Proxy) { $webParams.Proxy = $Proxy }
@@ -43,7 +46,8 @@ if (Test-Path (Join-Path $DEST "mihomo.exe")) {
 
   Write-Host "Extracting..."
   Expand-Archive -Path $Zip -DestinationPath $TMP -Force
-  # mihomo zips carry a versioned inner exe (mihomo-windows-amd64.exe).
+  # mihomo zips carry a platform-suffixed inner exe
+  # (mihomo-windows-amd64-compatible.exe) rather than a plain mihomo.exe.
   $Exe = Get-ChildItem -Path $TMP -Recurse -Filter "mihomo*.exe" | Select-Object -First 1
   if (-not $Exe) { throw "mihomo.exe not found in archive" }
   Copy-Item -Force $Exe.FullName (Join-Path $DEST "mihomo.exe")
@@ -67,19 +71,21 @@ if (-not (Test-Path (Join-Path $DEST "wintun.dll"))) {
   Copy-Item -Force (Join-Path $TMP "wintun\wintun\bin\amd64\wintun.dll") (Join-Path $DEST "wintun.dll")
 }
 
-# mihomo geodata: Country.mmdb (MaxMind) + GeoSite.dat (MetaCubeX; note the
-# exact casing — mihomo looks for GeoSite.dat and macOS is case-sensitive).
-foreach ($file in @(@{ Name = "Country.mmdb"; Url = "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb" },
-                    @{ Name = "GeoSite.dat"; Url = "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat" })) {
+# mihomo geodata: Country.mmdb + GeoSite.dat, staged from the repo-committed
+# snapshot (see resources/geodata/mihomo/ and
+# scripts/fetch-bundled-mihomo-geodata.sh) — upstream meta-rules-dat only
+# ships a rolling "latest" release, so a live fetch here would defeat the
+# pinned-version guarantee.
+$SnapshotDir = Join-Path $ROOT "src-tauri\resources\geodata\mihomo"
+foreach ($file in @(@{ Name = "Country.mmdb"; Snapshot = "country.mmdb" },
+                    @{ Name = "GeoSite.dat"; Snapshot = "geosite.dat" })) {
   $target = Join-Path $GEO $file.Name
   if (Test-Path $target) { continue }
-  Write-Host "Downloading $($file.Url)"
-  try {
-    Invoke-WebRequest -Uri $file.Url -OutFile $target @webParams
-  } catch {
-    & curl.exe -sSL -x "$Proxy" -o "$target" "$($file.Url)"
-    if ($LASTEXITCODE -ne 0) { throw "curl $($file.Name) download failed (exit $LASTEXITCODE)" }
+  $source = Join-Path $SnapshotDir $file.Snapshot
+  if (-not (Test-Path $source)) {
+    throw "missing $source - run scripts/fetch-bundled-mihomo-geodata.sh once and commit the result"
   }
+  Copy-Item -Force $source $target
 }
 
 Write-Host "Staged mihomo v$Version -> $DEST"

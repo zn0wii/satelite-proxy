@@ -32,7 +32,10 @@ use tokio::time::timeout;
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_CONCURRENCY: usize = 30;
 const GLOBAL_CONCURRENCY: usize = 30;
-const CACHE_TTL: Duration = Duration::from_secs(90);
+/// Shared probe-result TTL (successes; failures use [`FAILURE_CACHE_TTL`]).
+/// This is also what smart_switch's background ranking/health probes read —
+/// kept short (30s) so a "cached" number never lingers long.
+const CACHE_TTL: Duration = Duration::from_secs(30);
 const FAILURE_CACHE_TTL: Duration = Duration::from_secs(15);
 const MAX_CACHE_ENTRIES: usize = 4096;
 const CACHE_TRIM_TO: usize = 3072;
@@ -72,6 +75,28 @@ pub async fn probe_nodes(
     clash: Option<ClashApi>,
     probe_url: String,
 ) -> AppResult<Vec<LatencyResult>> {
+    probe_nodes_streaming(nodes, timeout_ms, concurrency, clash, probe_url, |_| {}, true)
+        .await
+}
+
+/// Same as [`probe_nodes`], but invokes `on_result` the moment each probe
+/// completes (completion order, which trails the input order since tasks
+/// launch front-to-back) so the UI can render results one node at a time
+/// instead of waiting for the whole batch. The returned Vec is still
+/// re-sorted into the caller's input order.
+///
+/// `use_cache = false` (user-triggered runs) skips reading cached results —
+/// every node is really probed — while the fresh result is still written
+/// back for background consumers (smart_switch).
+pub async fn probe_nodes_streaming(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+    clash: Option<ClashApi>,
+    probe_url: String,
+    on_result: impl Fn(&LatencyResult) + Send,
+    use_cache: bool,
+) -> AppResult<Vec<LatencyResult>> {
     let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     let concurrency = concurrency.unwrap_or(DEFAULT_CONCURRENCY).max(1);
     let mut pending = nodes.iter().cloned().enumerate();
@@ -85,6 +110,7 @@ pub async fn probe_nodes(
                 timeout_ms,
                 clash.clone(),
                 probe_url.clone(),
+                use_cache,
             );
         }
     }
@@ -93,7 +119,10 @@ pub async fn probe_nodes(
     let mut task_errors = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok(result) => indexed_results.push(result),
+            Ok((index, result)) => {
+                on_result(&result);
+                indexed_results.push((index, result));
+            }
             Err(e) => task_errors.push(LatencyResult {
                 id: String::new(),
                 name: String::new(),
@@ -111,6 +140,7 @@ pub async fn probe_nodes(
                 timeout_ms,
                 clash.clone(),
                 probe_url.clone(),
+                use_cache,
             );
         }
     }
@@ -135,7 +165,28 @@ pub async fn ping_nodes(
     timeout_ms: Option<u64>,
     concurrency: Option<usize>,
 ) -> AppResult<Vec<LatencyResult>> {
-    let mut results = probe_nodes(nodes, timeout_ms, concurrency, None, String::new()).await?;
+    ping_nodes_streaming(nodes, timeout_ms, concurrency, |_| {}, true).await
+}
+
+/// [`ping_nodes`] with per-node completion callbacks — see
+/// [`probe_nodes_streaming`] (also for the `use_cache` semantics).
+pub async fn ping_nodes_streaming(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+    on_result: impl Fn(&LatencyResult) + Send,
+    use_cache: bool,
+) -> AppResult<Vec<LatencyResult>> {
+    let mut results = probe_nodes_streaming(
+        nodes,
+        timeout_ms,
+        concurrency,
+        None,
+        String::new(),
+        on_result,
+        use_cache,
+    )
+    .await?;
     for r in &mut results {
         if r.method == "unsupported" {
             r.error =
@@ -217,6 +268,7 @@ fn spawn_probe_task(
     timeout_ms: u64,
     clash: Option<ClashApi>,
     probe_url: String,
+    use_cache: bool,
 ) {
     tasks.spawn(async move {
         let id = node.id.clone();
@@ -256,7 +308,7 @@ fn spawn_probe_task(
         } else {
             format!("tcp|{id}|{server}|{port}|{timeout_ms}")
         };
-        let result = probe_coalesced(key, move || async move {
+        let result = probe_coalesced(key, use_cache, move || async move {
             if use_clash {
                 probe_clash(
                     clash.expect("checked by use_clash"),
@@ -276,13 +328,19 @@ fn spawn_probe_task(
     });
 }
 
-async fn probe_coalesced<F, Fut>(key: String, probe: F) -> LatencyResult
+/// Shared probe entry: in-flight coalescing (per-key lock) + result cache.
+/// `use_cache = false` skips both cache reads — the caller always wants a
+/// real measurement — but the fresh result is still written back so
+/// background consumers (smart_switch) can reuse it.
+async fn probe_coalesced<F, Fut>(key: String, use_cache: bool, probe: F) -> LatencyResult
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = LatencyResult>,
 {
-    if let Some(result) = cached_result(&key) {
-        return result;
+    if use_cache {
+        if let Some(result) = cached_result(&key) {
+            return result;
+        }
     }
 
     let probe_lock = {
@@ -293,8 +351,13 @@ where
         )
     };
     let _key_guard = probe_lock.lock().await;
-    if let Some(result) = cached_result(&key) {
-        return result;
+    // Double-check behind the lock — but only when reading cache is allowed
+    // at all; a bypass run must really probe even if another caller just
+    // finished one.
+    if use_cache {
+        if let Some(result) = cached_result(&key) {
+            return result;
+        }
     }
 
     let _global_permit = Arc::clone(&GLOBAL_SEMAPHORE)
@@ -625,11 +688,15 @@ mod tests {
             let key = key.clone();
             let calls = Arc::clone(&calls);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(key, || async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    result(Some(42))
-                })
+                probe_coalesced(
+                    key,
+                    true,
+                    || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        result(Some(42))
+                    },
+                )
                 .await
             }));
         }
@@ -638,11 +705,65 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let cached = probe_coalesced(key, || async {
-            panic!("fresh successful result must be reused");
-        })
+        let cached = probe_coalesced(
+            key,
+            true,
+            || async {
+                panic!("fresh successful result must be reused");
+            },
+        )
         .await;
         assert_eq!(cached.latency_ms, Some(42));
+    }
+
+    // Manual runs bypass cache reads but still refresh it: a bypass probe
+    // must re-run even when a fresh cached result exists, and the new value
+    // must replace the cached one for later cache-reading callers
+    // (smart_switch).
+    #[tokio::test]
+    async fn cache_bypass_reruns_probe_and_refreshes_cache() {
+        let key = unique_key("bypass");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Prime the cache with Some(1).
+        let c = Arc::clone(&calls);
+        let primed = probe_coalesced(
+            key.clone(),
+            true,
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result(Some(1))
+            },
+        )
+        .await;
+        assert_eq!(primed.latency_ms, Some(1));
+
+        // Bypass run: must really probe (Some(2)) despite the fresh hit.
+        let c = Arc::clone(&calls);
+        let fresh = probe_coalesced(
+            key.clone(),
+            false,
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result(Some(2))
+            },
+        )
+        .await;
+        assert_eq!(fresh.latency_ms, Some(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The bypass run refreshed the cache: readers now get Some(2), and
+        // no third probe ran.
+        let cached = probe_coalesced(
+            key,
+            true,
+            || async {
+                panic!("bypass result must have refreshed the cache");
+            },
+        )
+        .await;
+        assert_eq!(cached.latency_ms, Some(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -654,13 +775,17 @@ mod tests {
             let active = Arc::clone(&active);
             let peak = Arc::clone(&peak);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(unique_key(&format!("global-{i}")), || async move {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    result(Some(10))
-                })
+                probe_coalesced(
+                    unique_key(&format!("global-{i}")),
+                    true,
+                    || async move {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        result(Some(10))
+                    },
+                )
                 .await
             }));
         }

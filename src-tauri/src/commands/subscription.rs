@@ -169,6 +169,7 @@ pub async fn add_subscription_url(
     via_proxy: Option<bool>,
     auto_update: Option<bool>,
     auto_update_interval_min: Option<u32>,
+    user_agent: Option<String>,
 ) -> Result<ImportResult, String> {
     let via = via_proxy.unwrap_or(false);
     let canonical = canonical_subscription_url(&url);
@@ -191,9 +192,10 @@ pub async fn add_subscription_url(
     let mixed_port = state
         .with_store(|s| Ok(s.settings.mixed_port))
         .map_err(|e| e.to_string())?;
-    let mut outcome = import_from_url_with_id(name, url, existing_id, via, Some(mixed_port))
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut outcome =
+        import_from_url_with_id(name, url, existing_id, via, Some(mixed_port), user_agent)
+            .await
+            .map_err(|e| e.to_string())?;
     apply_auto_update_prefs(
         &mut outcome.subscription,
         auto_update.unwrap_or(false),
@@ -281,6 +283,7 @@ pub async fn update_subscription(
     via_proxy: Option<bool>,
     auto_update: Option<bool>,
     auto_update_interval_min: Option<u32>,
+    user_agent: Option<String>,
 ) -> Result<ImportResult, String> {
     let existing = state
         .with_store(|store| {
@@ -336,6 +339,7 @@ pub async fn update_subscription(
                 Some(target_id),
                 via,
                 Some(mixed_port),
+                user_agent,
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -462,6 +466,7 @@ async fn refresh_subscription_once(
             Some(id.clone()),
             via,
             Some(mixed_port),
+            existing.user_agent.clone(),
         )
         .await
         .map_err(|e| e.to_string())?,
@@ -526,6 +531,7 @@ async fn refresh_subscription_once(
     outcome.subscription.name = latest.name;
     outcome.subscription.enabled = latest.enabled;
     outcome.subscription.via_proxy = via_proxy.unwrap_or(latest.via_proxy);
+    outcome.subscription.user_agent = latest.user_agent;
     outcome.subscription.id = id;
     apply_auto_update_prefs(
         &mut outcome.subscription,

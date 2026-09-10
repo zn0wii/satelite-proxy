@@ -5,7 +5,7 @@
   "identifier": "com.satelite.proxy",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
@@ -43,7 +43,7 @@
       "resources/bin/darwin-arm64/mihomo",
       "resources/bin/darwin-arm64/mihomo-version.txt",
       "resources/bin/darwin-arm64/mihomo-geodata/Country.mmdb",
-      "resources/bin/darwin-arm64/mihomo-geodata/geosite.dat",
+      "resources/bin/darwin-arm64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",
       "resources/dns"
     ]

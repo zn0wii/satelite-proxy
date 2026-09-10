@@ -1,7 +1,7 @@
 # AGENTS.md — Satelite Proxy 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
-最后核对：2026-08-29（v1.0.9，三内核：sing-box / Xray / mihomo；新增 Xray 副进程按协议委托，见 §9.20）。
+最后核对：2026-09-10（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2。智能切换被动检测 2026-09 重构：失败判定=≤3s 快死或 ≤15s 零字节（拨号超时带），mihomo 增设内核日志流 `/logs` WS 监听（§5.1 `log_listener.rs`）；同批性能改造=快照流三档变速（需求心跳+TUN 退避）与 passive stats 单趟化，见 §5.1。CI 与本地打包脚本默认改为三内核四平台全打包，Linux 补齐 xray/mihomo 基础设施，mihomo geodata 改为固定快照机制，sing-box 版本号三处统一为 v1.13.18，见 §9.19；mihomo 的 amd64 发行包改用 `-compatible`（GOAMD64=v1）变体，修复 Intel 版应用在 Rosetta 2 / 老 Intel CPU 上安装 mihomo 即 fatal 的问题，见 §9.17⑦。远程加密 DNS 开放用户自定义：`DnsSettings.remote_dns` 非空即整体替换内置池，三生成器+诊断统一走 `effective_remote_pool()`，见 §18①）。
 
 ## 0. 阅读与维护规则（必读）
 
@@ -58,44 +58,59 @@ cd src-tauri && cargo fmt / cargo clippy          # 标准 Rust 工具链
 
 ```bash
 # macOS DMG（产物: src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/）
-./scripts/build-dmg.sh                        # 按本机架构，仅 sing-box 内核（默认）
+./scripts/build-dmg.sh                        # 按本机架构，三内核（默认）
 ./scripts/build-dmg.sh --arch arm64
 ./scripts/build-dmg.sh --arch intel           # 交叉编译；等价 build-dmg-intel.sh
-./scripts/build-dmg.sh --all-cores            # 额外打包 Xray + mihomo（缺失自动 fetch）
+./scripts/build-dmg.sh --singbox-only         # 瘦身：只打 sing-box（缺失自动 fetch）
 
 # Windows（产物: src-tauri/target/release/bundle/nsis/ 或 .../msi/）
-pwsh scripts/build-windows.ps1                        # NSIS 安装包，仅 sing-box（默认）
+pwsh scripts/build-windows.ps1                        # NSIS 安装包，三内核（默认）
 pwsh scripts/build-windows.ps1 -Bundle msi            # MSI
-pwsh scripts/build-windows.ps1 -AllCores              # 额外打包 Xray + mihomo（缺失自动 fetch）
+pwsh scripts/build-windows.ps1 -SingboxOnly           # 瘦身：只打 sing-box（缺失自动 fetch）
 
 # Windows 便携版（产物: src-tauri/target/release/bundle/portable/Satelite_<版本>_x64_portable.zip）
-pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19）
-pwsh scripts/build-windows.ps1 -Bundle portable -AllCores  # 三内核便携版
+pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19），三内核
+pwsh scripts/build-windows.ps1 -Bundle portable -SingboxOnly  # 单内核便携版
 
-打包默认只含 sing-box 内核（经 `tauri.singbox-<平台>.conf.json` overlay 瘦身 resources，
-否则缺失文件会让 bundler 失败）；`--all-cores`/`-AllCores` 才把 Xray+mihomo（含 geodata）
-打进安装包，缺失时自动调 fetch 脚本。三入口切内核 UI 不受影响——未打包的内核可经设置页下载。
+CI（`.github/workflows/release.yml`）只打三内核版（sing-box + Xray + mihomo，含各自 geodata），
+四平台一致，产物名/应用名/安装路径均为原版 `Satelite`（**无 -fullcores 等变体后缀，不要再给
+productName 加变体名**——它同时决定 Windows 安装目录与 WebView2 数据目录位置）；
+`tauri.<平台>.conf.json`（macOS arm64 走基础 `tauri.conf.json`，intel 走
+`tauri.macos-intel.conf.json`）为全内核 overlay，只覆盖 resources 清单。单内核瘦身版
+**仅本地脚本**：`tauri.singbox-<平台>.conf.json` overlay 瘦身 resources 只含 sing-box，
+供 `--singbox-only`/`-SingboxOnly` 选用（体积敏感场景，产物同样叫 Satelite）。
+三入口切内核 UI 不受影响——未打包的内核可经设置页下载。
 ```
 
-打包脚本会自动拉取对应平台的官方 sing-box 并打进安装包，无需手动准备。
+打包脚本会自动拉取对应平台的官方内核并打进安装包，无需手动准备（mihomo geodata 例外，见下）。
 
 ### 资源预取（可选，离线/加速用）
 
 ```bash
 scripts/fetch-bundled-core-darwin-arm64.sh        # macOS arm64 sing-box（默认 v1.13.18）
 scripts/fetch-bundled-core-darwin-amd64.sh        # macOS Intel
-pwsh scripts/fetch-bundled-core-windows-amd64.ps1 # Windows sing-box v1.13.15 + libcronet.dll，支持 -Proxy
+scripts/fetch-bundled-core-linux-amd64.sh         # Linux amd64 sing-box
+pwsh scripts/fetch-bundled-core-windows-amd64.ps1 # Windows sing-box v1.13.18 + libcronet.dll，支持 -Proxy
 scripts/fetch-bundled-xray-darwin-arm64.sh        # macOS arm64 Xray（默认 v26.3.27）+ geosite/geoip.dat
 scripts/fetch-bundled-xray-darwin-amd64.sh        # macOS Intel Xray
+scripts/fetch-bundled-xray-linux-amd64.sh         # Linux amd64 Xray
 pwsh scripts/fetch-bundled-xray-windows-amd64.ps1 # Windows Xray + geodata + wintun.dll（TUN 用），支持 -Proxy
 scripts/fetch-bundled-mihomo-darwin-arm64.sh       # macOS arm64 mihomo（默认 v1.19.30）+ mihomo-geodata/（mmdb+GeoSite.dat）
 scripts/fetch-bundled-mihomo-darwin-amd64.sh       # macOS Intel mihomo
+scripts/fetch-bundled-mihomo-linux-amd64.sh        # Linux amd64 mihomo
 pwsh scripts/fetch-bundled-mihomo-windows-amd64.ps1 # Windows mihomo + mihomo-geodata/（wintun.dll 与 Xray 共用），支持 -Proxy
+scripts/fetch-bundled-mihomo-geodata.sh           # 一次性刷新 mihomo geodata 固定快照（见下）
 scripts/fetch-bundled-rule-sets.sh                # 3 条内置 .srs 规则集（校验 SRS 魔数，--force 重下）
 scripts/memory-profile/                           # WebView2 内存剖析（CDP 堆采样 + 进程树 RSS，见其 README 与 docs/webview2-memory-optimization-plan.md）
 ```
 
-- 这些二进制**不入 git**（`.gitignore` 排除 `resources/bin/**/sing-box*`、`xray*`、`mihomo*`、`*.dat`、`wintun.dll`、`mihomo-geodata/`、`libcronet.*`、`resources/rule-sets/*.srs`），本地缺失属正常
+- 各平台 `fetch-bundled-mihomo-*` 脚本的 geodata（Country.mmdb + GeoSite.dat）**不联网下载**，而是从
+  `src-tauri/resources/geodata/mihomo/`（git 跟踪的固定快照）复制。上游 MetaCubeX/meta-rules-dat 只维护
+  滚动的 `latest` release、没有版本化 tag，无法像内核二进制一样 pin URL；刷新快照需手动执行
+  `scripts/fetch-bundled-mihomo-geodata.sh` 后 `git add` 提交。
+
+- 这些二进制**不入 git**（`.gitignore` 排除 `resources/bin/**/sing-box*`、`xray*`、`mihomo*`、`*.dat`、`wintun.dll`、`mihomo-geodata/`、`libcronet.*`、`resources/rule-sets/*.srs`），本地缺失属正常；
+  唯独 `src-tauri/resources/geodata/mihomo/`（country.mmdb + geosite.dat 快照）**入 git**，不在排除列表内
 - 图标再生成：`python scripts/generate-icons.py`（依赖 Pillow，产出应用图标 + 8 种托盘图标）
 
 ## 2. 项目是什么
@@ -174,19 +189,20 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.1 入口与生命周期
 
-- `lib.rs` — `run()`：便携模式预检（`portable::patch_context`，见 §9.19）→ 插件注册（opener/dialog/deep-link/single-instance）→ setup（便携时先重建主窗口；加载 store 失败则弹窗退出）→ 托盘 → 启动 6 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
+- `lib.rs` — `run()`：便携模式预检（`portable::patch_context`，见 §9.19）→ 插件注册（opener/dialog/deep-link/single-instance）→ setup（便携时先重建主窗口；加载 store 失败则弹窗退出）→ 托盘 → 启动 7 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
 - 后台任务（均在 setup 中 spawn）：
-  - `conn_journal.rs` — 轮询/WS 订阅 Clash 连接快照（UI 可见时 100ms，托盘时降频），维护活跃+历史连接环形日志
+  - `conn_journal.rs` — 轮询/WS 订阅 Clash 连接快照，维护活跃+历史连接环形日志。**三档变速（2026-09）**：`interval_for(可见, 需求, 帧大小)` 纯函数——UI 可见**且** 4s 内有连接数据命令心跳（`AppState::note_conn_query`，由 `live_connection_*`/`request_views` 入口记录）才 100ms，否则 1s；单帧 >1500 / >4000 连接（`last_snapshot_connections` 原子量）时 TUN 退避至 250/1000ms（mihomo ticker 对 interval≤0 会 panic，下限恒 ≥100ms）；变速重评估 2s 节流（interval 烧进 WS URL，变更=重连，防边界抖动刷socket）。ingest 每连接历史 key 只构建一次（`live_connection_keys` 与 `live_connections` 平行缓存）
+  - `log_listener.rs` — 内核日志流（**仅 mihomo**）：订阅 Clash API `/logs` WS（warning 级，健康时零流量），解析 `logMetadataErr` 拨号失败行 `[TCP|UDP] dial <proxy> (match …) <src> --> <dst> error: …` → `Runtime::record_proxy_dial_failure`（有界环形，120s/512 条）并入 `passive_node_stats`。**为何 mihomo 独有**：mihomo 的连接 tracker 在拨号成功后才创建，拨号失败的连接从不进 `/connections`（连接日志对「节点 TCP 不通」全盲）；sing-box 在拨号前就挂进连接表，journal 已能看到（失败=零字节短命关闭，`request_looks_failed` 启发式：≤3s 快死 或 ≤15s 双向零字节=拨号超时带，2026-09）。归因：`proxy` 组→当前节点 tag、`node-*` 直存、DIRECT/REJECT/smart 池忽略
   - `subscription_auto.rs` — 按 `auto_update` 间隔定时刷新订阅（默认 1440 分钟）
   - `remote_rule_auto.rs` — 应用侧下载远程规则集缓存到本地，sing-box 只加载本地文件
-  - `smart_switch.rs` — 智能选路：被动连接日志感知劣化 → 按需探测 top-K 候选 → 评分+容差+冷却。候选排序用 `probe_nodes_ranked`（TCP-capable 节点=TCP ping 直连，QUIC-only 协议=内核 URL 探测兜底）；**当前节点健康确认仍走内核 URL 探测**（防「TCP 活但代理死」被误判健康），排序对比值也取 ranked 结果保证同口径（URL-vs-TCP 对比会虚高当前节点数值导致来回切）
+  - `smart_switch.rs` — 智能选路：被动劣化感知（sing-box=连接日志零字节关闭，mihomo=内核日志拨号失败，见 `log_listener`/`request_looks_failed`）→ 按需探测 top-K 候选 → 评分+容差+冷却。候选排序用 `probe_nodes_ranked`（TCP-capable 节点=TCP ping 直连，QUIC-only 协议=内核 URL 探测兜底）；**当前节点健康确认仍走内核 URL 探测**（防「TCP 活但代理死」被误判健康），排序对比值也取 ranked 结果保证同口径（URL-vs-TCP 对比会虚高当前节点数值导致来回切）。候选 fail-rate 评级走 `Runtime::passive_stats_for_tags` **单趟扫描**（O(历史+节点数)；逐节点全扫是 O(节点数×3000)，千节点订阅不可接受，2026-09）
   - `rule_apply.rs` — 规则变更的 500ms 防抖合并 + 全局串行 apply-and-restart
-  - `state.rs::spawn_core_watchdog` — 内核看门狗：running→error 意外退出（非用户停止）经 `rule_apply::request_restart` 自动重启，10 分钟滚动窗口内最多 3 次防配置错误死循环；决策逻辑 `watchdog_should_restart` 纯函数有单测（背景：曾有机静默 exit(1) 的实战事故）。**同时独立盯 Xray 副进程**（`poll_sidecar`，独立边沿/预算跟踪；仅主核运行时才触发整体重启）
+  - `state.rs::spawn_core_watchdog` — 内核看门狗：running→error 意外退出（非用户停止）经 `rule_apply::request_forced_restart` **真重启**（`restart_after_unexpected_exit`，仅缓存态=Error 的死核可复活；用户主动停止落在 Stopped 永不自动拉起），10 分钟滚动窗口内最多 3 次防配置错误死循环；决策逻辑 `watchdog_should_restart`/`should_revive_dead_core` 纯函数有单测（背景：曾有机静默 exit(1) 的实战事故；**注意普通 `request_restart` 路径对死核是空转**——`restart_if_running` 要求核心在运行，watchdog 必须走 forced 入口）。每次轮询还把 running/状态/副进程的**任何变化边沿** emit 为 `core-status-changed` 事件（payload `{running, core_state, sidecar_running}`），前端收到即 `refreshProxyStatus()`，消除隐藏窗口/锁忙/captureBusy 跳过轮询时的状态盲区。**同时独立盯 Xray 副进程**（`poll_sidecar`，独立边沿/预算跟踪；仅主核运行时才触发整体重启）
 - `main.rs` — 仅调 `run()`。
 
 ### 5.2 状态与存储
 
-- `state.rs` — `AppState`（managed state，`Mutex<AppStore>` + runtime 句柄 + pending 深链 URL + UI 可见标志）。几乎所有 command 走 `state.with_store(...)` / `with_store_mut(...)`。
+- `state.rs` — `AppState`（managed state，`Mutex<AppStore>` + runtime 句柄 + pending 深链 URL + UI 可见标志）。几乎所有 command 走 `state.with_store(...)` / `with_store_mut(...)`。`start_proxy` 失败时会把 `status_cache` 写成 Error+错误文本（`mark_cached_core_error`），失败启动不再在缓存里停留 Starting。
 - `storage/store.rs` — `AppStore`（serde JSON）：`subscriptions`、`nodes`（StoredNode）、`settings`、`dns`、`rule_sets`、`node_aliases` + 4 组 `retained_*`（**解析不了的新 schema 数据写回而非丢弃**）。含 `store.backup.json` 备份、损坏快照保留、schema 迁移（如 capture_mode/auto_select 迁移）。
 - 磁盘布局（`app_data_dir`）：
   - `store.json` — 主存储；`store.backup.json` — 备份
@@ -203,14 +219,14 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | `domain/node.rs` | `Protocol`（SS/VMess/VLESS/Trojan/Hysteria2/TUIC/AnyTLS/SOCKS5…）、`ProtocolConfig`、`TlsConfig`、`Transport`、`ProxyNode`、`ParseResult`、`ManualNodeDraft`（表单模型） |
 | `domain/settings.rs` | `AppSettings`（~40 字段：端口/TUN/capture_mode/outbound_mode/auto_select/locale/theme/accent/hero_style/tray_icon…）、`OutboundMode`、`CaptureMode`、`AutoSelectMode`、`ExtraInbound`、`RuntimeSource` |
 | `domain/rule.rs` | `Rule`、`RuleSet`（本地/远程/内置，ownership/strategy/dns_strategy；strategy 6 值 proxy/direct/block/node/filter/smart，node=整组指定节点、filter=整组关键词过滤池，参数存集级 node_id/smart_include 等字段）、`RuleType`、`RuleTarget`、`BUILTIN_REMOTE_RULE_SETS`（3 条内置远程规则，需与 `scripts/fetch-bundled-rule-sets.sh` 同步） |
-| `domain/dns.rs` | `DnsSettings`、`DnsRule`、`DnsAction`、FakeIP、Hosts 配置 |
+| `domain/dns.rs` | `DnsSettings`（含 `dns_final` 兜底与 `remote_dns` 用户远程 DoH 池，`effective_remote_pool()` 为生效池唯一入口）、`DnsRule`、`DnsAction`、FakeIP、Hosts 配置 |
 | `domain/subscription.rs` | `Subscription`、`SubscriptionSource`（url/file/text/node/singbox）、`SubscriptionView` |
 
 ### 5.4 配置生成（config/）★ 三套独立生成器共享 domain 模型
 
 - `builder.rs` — ★ sing-box 生成器：`ProxyNode[] + AppSettings + RuleSets + DnsSettings → sing-box JSON`（`BuildOptions`，含 pools/chains/**sidecar**）。inbounds（mixed/Clash API/多监听/TUN）、outbounds（含 urltest/手动选择 selector）、route 规则编译都在这里。节点池 → selector（空池跳过）；代理链 → detour 链（**规则指向末跳=出口，hop[i≥1].detour=hop[i-1]，hop0 由客户端直拨**——方向弄反会导致 [美→港] 链显示美国 IP；正向发射满足先定义后引用；**i≥1 的池跳**必须展开为逐成员克隆 + 链内 selector——共享 selector 的成员无法表达"经前一跳拨出"；**i=0 池跳**复用共享 selector 即正确，客户端直拨）。链路诊断专用出口（**仅存在 ≥1 条可解析链路时**生成）：回环 mixed 入口 `diag-in`（**127.0.0.1:26486**，`DIAG_INBOUND_PORT`）+ `chain-diag` selector（成员=各链出口 tag+direct）+ 置于 sniff 后、用户规则前的 `inbound` 路由规则——`diagnose_chain` 经 Clash API 热切该 selector 后从诊断入口抓 ip.sb，实现**零规则、零重启**的真实出口验证；端口冲突会让内核启动失败并报 26486。`BuildOptions.sidecar: Option<SidecarPlan>`（Xray 副进程委托，§9.20）：命中计划的节点**保留原 tag**（`node-<id16>`）但改发 `type:"socks"` 出站指向 `127.0.0.1:<副端口>`——selector 成员/规则钉定/smart 池/Clash 热切/delay 测速全部零改动照常工作。
 - `xray.rs` — ★ Xray 生成器（参照 v2rayN `CoreConfig/V2ray/*`）：mixed/tun inbounds + sniffing、vmess/vless(flow)/ss/trojan/socks/http/wireguard outbounds + streamSettings（tls/reality + ws/grpc/http/httpupgrade）、routing（`full:`/`domain:`/关键词/geosite:/geoip:/process 映射、balancer+observatory=kernel 自动选路）、DNS 出口分流（远程 DoH 经主出站，dns-module/direct-dns inboundTag 规则；非 final 池 `skipFallback` 仅作分类，见 §18②）、stats/metrics（`/debug/vars`）。无 selector 出站——主目标=选中节点 tag 或 balancer，**切节点即重启**。REALITY 仅支持 tcp/grpc 传输（ws 组合在生成期报错跳过）。用户自建远程 `.srs` 集**跳过**（Xray 不识别），内置 3 条映射为 geosite/geoip。`skip-cert-verify` 节点不输出 `allowInsecure`（Xray ≥ 26 已移除该字段，输出会导致整个配置加载失败），证书校验保持开启并记录告警。另有 `build_xray_sidecar_config`：**Xray 副进程最小配置**（§9.20）——每委托节点一个 `127.0.0.1:port` mixed 入站（tag `in-sc-<port>`）+ 该节点常规出站（tag 同主配置 `node-<id16>`）+ 1:1 `inboundTag→outboundTag` 路由 + final 兜底；**无** Clash API/TUN/DNS 模块/metrics/geodata 引用（因此启动不需要 geosite.dat/geoip.dat）。
-- `mihomo.rs` — ★ mihomo 生成器（Clash YAML，`serde_yaml::Mapping` 保序；字段名以自家 `subscription/clash.rs` 解析器为逆向权威）：ss(+obfs/v2ray-plugin)/vmess(全传输)/vless(REALITY+Vision，uTLS 完整)/trojan/hysteria(2)/tuic/wireguard/anytls/snell/socks5/http/ssh。主组 `proxy`（select，选中节点排首位；kernel 模式=全节点 url-test）保持 sing-box 的 Clash API 契约（热切 `PUT /proxies/proxy`）；filter 池与 smart 池均为 select 组、标签 `smart-<id16>`（应用侧智能切换 PUT 维护）；内置 3 条映射 `GEOSITE,cn`/`GEOIP,cn`/`GEOSITE,geolocation-!cn`；bypass_lan 用显式私有 CIDR；block_quic 用 AND 逻辑规则；DNS 池取自 `domain/dns.rs` 共享常量（`nameserver`=dns_final 池、**不写 `fallback`**，见 §18②）+ nameserver-policy(+.suffix/geosite:cn)+hosts+fake-ip（TUN 强制）+ `proxy-server-nameserver`；`find-process-mode` 接 AppSettings.find_process（strict/off）；extra_inbounds 走 `listeners`。仅 Naive/Tor/独立 ShadowTls 协议与 ss+shadow-tls 组合被过滤。用户自建 `.srs` 集跳过。
+- `mihomo.rs` — ★ mihomo 生成器（Clash YAML，`serde_yaml::Mapping` 保序；字段名以自家 `subscription/clash.rs` 解析器为逆向权威）：ss(+obfs/v2ray-plugin)/vmess(全传输)/vless(REALITY+Vision，uTLS 完整)/trojan/hysteria(2)/tuic/wireguard/anytls/snell/socks5/http/ssh。主组 `proxy`（select，选中节点排首位；kernel 模式=全节点 url-test）保持 sing-box 的 Clash API 契约（热切 `PUT /proxies/proxy`）；filter 池与 smart 池均为 select 组、标签 `smart-<id16>`（应用侧智能切换 PUT 维护）；内置 3 条映射 `GEOSITE,cn`/`GEOIP,cn`/`GEOSITE,geolocation-!cn`；bypass_lan 用显式私有 CIDR；block_quic 用 AND 逻辑规则；DNS 池取自 `domain/dns.rs`（远程池经 `effective_remote_pool()` 可被用户自定义覆盖，见 §18①；`nameserver`=dns_final 池、**不写 `fallback`**，见 §18②）+ nameserver-policy(+.suffix/geosite:cn)+hosts+fake-ip（TUN 强制）+ `proxy-server-nameserver`；`find-process-mode` 接 AppSettings.find_process（strict/off）；extra_inbounds 走 `listeners`。仅 Naive/Tor/独立 ShadowTls 协议与 ss+shadow-tls 组合被过滤。用户自建 `.srs` 集跳过。
 - `dns_build.rs` — sing-box 1.12+ `dns` 对象：解析器池（取 `domain/dns.rs` 共享池常量；sing-box 单 tag 无竞速，**两池均只发 pool[0]**，见 §18①）、统一规则集选解析器、Hosts predefined server、FakeIP。
 - `write.rs` — 原子写 `active.json`（JSON 系两内核共用同一文件）与 `active.yaml`（mihomo）；`xray-sidecar.json`（Xray 副进程配置，tmp+rename 无备份）；custom 配置原样持久化。
 - `rule_files.rs` / `dns_files.rs` — 规则/DNS 落盘为 sing-box 引用的文件。
@@ -219,24 +235,25 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.5 内核管理（core/）— 三内核（sing-box / Xray / mihomo）
 
-- `kind.rs` — ★ `CoreKind` 描述符：binary 名、GitHub repo、release 资产命名（**三内核命名规则不同**：sing-box `sing-box-1.13.15-darwin-arm64.tar.gz` vs Xray `Xray-macos-arm64-v8a.zip` vs mihomo `mihomo-darwin-arm64-v1.19.30.gz` 裸 gz 二进制（darwin/linux）/）、版本参数与输出解析（mihomo `-v` → `Mihomo Meta vx.y.z …`）、`check_command_args`/`run_command_args` 完整参数构造（sing-box/Xray `run -c`；mihomo `-f <file> -d <home>`，home 从 config 路径推导）、spawn env（Xray 设 `XRAY_LOCATION_ASSET`；mihomo 无需 env，wintun.dll 放 exe 同目录）、日志前缀、协议支持集（`Protocol::xray_supported`/`mihomo_supported`）。
+- `kind.rs` — ★ `CoreKind` 描述符：binary 名、GitHub repo、release 资产命名（**三内核命名规则不同**：sing-box `sing-box-1.13.15-darwin-arm64.tar.gz` vs Xray `Xray-macos-arm64-v8a.zip` vs mihomo `mihomo-darwin-arm64-v1.19.30.gz` 裸 gz 二进制（darwin/linux）；**mihomo 的 amd64 资产一律加 `-compatible` 中缀**（GOAMD64=v1），见 §9.17⑦）、版本参数与输出解析（mihomo `-v` → `Mihomo Meta vx.y.z …`）、`check_command_args`/`run_command_args` 完整参数构造（sing-box/Xray `run -c`；mihomo `-f <file> -d <home>`，home 从 config 路径推导）、spawn env（Xray 设 `XRAY_LOCATION_ASSET`；mihomo 无需 env，wintun.dll 放 exe 同目录）、日志前缀、协议支持集（`Protocol::xray_supported`/`mihomo_supported`）。
 - `manager.rs` — 进程生命周期（`CoreKind` 参数化）：sing-box `check -c` / Xray `run -test -c` / mihomo `-t -f` 校验 → 启动；**Xray + TUN 跳过预校验**（Xray 的 `-test` 会真建 tun 网卡需管理员，未提权必失败 exit 23；mihomo 的 `-t` 不建网卡可正常预校验）；Windows `CREATE_NO_WINDOW`；CoreState 状态机；优雅停止；TUN 提权链路内核无关（helper 按二进制名推断 kind）。
-- `download.rs` — GitHub Releases 下载/更新（按 kind 选 repo/资产/提取目标；Xray zip 额外提取 geodata；mihomo zip 仅含版本化 exe）。
-- `assets.rs` — Xray 资产：`ensure_geodata`（staged→bundled→Loyalsoldier v2ray-rules-dat 下载）、`ensure_wintun`；mihomo 资产：`ensure_mihomo_geodata`（`<data>/mihomo/` 的 Country.mmdb + **GeoSite.dat**（精确大小写）；staged→bundled→MetaCubeX/meta-rules-dat 下载——缺失时 mihomo 会经未启动的代理自下载而超时，故必须预置）。`prefetch_runtime_assets(kind,…)` 在**内核下载/更新完成后**即时预取该内核的运行时依赖（Xray→geodata、mihomo→geodata、两者 Windows→wintun；走下载代理，失败仅 warn），启动时的 `ensure_*` 降级为兜底（§9.22）。
+- `download.rs` — GitHub Releases 下载/更新（按 kind 选 repo/资产/提取目标；Xray zip 额外提取 geodata；sing-box Windows zip 额外提取 `libcronet.dll`；mihomo zip 仅含版本化 exe）。
+- `assets.rs` — Xray 资产：`ensure_geodata`（staged→bundled→Loyalsoldier v2ray-rules-dat 下载）、`ensure_wintun`；mihomo 资产：`ensure_mihomo_geodata`（`<data>/mihomo/` 的 Country.mmdb + **GeoSite.dat**（精确大小写）；staged→bundled→MetaCubeX/meta-rules-dat 下载——缺失时 mihomo 会经未启动的代理自下载而超时，故必须预置）；Windows sing-box：`ensure_libcronet` 启动兜底（**naive 出站运行期从 exe 目录动态加载 Cronet，DLL 缺失则含 naive 节点的配置启动即 FATAL**——新装由 staging/zip 提取落位，存量 bin 已有二进制不再走 stage，由此补齐；两处 sing-box 启动路径均调用）。`prefetch_runtime_assets(kind,…)` 在**内核下载/更新完成后**即时预取该内核的运行时依赖（Xray→geodata、mihomo→geodata、两者 Windows→wintun；走下载代理，失败仅 warn），启动时的 `ensure_*` 降级为兜底（§9.22）。
 - `job.rs` — Windows Job Object 绑定子进程，父进程异常退出时内核随之死亡（防端口占用残留）。
 - `elevate.rs` / `macos_auth.rs` / `macos_net.rs` — TUN 提权（Windows UAC / macOS 授权）。
 - `memory.rs` — 内存占用探测（Windows 用 NT 进程表 RSS）。
-- `paths.rs` — 内核二进制/版本文件路径解析（resource 目录 → data 目录 staging；bundled 布局三内核共用 sing-box 式平台目录名，release 资产名才按 kind 区分）。sing-box 保持 `bin/sing-box`+`version.txt` 存量布局；Xray 用 `bin/xray`+`xray-version.txt`；mihomo 用 `bin/mihomo`+`mihomo-version.txt`，home 目录 `mihomo_home_dir` = `<data>/mihomo`。
+- `paths.rs` — 内核二进制/版本文件路径解析（resource 目录 → data 目录 staging；bundled 布局三内核共用 sing-box 式平台目录名，release 资产名才按 kind 区分；Windows staged sing-box 同步落位 `libcronet.dll`，见 `assets.rs` 条目的 naive 说明）。sing-box 保持 `bin/sing-box`+`version.txt` 存量布局；Xray 用 `bin/xray`+`xray-version.txt`；mihomo 用 `bin/mihomo`+`mihomo-version.txt`，home 目录 `mihomo_home_dir` = `<data>/mihomo`。
 
 ### 5.6 运行时编排与外部 API
 
-- `runtime.rs` — `Runtime`/`ProxyStatus`（含 `core_type`/`sidecar_running`）：按 `settings.core_type` 分支 config 生成 → 写盘 → core 启停 → 系统代理联动；连接视图缓存与 delta（`LiveConnectionBatch` revision 机制）。Xray 分支 `start_xray_proxy`：ensure geodata/wintun → `build_xray_config` → 就绪=进程存活+mixed port，`xray_metrics` 替代 clash_api。mihomo 分支 `start_mihomo_proxy`：ensure mihomo geodata → `build_mihomo_config` → 写 active.yaml → 与 sing-box 同款 ClashApi health 等待（`self.api` 即 clash_api，conn_journal/热切/智能切换全复用）。`build_options()` 为三生成器共享的 BuildOptions 构造器。sing-box 分支支持 **Xray 副进程**（§9.20）：`compute_sidecar_plan`（settings+chains+nodes → 委托计划，commands 预览同款复用）→ 主核 health OK 后 `start_xray_sidecar` 写 `xray-sidecar.json` 并经 `Runtime.sidecar`（第二个 `CoreManager` 实例，结构体无静态状态可直接并存）拉起；停/重启/退出先停副进程，主核启动失败或副进程启动失败均整体回滚。
-- `api/clash_api.rs` — Clash 兼容 API 客户端（sing-box 与 mihomo 模式共用；热切需 `Content-Type: application/json`，`send_json` 已带）。**HTTP 用 ureq（非 reqwest::blocking，避免嵌套 Tokio runtime panic，见文件头注释）；WS 用 tungstenite 仅握手**。
+- `runtime.rs` — `Runtime`/`ProxyStatus`（含 `core_type`/`sidecar_running`）：按 `settings.core_type` 分支 config 生成 → 写盘 → core 启停 → 系统代理联动；连接视图缓存与 delta（`LiveConnectionBatch` revision 机制）。**启动就绪判定必须实测端口**（2026-08）：sing-box/mihomo health 等待成功条件 = Clash API `/version` 应答 **且** `dial_mixed_ok()`（mixed 端口 TCP 拨号实测，`readiness_failure_detail` 区分「API 未应答」与「API 活但入站未监听」两种失败）；sing-box 两路径（生成/custom）统一走 `wait_clash_api_ready`（TUN 基础 12s / 非 TUN 6s；检测到 sing-tun 慢网卡 WARN `open interface take too much time to finish!` 且进程存活时证据驱动延长至 45s 硬上限——clash_api 排在 tun inbound 之后启动，wintun 网卡慢时 10s 处掐核属于误杀，且杀/重启反复churn网卡更慢，2026-08 实战事故；失败时经 `map_slow_tun_start_hint` 在含日志尾的完整错误上追加 wintun 冲突指引），mihomo 仍为内联 TUN 10s / 非 TUN 6s；Xray 就绪窗口同为 6/10s、成功条件 = 进程存活 **且** mixed 拨号成功（metrics 命中仅 best-effort warn，不作为就绪条件）；custom 配置路径不拨号（入站形状任意）。失败信息统一附 `core_startup_log_hint` 日志尾并过 `map_tun_permission_hint`（`manager.rs`，pub(crate)）。Xray 分支 `start_xray_proxy`：ensure geodata/wintun → `build_xray_config` → 按上述端口拨号判定就绪，`xray_metrics` 替代 clash_api。mihomo 分支 `start_mihomo_proxy`：ensure mihomo geodata → `build_mihomo_config` → 写 active.yaml → 与 sing-box 同款「ClashApi health + mixed 拨号」等待（`self.api` 即 clash_api，conn_journal/热切/智能切换全复用）。`build_options()` 为三生成器共享的 BuildOptions 构造器。sing-box 分支支持 **Xray 副进程**（§9.20）：`compute_sidecar_plan`（settings+chains+nodes → 委托计划，commands 预览同款复用）→ 主核 health OK 后 `start_xray_sidecar` 写 `xray-sidecar.json` 并经 `Runtime.sidecar`（第二个 `CoreManager` 实例，结构体无静态状态可直接并存）拉起；停/重启/退出先停副进程，主核启动失败或副进程启动失败均整体回滚。
+- `api/clash_api.rs` — Clash 兼容 API 客户端（sing-box 与 mihomo 模式共用；热切需 `Content-Type: application/json`，`send_json` 已带）。**HTTP 用 ureq（非 reqwest::blocking，避免嵌套 Tokio runtime panic，见文件头注释）；WS 用 tungstenite 仅握手**。WS URL 构造：`connections_ws_url(interval)`（连接快照流）与 `logs_ws_url(level)`（内核日志流，log_listener 用）。
 - `api/xray_metrics.rs` — Xray 模式 metrics 客户端：轮询 `/debug/vars` 汇总 `stats.outbound[*].uplink/downlink` → TrafficTotals（connections 恒 0；无逐连接 API）。
 - `state.rs` `select_current_node_serialized` — sing-box/mihomo 走 clash select_proxy 热切换（组名 `proxy`）；Xray 无 API → 持久化后返回 restart_needed，由 `rule_apply::request_restart` 重启生效；不支持的节点形状直接报错。
-- `services/latency.rs` — 测速：TCP 协议直连 server:port（内核无关）；UDP 系协议（hysteria2/tuic）走 Clash delay API（sing-box/mihomo 有此 API；Xray 模式下此类节点本就不被支持）。
+- `services/latency.rs` — 测速：TCP 协议直连 server:port（内核无关）；UDP 系协议（hysteria2/tuic）走 Clash delay API（sing-box/mihomo 有此 API；Xray 模式下此类节点本就不被支持）。批量探测按输入顺序起测（并发槽空出即从前向后补位）；`probe_nodes_streaming`/`ping_nodes_streaming` 带 `on_result` 回调，每个探测完成即刻回调（commands/latency.rs 据此经 Tauri `Channel<LatencyResult>` 逐节点推给前端）。探测共享结果缓存（成功 30s / 失败 15s，per-key 在途合并；**这也是 smart_switch 后台排序/健康探测读的缓存**）；手动触发的三个测速 command 一律 `use_cache=false`——不读缓存每次真测，结果仍写回缓存供后台复用（2026-08）。
 - `services/import.rs` — 订阅 URL 去重键、导入文件读取。
 - `services/dns_diag.rs` — ★ 内核级 DNS 诊断（DNS 页「诊断」，command `diagnose_dns`）：双层设计——① 实时查询：sing-box/mihomo 经 `ClashApi::dns_query`（`GET /dns/query?name=&type=A`，sing-box 走完整 DNS 规则链、两内核响应同构且都不返回上游 server）；② 路径推演：`DnsPathAnalyzer` 在应用侧复刻三生成器的决策链（规则集 stored order → Hosts → DNS 页规则 → FakeIP → dns_final，含 §18 分歧点：mihomo 关键词回落 nameserver、Block 集仅 sing-box 拒绝 DNS、xray/mihomo 跳过用户 .srs、内置 geosite 集按本地 .srs 缓存近似判定 approx）。远程集匹配复用 `srs.rs`/source JSON，缓存路径校验同 `list_remote_rule_items`。Xray 无 DNS API → 仅路径推演 + query_note 说明。
+- `services/exit_ip.rs` — 出口 IP 探测（首页「网络探测」卡，command `check_exit_ip`，2026-08）：4 个公共 IP API（api.ip.sb/geoip、ipwho.is、ip-api.com、api.myip.com）`spawn_blocking` 并发竞速、mpsc 收首个成功，其余靠 ureq 超时（connect 5s/总 9s）自行收敛，整体 12s 兜底；浏览器 UA（ip.sb 会 403 裸客户端）。`via_proxy=true` 时 agent 挂 `ureq::Proxy` 指向 `127.0.0.1:<mixed_port>`（三内核的 mixed 入站都支持 HTTP 代理语义，请求按用户规则出站→答案即当前出口）；内核未运行或 `outbound_mode=direct` 时直连探测（返回本机公网 IP）。解析器归一化各源 JSON 字段差异（`parse_source` 有单测）。前端 `DashboardPage` 点击卡片同时刷新延迟+出口 IP，并在 statusReady 后按 `running:nodeId` 键变化（内核启停边沿/节点切换）自动重探，版本号防过期结果覆盖。
 - `srs.rs` — `.srs` 二进制规则集结构解析（LOUDS trie），供列表/计数/校验（`list_remote_rule_items` 的后端；固定用 sing-box 二进制 decompile）。
 - `smart_switch.rs` / `rule_apply.rs` / `remote_rule_auto.rs` / `builtin_remote_rules.rs` — 见 5.1。smart_switch 在 Xray 模式禁用（依赖连接日志；mihomo 有连接日志不受限）。
 - `conn_journal.rs` — 连接日志（活跃快照 + 已关闭请求历史 + 失败请求），`list_connections/list_connection_changes/list_requests/list_request_failures` 的数据源；Xray 模式降级为 metrics 轮询（仅流量）；mihomo 模式与 sing-box 同款全量。
@@ -253,7 +270,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.8 commands/ 分层（前端 invoke 的直接实现）
 
-`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat）、`chain.rs`（节点池/链路 CRUD + `list_chain_usage` 规则集引用计数 + `diagnose_chain` 逐跳诊断（单跳/链前缀探测，仅 sing-box、经 Clash delay API），编辑走防抖重启同 rules）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`、`dns.rs`（DNS+hosts 设置 CRUD、`diagnose_dns` 内核级 DNS 诊断→services/dns_diag）、`latency.rs`、`logs.rs`（`list/clear_app_logs` + `get_core_log_tail(limit, kind)`——按 kind 读对应内核的 `logs/<prefix>-<hour>.log`，多核模式主核/副进程分开，`Runtime::core_log_tail_for`）、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
+`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat/`reset_core_to_bundled` 内核恢复出厂——删除用户下载的 `bin/` 副本回落 bundled（运行中被锁则按下载同款 `.previous` 改名让路），下次启动自动重新 stage，仅当重置的 kind 恰为运行中主核时才触发重启；无 bundled 副本时（默认安装仅打包 sing-box）前端改走 `download_core(kind, CoreKind::fallback_version())` 联网拉取出厂版本并按需重启，该版本经 `CoreInfo.factory_version` 暴露）、`chain.rs`（节点池/链路 CRUD + `list_chain_usage` 规则集引用计数 + `diagnose_chain` 逐跳诊断（单跳/链前缀探测，仅 sing-box、经 Clash delay API），编辑走防抖重启同 rules）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`（`diagnose_network` 检测、`check_exit_ip` 出口 IP 竞速探测→services/exit_ip）、`dns.rs`（DNS+hosts 设置 CRUD、`diagnose_dns` 内核级 DNS 诊断→services/dns_diag）、`latency.rs`、`logs.rs`（`list/clear_app_logs` + `get_core_log_tail(limit, kind)`——按 kind 读对应内核的 `logs/<prefix>-<hour>.log`，多核模式主核/副进程分开，`Runtime::core_log_tail_for`）、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
 
 ## 6. 前端模块详解（src/）
 
@@ -270,16 +287,16 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
   - `updateSettings` 是 **60ms 批量合并写入器**；
   - `peekSettings/peekProxyStatus + keepSettings/keepProxy` 模块级快照，供页面重挂载时种子状态防闪默认值；
   - 生命周期类调用（start/stop/restart/capture/outbound）包 `trackCoreBusy()` 驱动导航栏 spinner。
-- Tauri 事件消费：`config-apply-status`（App.tsx）、`deep-link-urls`（ImportIntentContext）、`core-download-progress`（SettingsPage）、`remote-rule-set-status` 与 `rule-set-apply-status`（RulesPage）。
+- Tauri 事件消费：`config-apply-status`（App.tsx）、`core-status-changed`（App.tsx → `refreshProxyStatus()`；watchdog 发出的生命周期边沿推送，Dashboard/SimpleConnect/TopNav 经 `api.ts::onProxySnapshot` 订阅快照即时重绘）、`deep-link-urls`（ImportIntentContext）、`core-download-progress`（SettingsPage）、`remote-rule-set-status` 与 `rule-set-apply-status`（RulesPage）。
 - `types.ts` — 与 Rust `domain/*` 对应的手写类型（注意 `ProxyStatus`、`AppSettings`、`ManualNodeDraft` 46 字段等需两边同步）。
 
 ### 6.3 页面（pages/）
 
 | 页面 | 要点 |
 |---|---|
-| `DashboardPage` (1399 行) | 启停/重启、capture/出站模式快控、节点选择、配置预览弹窗（按内核显示 JSON/YAML）、60 样本迷你图、LAN IP、版本（并行三内核 info）；hero ⋯ 指定内核子菜单（三选项） |
+| `DashboardPage` (1399 行) | 启停/重启、capture/出站模式快控、节点选择、配置预览弹窗（按内核显示 JSON/YAML）、60 样本迷你图、LAN IP、版本（并行三内核 info）；「网络探测」卡（点击=刷新当前节点延迟+出口 IP 竞速探测，`running:nodeId` 边沿自动重探，见 §5.6 `services/exit_ip.rs`）；hero ⋯ 指定内核子菜单（三选项） |
 | `ConfigPage` (831) | 订阅卡片（流量配额条）、排他选择/Mix、`AddConfigModal`、深链预填（`useImportIntent`） |
-| `NodesPage` (464) | 列表/网格（`useVirtualRange`×2）、搜索排序测速、改名、custom 配置节点；切节点 `waitForCoreRestart` |
+| `NodesPage` (464) | 列表/网格（`useVirtualRange`×2）、搜索排序测速（批量测速按当前排序下发 ids，后端逐节点流式回传、rAF 合帧就地刷新，见 §7 改测速）、改名、custom 配置节点；切节点 `waitForCoreRestart` |
 | `TrafficPage` (~70) | 三 tab 容器：实时连接 / 请求历史 / 失败请求；Xray 模式下三 tab 降级为空态，页首提示改指向「日志 → 内核日志」（原内嵌日志视图已移除，避免与 LogsPage 重复） |
 | `ConnectionsPage` (215) | 1.5s revision-delta 增量轮询（`list_connection_changes` + `applyConnectionChanges`） |
 | `RequestsPage` (258) / `FailuresPage` (510) | 已关闭请求/失败请求日志；Failures 可一键生成封锁规则集 |
@@ -287,7 +304,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | `SettingsPage` (1456) | 8 tab：app/ports/rules/chain/multiCore/dns/hosts/core；内嵌 Rules/Chain/多核模式/Dns/Hosts 页；三内核行（各自版本/下载/更新，进度事件按 kind 分流）、多核模式 tab（启停开关 + 协议→内核 table，§9.20）、更新检查、诊断、托盘图标选择、赞助二维码（`DecryptReveal`） |
 | `RulesPage` (2145) | ★ 最大页面：规则集侧栏+编辑器、本地/远程集、策略/DNS 策略、route.final、拖拽排序、远程规则项浏览；geodata 内核（Xray/mihomo）下内置 3 条显示为 geodata 卡（来源/文件按内核区分，更新走 `refresh_geodata(kind)`），自建 .srs 置灰；策略可指向 chain（`chain_id`） |
 | `ChainPage` (~1700) | 高密度管理列表，内嵌于 Settings：节点池=单容器紧凑行（名称+关键字+模式pill+计数+引用，行尾 `RowMenu` ⋮ 菜单，复用 rule-menu 范式），链卡=头行徽标（跳数/规则引用/⋮）+ 地铁线 stepper；链路编辑器为 xyflow（`@xyflow/react`）画布：侧栏候选拖入/点击追加（WKWebView 无 HTML5 DnD，用指针事件自实现）、`hopsFromGraph` 单线路径校验（连线时 `isValidConnection` 即时拦截分支/环/自环）、图序号徽标 + 实时有效性状态行、整理布局按钮；fitView 仅在打开已有链路且节点完成测量后执行一次（`useNodesInitialized`），否则画布会因未测量节点算出坏视口而看似空白、或投放后视口跳走 |
-| `DnsPage` (~560) / `HostsPage` (463) | DNS/Hosts 管理，通常内嵌于 Settings；通用卡四列（劫持/兜底/缓存/FakeIP，FakeIP 仅启用开关+⋯ 弹窗编辑池/IPv6/bypass）；诊断 = 规则列表风格表格（域名|策略|匹配|DNS 服务器|内核解析，一行一域名，`diagnoseDns` 支持全部诊断与行内单个诊断，自定义域名 localStorage 持久化 `satelite.dnsDiagDomains`，本地/国内路径标红 ⚠ 泄露风险，见 `services/dns_diag.rs`） |
+| `DnsPage` (~640) / `HostsPage` (463) | DNS/Hosts 管理，通常内嵌于 Settings；通用卡（劫持/兜底/缓存/FakeIP/远程加密 DNS——FakeIP 仅启用开关+⋯ 弹窗编辑池/IPv6/bypass，远程加密 DNS ⋯ 弹窗按行编辑 DoH 池，空=内置 1.1.1.1/8.8.8.8，见 §18①）；诊断 = 规则列表风格表格（域名|策略|匹配|DNS 服务器|内核解析，一行一域名，`diagnoseDns` 支持全部诊断与行内单个诊断，自定义域名 localStorage 持久化 `satelite.dnsDiagDomains`，本地/国内路径标红 ⚠ 泄露风险，见 `services/dns_diag.rs`） |
 
 ### 6.4 简洁模式（ui/simple/）
 
@@ -297,7 +314,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 - 设计系统：`GlassButton`、`GlassSeg`（区分用户点击与状态重绘才做动画）、`GlassSwitch(+Control)`、`SolidSelect`（**自绘下拉：macOS WKWebView 原生 select 无法主题化**，SolidSelect.tsx:26 注释）。
 - 首页视觉：`HeroVisual`（按 `heroStyle` 分发）→ `ParticleSphere`（three.js，lazy）/ `FaceMark`（Canvas2D 笑脸）/ 经典轨道。
-- 弹窗：`AddConfigModal`（url/file/paste/手动节点/sing-box 五种来源）、`EditLocalNodesModal`、`NodeDraftFields`（16 协议条件字段表单，与 `ManualNodeDraft` 对应）、`AccentColorPickerModal`（自定义主题色取色器；`theme/accents.ts` 支持 `#rrggbb` 自定义 accent，Rust `update_settings` 同步放行）、`DecryptReveal`。
+- 弹窗：`AddConfigModal`（url/file/paste/手动节点/sing-box 五种来源）、`EditLocalNodesModal`、`NodeDraftFields`（16 协议条件字段表单，与 `ManualNodeDraft` 对应）、`NodeDetailModal`（节点卡片 ⋮ 菜单「详情」只读弹窗：按协议渲染协议参数/TLS/传输层；数据来自 `list_all_nodes` 载荷里 serde-flatten 的完整 `ProxyNode`（`config/tls/transport`），前端 `types.ts` 已镜像为 `ProtocolConfig` tagged union，**纯前端无后端命令**）、`AccentColorPickerModal`（自定义主题色取色器；`theme/accents.ts` 支持 `#rrggbb` 自定义 accent，Rust `update_settings` 同步放行）、`DecryptReveal`。
 - hooks：
   - `useVisibleInterval` — **通用轮询原语**：页面隐藏暂停、回调不重叠、可见即重发；
   - `useVirtualRange` — 基于 `.main` 滚动容器的列表虚拟化（支持网格 itemsPerRow）；
@@ -308,7 +325,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 - `i18n/messages.ts` — `en`（630 键，`as const`）+ `zh: Record<MessageKey, string>`。**加文案必须两边同加，否则 TS 编译错**。键前缀：`common./nav./simple./dashboard./nodes./config./traffic./conn./logs./settings./rules./dns./hosts./failures.`；`translate()` 支持 `{n}` 插值。
 - `theme/` — `ThemeId = "day"(浅,Rust `default_theme` 默认) | "aerospace"(深)`；theme/uiMode/heroStyle 三者均镜像到 localStorage（`index.html` 内联脚本 + Provider 初始 `useState` 同步读取）防 WebView 重建首帧闪烁/误挂 three.js hero；`accents.ts` 6 个主题色，由一个基色派生整个 `--primary*` 变量族（Rec.709 亮度决定 `--on-primary`）。语义色 `--success*` 为固定绿（App.css tokens），**不随主题色**（ok/直连/测速良好语义稳定）；自定义 `#rrggbb` accent 在 `applyAccentToDom` 应用时按主题做亮度钳制（深色提亮 ≥0.5 / 浅色加深 ≤0.6）保证文字对比度，存储仍保留原始 hex。另有独立背景光晕色 `glow_color`（`"accent"`=跟随主题色 / 预设 id / `#rrggbb`），`applyGlowToDom` 下发 `--glow-rgb`（原始色，驱动 `--hero-glow`）与 `--glow-deep-rgb`（按感知亮度归一化的深色变体，驱动 app-shell 大气层，防止亮色光晕把暗色主题洗亮）。
-- 独立模块：`customNodes.ts`（custom 节点客户端侧过滤/排序/分页镜像）、`subscriptionUrl.ts`（URL 规范化去重）、`deepLink.ts`（深链解析→ImportPrefill）、`coreBusy.ts`（全局 busy 深度计数 + `waitForCoreRestart`）、`connectionChanges.ts`（delta 合并纯函数）、`trafficFilter.ts`（all/direct/proxy 分类）、`coreLog.ts`（内核原始日志行级别推断，LogsPage 内核日志视图使用）、`windowLayout.ts`（窗口尺寸/模式）。
+- 独立模块：`customNodes.ts`（custom 节点客户端侧过滤/排序/分页镜像）、`latencyStream.ts`（批量测速流式结果 rAF 合帧缓冲，Nodes/SimpleServers 共用）、`subscriptionUrl.ts`（URL 规范化去重）、`deepLink.ts`（深链解析→ImportPrefill）、`coreBusy.ts`（全局 busy 深度计数 + `waitForCoreRestart`）、`connectionChanges.ts`（delta 合并纯函数）、`trafficFilter.ts`（all/direct/proxy 分类）、`coreLog.ts`（内核原始日志行级别推断，LogsPage 内核日志视图使用）、`windowLayout.ts`（窗口尺寸/模式）。
 - `App.css` — 单文件 ~7.6k 行，按 `/* —— 段落 —— */` 横幅分节（tokens → shell → topnav → page → nodes → …）；玻璃材质 = 半透明 rgba + `backdrop-filter` + 左上光源 `::after`；专业窗口固定 960px 宽（网格断点据此调）。
 
 ## 7. 常见修改场景 → 去哪里改
@@ -328,18 +345,18 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | 加页面 | `src/pages/` + `App.tsx` lazy 导入 + `NavKey`（types.ts）+ `TopNav` + i18n `nav.*` |
 | 改样式 | `src/App.css` 对应段落；新主题色变体在 `theme/accents.ts` |
 | 加托盘功能 | `src-tauri/src/tray.rs` |
-| 改测速 | `services/latency.rs` + `src/api.ts`：节点页「测真实延迟」= `test_nodes_latency`（内核运行时走 Clash delay API 经真实代理链路，unified delay 双探测取第二次）；「Ping 测试」= `ping_nodes_latency`（纯 TCP 直连、并发 30、内核运行时也不经内核；QUIC-only 协议报 unsupported）；智能选路排序 = `probe_nodes_ranked`（TCP ping + QUIC-only 内核兜底，见 §5.1）。TCP 直连只反映可达性，会漏报 REALITY/Vision 这类「TCP 活但代理死」的节点——故当前节点健康确认仍用内核 URL 探测 |
+| 改测速 | `services/latency.rs` + `src/api.ts`：节点页「测真实延迟」= `test_nodes_latency`（内核运行时走 Clash delay API 经真实代理链路，unified delay 双探测取第二次）；「Ping 测试」= `ping_nodes_latency`（纯 TCP 直连、并发 30、内核运行时也不经内核；QUIC-only 协议报 unsupported）；智能选路排序 = `probe_nodes_ranked`（TCP ping + QUIC-only 内核兜底，见 §5.1）。TCP 直连只反映可达性，会漏报 REALITY/Vision 这类「TCP 活但代理死」的节点——故当前节点健康确认仍用内核 URL 探测。**三个批量测速 command 均带必填 `on_result: Channel<LatencyResult>`**（api.ts 用 `@tauri-apps/api/core` 的 `Channel` 封装，调用方没有回调也给静默 channel）：后端每个探测完成即推送，前端（NodesPage/SimpleServersPage）按 rAF 合帧逐节点就地刷新；前端 ids 经 `list_node_ids(query, sort_mode)` 按当前显示排序下发，后端 `load_nodes_in_display_order` 保持该顺序起测；手动测速一律不读缓存（`use_cache=false`，结果仍写回），共享探测缓存 TTL 成功 30s / 失败 15s（2026-08） |
 | 改内核下载/资产 | `core/download.rs` + `core/assets.rs` + `scripts/fetch-bundled-*-<平台>` 脚本 + `tauri.*.conf.json` resources 四处联动；给内核新增运行时依赖时记得挂进 `assets.rs::prefetch_runtime_assets`（下载后即时预取，§5.5/§9.22） |
 | 打 Windows 便携版 | `scripts/build-windows.ps1 -Bundle portable`（zip 组装逻辑在此脚本；Rust 侧便携行为集中在 `src-tauri/src/portable.rs`，见 §9.19） |
 | 重大架构 / 模块 / 流程变动 | **同步更新本文档对应章节**（规则见 §0） |
 
 ## 8. 构建细节与产物
 
-- **版本号**：`package.json`（1.0.9）是唯一真源，`tauri.conf.json` 引用它；`Cargo.toml`（1.0.4）落后且不自动同步——发版时手动检查三处。
+- **版本号**：`package.json`（1.0.24）是唯一真源，`tauri.conf.json` 引用它；`Cargo.toml`（1.0.4）落后且不自动同步——发版时手动检查三处。**打 tag / 发版前必须先把 `package.json` 的 `version` 改成与 tag 一致**（如 tag `v1.0.18` → `version: "1.0.18"`），否则 `tauri.conf.json` 引用的版本号不匹配会导致构建失败。
 - **产物路径**：DMG → `src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/`；Windows → `src-tauri/target/release/bundle/nsis/`（或 `.../msi/`）。
 - **Rust 测试布局**：集成测试 `src-tauri/tests/parse_subscription.rs`（fixtures 在 `tests/fixtures/`：clash yaml ×2、singbox json ×1）；`download_core_live.rs` 为 `#[ignore]` 真网测试；单测散落各文件 `#[cfg(test)]`。
 - **换行符**：`.gitattributes` 规定源码 eol=lf、`.ps1/.bat/.cmd` 为 CRLF。
-- **内核版本**：macOS 预取脚本默认 sing-box v1.13.18，Windows v1.13.15，两者独立演进，升级时分别改脚本；Xray 各平台统一 v26.3.27（`scripts/fetch-bundled-xray-*` + `core/kind.rs::fallback_version` 两处同步）；mihomo 各平台统一 v1.19.30（`scripts/fetch-bundled-mihomo-*` + `core/kind.rs::fallback_version` 两处同步）。
+- **内核版本**：sing-box 各平台统一 v1.13.18（`scripts/fetch-bundled-core-*` + `core/kind.rs::fallback_version` 两处同步）；Xray 各平台统一 v26.3.27（`scripts/fetch-bundled-xray-*` + `core/kind.rs::fallback_version` 两处同步）；mihomo 各平台统一 v1.19.30（`scripts/fetch-bundled-mihomo-*` + `core/kind.rs::fallback_version` 两处同步）；升级时三处（各平台脚本 + kind.rs）联动改，缺一处会导致运行时兜底版本与安装包内实际版本不一致。
 
 ## 9. 约定与坑（agent 必读）
 
@@ -359,8 +376,8 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 14. **Xray 无 Clash API** — 无逐连接数据/热切节点/delay API：切节点与规则变更=重启进程（`select_current_node_serialized` 返回 restart_needed）；连接三页面在 Xray 下为空态；smart_switch 禁用。kernel 自动选路的首页节点同步走 `XrayMetrics::dominant_outbound_tag`（Xray 无选点 API——用 `/debug/vars` 的逐 outbound 计数器增量推断 balancer 当前选中的节点，空闲轮询保持上次选择）。流量统计靠 metrics `/debug/vars`（`api/xray_metrics.rs`）。Xray/mihomo 模式下节点列表**后端过滤**不支持协议的节点（`list_all_nodes`/`list_nodes_page`/`list_node_ids`，协议判定在 `Protocol::xray_supported`/`mihomo_supported`，节点级判定（Xray 的 REALITY 传输组合、mihomo 的 ss+shadow-tls）统一在 `CoreKind::supports_node`），切回 sing-box 即恢复显示；首页"指定配置"的自写 sing-box 配置项在 Xray/mihomo 下置灰。
 15. **Xray 资产依赖** — `geosite:`/`geoip:`（含 `geoip:private`）需要 geosite.dat/geoip.dat（bundled 或运行时下载，`core/assets.rs::ensure_geodata`）；Windows TUN 需要 wintun.dll（Xray zip 不带）。缺资产时 Xray 启动会失败，报错要可读。
 16. **`.srs` 规则集是 sing-box 专有** — Xray/mihomo 生成器跳过用户自建远程 `.srs` 集（内置 3 条走 geodata 映射）；`srs.rs` decompile 固定用 sing-box 二进制。Xray/mihomo 模式下 RulesPage 的内置 3 条显示为 geodata 来源卡（Xray：matcher + Loyalsoldier dat；mihomo：MetaCubeX mmdb/GeoSite.dat），"更新"走 `refresh_geodata(kind)` 重下 geodata 而非 `.srs`。
-17. **mihomo 特有约定** — ① Clash YAML 配置写 `config/active.yaml`（JSON 系共用 active.json，互不混用）；启动参数 `-f <abs> -d <data>/mihomo`（config 必须绝对路径）。② geodata 在 `<data>/mihomo/`：`Country.mmdb`（MaxMind）+ `GeoSite.dat`（MetaCubeX mrs，**精确大小写**）——与 Xray 的 bin/geosite.dat 同名不同格式绝不能共目录；缺失时 mihomo 自带的下载会经由未启动的代理 dial 而超时，GEOIP/GEOSITE 规则直接让内核退出，故启动前必须 `ensure_mihomo_geodata`（下载内核时已由 `prefetch_runtime_assets` 预取，此处为兜底）。③ 协议面：mihomo（标准 Clash Meta + uTLS）支持 REALITY/Vision 全组合与全部 vmess 传输，仅 Naive/Tor/独立 ShadowTls 与 ss+shadow-tls 组合被 `supports_node` 过滤。④ `find-process-mode` 真实生效，已接 `AppSettings.find_process`（strict/off）。⑤ DNS 支持 `system` 解析器（Local 分类与 dns_final=local 直用）；Windows TUN 用 `bin/wintun.dll`（与 Xray 共用）。⑥ Clash API 全兼容：热切节点/连接监控/delay 测速/智能切换与 sing-box 同款复用（组名恒 `proxy`，kernel 模式它就是 url-test 组）。注意 mihomo 的 `/connections` chains 是完整 `[节点, 组]`（state 里的 "proxy"→当前节点名解析对 mihomo 无害）。
-18. **三内核 DNS 语义对照（改 DNS 时逐项核对）** — 池与兜底已统一（2026-08 重构）：① **共享解析池**：`domain/dns.rs` 的 `REMOTE_DNS_POOL`（1.1.1.1+8.8.8.8 DoH）/ `DOMESTIC_DNS_POOL`（223.5.5.5+119.29.29.29 明文 UDP）是三生成器唯一真源，切内核不换解析服务器。发射按各内核原生能力：mihomo 并发竞速整池、Xray 池内顺序回退（第二远程条目无 domains=纯池内备援）、sing-box 规则只指向单 tag（无竞速）故只发 pool[0]。② **`dns_final`（DNS 页「默认解析」）是唯一兜底**：mihomo `nameserver`=final 池、**不写 `fallback` 槽**（mihomo fallback-filter 语义会对未分类境外域名发明文直连查询、且偏好其答案——曾构成 DNS 泄露）；Xray 主服务器（index 0）=final 池、其余池全部 `skipFallback`（只应答自己的分类域名，无跨池回落，**永不追加 localhost 系统解析**——原 `leak_protect` 开关与 Xray 的 localhost 逃生通道已删除，2026-08）；sing-box `dns.final`=final 池（本就无跨池机制）。③ 远程 DNS 经代理出站：三内核均为 **DoH over TCP 经代理**（sing-box `detour:"proxy"` / Xray dns-module 经主出站 / mihomo `#proxy` 尾缀）。**Xray 勿改回明文 UDP**——UDP-less 节点（socks5 无 UDP ASSOCIATE，如 ssh -D）会让远程 DNS 必挂、域名被透传给出口侧解析，测试站判为 DNS 泄露（实战事故）。Direct 出站模式例外，均直连。④ 节点域名解析：sing-box 用 `route.default_domain_resolver`（TUN 下=国内明文，非 TUN=系统）；mihomo 用 `proxy-server-nameserver`（国内明文池）；Xray 无等价物但实测未复现问题，出现「切 Xray 后节点解析失败」再加固。
+17. **mihomo 特有约定** — ① Clash YAML 配置写 `config/active.yaml`（JSON 系共用 active.json，互不混用）；启动参数 `-f <abs> -d <data>/mihomo`（config 必须绝对路径）。② geodata 在 `<data>/mihomo/`：`Country.mmdb`（MaxMind）+ `GeoSite.dat`（MetaCubeX mrs，**精确大小写**）——与 Xray 的 bin/geosite.dat 同名不同格式绝不能共目录；缺失时 mihomo 自带的下载会经由未启动的代理 dial 而超时，GEOIP/GEOSITE 规则直接让内核退出，故启动前必须 `ensure_mihomo_geodata`（下载内核时已由 `prefetch_runtime_assets` 预取，此处为兜底）。③ 协议面：mihomo（标准 Clash Meta + uTLS）支持 REALITY/Vision 全组合与全部 vmess 传输，仅 Naive/Tor/独立 ShadowTls 与 ss+shadow-tls 组合被 `supports_node` 过滤。④ `find-process-mode` 真实生效，已接 `AppSettings.find_process`（strict/off）。⑤ DNS 支持 `system` 解析器（Local 分类与 dns_final=local 直用）；Windows TUN 用 `bin/wintun.dll`（与 Xray 共用）。⑥ Clash API 全兼容：热切节点/连接监控/delay 测速/智能切换与 sing-box 同款复用（组名恒 `proxy`，kernel 模式它就是 url-test 组）。注意 mihomo 的 `/connections` chains 是完整 `[节点, 组]`（state 里的 "proxy"→当前节点名解析对 mihomo 无害）。⑦ **amd64 发行包一律用 `-compatible` 变体（GOAMD64=v1，2026-09）**：mihomo 无后缀的默认 amd64 包按 GOAMD64=v3 编译（需 AVX2/BMI2），在 Rosetta 2（Intel 版应用跑在 Apple Silicon 上）与 2013 年前后无 AVX2 的老 Intel CPU 上 `-v` 自检直接 fatal「This program can only be run on AMD64 processors with v3 microarchitecture support」——下载安装报 `version exit exit status: 1` 即此症状（sing-box/Xray 的 amd64 包是 v1 基线，Rosetta 下能跑，故三内核只有 mihomo 中招）。代理内核加解密热点走 AES-NI（v1 即有），v3 无实际收益。资产名生成单点在 `CoreKind::asset_name`（amd64 → `mihomo-{plat}-compatible-v{ver}`，应用内下载/synthetic fallback URL 均经它），fetch 脚本同名约定；Windows compatible zip 内部 exe 为 `mihomo-windows-amd64-compatible.exe`，`download.rs` 前缀匹配器与 ps1 通配符均兼容。
+18. **三内核 DNS 语义对照（改 DNS 时逐项核对）** — 池与兜底已统一（2026-08 重构；2026-09 远程池开放用户自定义）：① **共享解析池**：`domain/dns.rs` 的 `REMOTE_DNS_POOL`（1.1.1.1+8.8.8.8 DoH）/ `DOMESTIC_DNS_POOL`（223.5.5.5+119.29.29.29 明文 UDP）是三生成器唯一真源，切内核不换解析服务器；**远程池可被用户覆盖**：`DnsSettings.remote_dns`（DNS 页「远程加密 DNS」⋯ 弹窗编辑，仅收 `https://` DoH，trim/去重/上限 8 条，`update_dns_settings` 里 `normalize_remote_dns`+`validate_remote_dns` 把关）非空即整体替换内置池——三生成器与 `dns_diag` 路径推演一律读 `effective_remote_pool()`，**绝不直接引用常量或裸字段**（保证自定义池一处生效处处生效）；发射按各内核原生能力：mihomo 并发竞速整池、Xray 池内顺序回退（第二远程条目无 domains=纯池内备援，**单条自定义池无备援条目**）、sing-box 规则只指向单 tag（无竞速）故只发 pool[0]（自定义 URL 的端口/路径拆进 `server_port`/`path`，`dns_build.rs::doh_parts`；域名型端点由 `route.default_domain_resolver` 引导解析）。② **`dns_final`（DNS 页「默认解析」）是唯一兜底**：mihomo `nameserver`=final 池、**不写 `fallback` 槽**（mihomo fallback-filter 语义会对未分类境外域名发明文直连查询、且偏好其答案——曾构成 DNS 泄露）；Xray 主服务器（index 0）=final 池、其余池全部 `skipFallback`（只应答自己的分类域名，无跨池回落，**永不追加 localhost 系统解析**——原 `leak_protect` 开关与 Xray 的 localhost 逃生通道已删除，2026-08）；sing-box `dns.final`=final 池（本就无跨池机制）。③ 远程 DNS 经代理出站：三内核均为 **DoH over TCP 经代理**（sing-box `detour:"proxy"` / Xray dns-module 经主出站 / mihomo `#proxy` 尾缀），**自定义池同样强制经代理出站**。**Xray 勿改回明文 UDP**——UDP-less 节点（socks5 无 UDP ASSOCIATE，如 ssh -D）会让远程 DNS 必挂、域名被透传给出口侧解析，测试站判为 DNS 泄露（实战事故）。Direct 出站模式例外，均直连。④ 节点域名解析：sing-box 用 `route.default_domain_resolver`（TUN 下=国内明文，非 TUN=系统）；mihomo 用 `proxy-server-nameserver`（国内明文池）；Xray 无等价物但实测未复现问题，出现「切 Xray 后节点解析失败」再加固。
 19. **Windows 便携版约定（`src-tauri/src/portable.rs`）** — exe 旁存在 `portable.flag` 即便携模式：**exe 目录 = 数据根**（`data/`、`config/`、`bin/`、`logs/`、`mihomo/`、`remote-rule-sets/`、`webview/` 全在 exe 旁，不写 AppData）。① **禁止直连 `app.path().app_data_dir()`**——新增代码一律走 `portable::resolve_app_data_dir(&app)`（存量 4 处泄漏已收敛：`remote_rule_auto.rs`×2、`commands/rules.rs`、`lib.rs::set_ui_mode_pref`）；`AppState.app_data_dir` 锚点在 `lib.rs` setup 早已走便携覆盖。② **WebView2 用户目录必须在两条创建路径同时重定向**：配置窗口经 `portable::patch_context`（启动前把 `windows[].create` 置 false，setup 里 `build_main_window` 用 `.data_directory()` 重建——Tauri 配置窗口先于 setup 创建、且 conf 的 `dataDirectory` 只能锚定在 `%LOCALAPPDATA%`，无法走配置）；托盘重建窗口在 `window_ctrl::show_main`。漏一边会出现双 WebView 档案。③ `resource_dir()` Windows 上恒为 exe 目录，便携 zip 的 `resources/` 布局与安装版一致，`core/paths.rs` 候选链零改动。④ 便携与安装版共用 identifier → single-instance 互斥，不可同时运行；深链 HKCU 每次启动用 `current_exe` 重写（移动目录自愈），开机自启动 Run 键是绝对路径（移动目录后需重开）。⑤ zip 组装在 `build-windows.ps1 -Bundle portable`：`tauri build --no-bundle` 出 exe，resources **按当前生效 conf 的 `bundle.resources` 清单自拷**（与安装包内容自同步，勿在脚本里硬编码文件列表）。
 20. **Xray 副进程委托 / 多核模式（`settings.multi_core_enabled` + `protocol_cores`，2026-08）** — sing-box 固定主监听（mixed/TUN/Clash API/诊断全在主核），多核 tab（Settings「多核模式」，位于代理链之后）里把协议钉到 Xray 的，其节点经 loopback socks 交给一个 Xray 副进程转发。① **仅生成配置 + `core_type=singbox` 模式生效**；`set_core_type` 切到其他内核时经 `enforce_multi_core_scope()` **自动关闭**（`protocol_cores` 钉选保留，切回 sing-box 重新打开开关即恢复）；`update_settings` 拒绝在非 sing-box 主核下启用；mihomo/Xray 主模式与 custom 配置一律无副进程。② **tag 不变是设计核心**：委托节点在 sing-box 侧仍是 `node-<id16>` 只是 `type:"socks"` 指向 `127.0.0.1:<基址+i>`——selector/规则钉定/smart 池/Clash 热切/delay 测速零改动照常工作；改这里务必保住该不变量。③ 副进程每节点一个独立 loopback mixed 入站（`in-sc-<port>`），Xray 路由按 `inboundTag→outboundTag` 1:1 派发（多规则可同时指向不同委托节点）；上限 1024 个（`SIDECAR_MAX_NODES`，非功能限制仅防病态规模订阅），超限/`CoreKind::Xray.supports_node` 不过（如 REALITY+ws）/被 chain hop 直连钉定/WireGuard/候选端口撞上保留集（mixed/api/extra/DIAG 26486，命中即跳过且**索引照常推进**）的节点**自动回退原生出站**并记告警。④ 启动序=主核 health OK → 写 `config/xray-sidecar.json`（绝不写 active.\*）→ 起副进程；计划非空时**启动前仅预检 Xray 二进制存在**（缺失必须前置报错而非半启动）；副端口**不做逐端口 lsof 预检**（几百节点会拖慢启动），残留占用交给 `start_with_ports` 内的 `ensure_ports_free` 清理，真实 bind 冲突以副进程 FATAL 浮出→整体回滚（停主核报错）。停/重启/退出先停副进程；watchdog 双目标各自独立预算。⑤ 副配置刻意无 DNS/geodata/api/metrics——`ensure_geodata` 无需调用；live 验证跑 `cargo test --lib config::xray::tests::live_sidecar_config_validates -- --ignored`。`protocol_cores` 只存实际委托行（v1 `core=="xray"`），未列出的协议跟随主内核。
 21. **未知传输 = 解析期跳过，绝不静默降级；xhttp 是唯一例外（2026-08）** — `Transport` 枚举 = Tcp/Ws/Grpc/Http/HttpUpgrade/**Xhttp{path,host,mode}**；kcp/splithttp(=xhttp 别名) 之外的未知 `network`/`type` 一律报错 → 节点进 `skipped`（原因 `unsupported transport: <name>`）。曾因 `_ => Some(Transport::Tcp)` 兜底，vless+xhttp 被静默降级成 vless+tcp——能进库能生成但永远连不上。**xhttp 的内核语义**：Xray 独有（`streamSettings.network="xhttp"` + `xhttpSettings{path,host,mode}`，mode 缺省 auto；**REALITY+xhttp 合法**）；sing-box 无此传输——`node_to_outbound_tagged` 遇 Xhttp 节点报错（带过滤提示），该节点**从本次生成的配置中被过滤**并逐节点记 warn（`build_singbox_config` 的 errors 留痕），节点仍保留在库与列表中（`SingBox.supports_node` 不按传输拒绝）；mihomo 经 `Mihomo.supports_node` 过滤。**委托与否完全跟随用户的多核协议钉选**——`compute_sidecar_plan` 无 per-transport 特例，vless 钉到 Xray 时 xhttp vless 节点随协议委托，未钉则在纯 sing-box 配置中被过滤。总模型：**导入的节点全部入库保留，生成配置时按当前内核情况过滤不支持的**。解析面三处（uri.rs vless/vmess/trojan、clash.rs `network: xhttp|splithttp`+xhttp-opts、manual 表单）都收 xhttp；sing-box 自写配置导入不含它。给新传输加解析时同步这些 match。`skip-cert-verify` 在 Xray 侧强制忽略（Xray ≥26 无 allowInsecure，输出即拒载），委托节点证书无效会连不上，属预期。

@@ -40,6 +40,8 @@ pub fn update_dns_settings(
 ) -> Result<DnsSettings, String> {
     let apply = apply.unwrap_or(true);
     settings.ensure_rule_sets();
+    settings.normalize_remote_dns();
+    crate::domain::validate_remote_dns(&settings.remote_dns)?;
     state
         .with_store_mut(|store| {
             store.dns = settings;

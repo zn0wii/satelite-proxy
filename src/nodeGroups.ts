@@ -39,8 +39,8 @@ interface Region {
 // Ordered by rough likelihood; detection scans all regions per tier anyway,
 // the order only breaks exact ties.
 const REGIONS: Region[] = [
-  { id: "HK", zh: "香港", en: "Hong Kong", flag: "🇭🇰", aliases: ["HKG", "hongkong"] },
-  { id: "TW", zh: "台湾", en: "Taiwan", flag: "🇹🇼", aliases: ["台北", "新北", "桃园", "高雄", "TWN", "taipei", "taiwan"] },
+  { id: "HK", zh: "香港", en: "Hong Kong", flag: "🇭🇰", aliases: ["香港", "HKG", "hongkong"] },
+  { id: "TW", zh: "台湾", en: "Taiwan", flag: "🇹🇼", aliases: ["台湾", "台北", "新北", "桃园", "高雄", "TWN", "taipei", "taiwan"] },
   { id: "JP", zh: "日本", en: "Japan", flag: "🇯🇵", aliases: ["东京", "大阪", "埼玉", "名古屋", "JPN", "tokyo", "osaka", "japan"] },
   { id: "SG", zh: "新加坡", en: "Singapore", flag: "🇸🇬", aliases: ["狮城", "SGP", "singapore"] },
   { id: "US", zh: "美国", en: "United States", flag: "🇺🇸", aliases: ["洛杉矶", "圣何塞", "西雅图", "纽约", "芝加哥", "凤凰城", "达拉斯", "硅谷", "弗吉尼亚", "费利蒙", "圣克拉拉", "波特兰", "USA", "united states", "america", "los angeles", "san jose", "seattle", "new york", "dallas", "chicago", "phoenix"] },

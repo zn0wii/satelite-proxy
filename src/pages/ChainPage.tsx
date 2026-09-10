@@ -1571,7 +1571,7 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
       <section className="chain-section">
         <div className="chain-section-head">
           <h2>{t("chain.poolsHeading")}</h2>
-          <GlassButton variant="primary" onClick={() => setPoolEditor({ pool: null })}>
+          <GlassButton onClick={() => setPoolEditor({ pool: null })}>
             {t("common.create")}
           </GlassButton>
         </div>
@@ -1601,7 +1601,7 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
       <section className="chain-section">
         <div className="chain-section-head">
           <h2>{t("chain.chainsHeading")}</h2>
-          <GlassButton variant="primary" onClick={() => setChainEditor({ chain: null })}>
+          <GlassButton onClick={() => setChainEditor({ chain: null })}>
             {t("common.create")}
           </GlassButton>
         </div>

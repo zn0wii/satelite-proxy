@@ -22,7 +22,6 @@ use crate::core::kind::CoreKind;
 use crate::domain::{
     DnsAction, DomainMatcher, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleSet,
     RuleSetDnsStrategy, RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL,
-    REMOTE_DNS_POOL,
 };
 use crate::error::{AppError, AppResult};
 use serde_yaml::{Mapping, Value as Yaml};
@@ -284,10 +283,18 @@ fn url_test_group(name: &str, members: Vec<String>, probe_url: &str) -> Mapping 
 /// mihomo tun block. mihomo works best with fake-ip DNS for tun —
 /// `build_dns` forces fake-ip whenever tun is on. `stack` defaults to
 /// system in mihomo; `strict-route` etc. stay at defaults intentionally.
+/// `route-exclude-address` mirrors the sing-box builder's
+/// `route_exclude_address`: without it, auto-route can pull host →
+/// 127.0.0.1 traffic (clash_api, the dev server, any local port) into the
+/// tun interface instead of leaving it on loopback.
 fn tun_block() -> Mapping {
     let mut t = Mapping::new();
     t.insert(str_yaml("enable"), Yaml::Bool(true));
     t.insert(str_yaml("auto-route"), Yaml::Bool(true));
+    t.insert(
+        str_yaml("route-exclude-address"),
+        Yaml::Sequence(vec![str_yaml("127.0.0.0/8"), str_yaml("::1/128")]),
+    );
     t.insert(
         str_yaml("dns-hijack"),
         Yaml::Sequence(vec![str_yaml("any:53")]),
@@ -618,10 +625,12 @@ fn build_dns(opts: &BuildOptions, sets: &[RuleSet], effective_rules: &[Rule]) ->
     // (plain UDP, always direct), which breaks the loop. Direct outbound
     // mode is the one exception — everything egresses direct there, DNS
     // included.
+    // User-configurable remote pool (empty = built-in domain::REMOTE_DNS_POOL).
+    let effective_remote = opts.dns.effective_remote_pool();
     let remote_pool: Vec<String> = if opts.outbound_mode == OutboundMode::Direct {
-        REMOTE_DNS_POOL.iter().map(|s| (*s).to_string()).collect()
+        effective_remote
     } else {
-        REMOTE_DNS_POOL
+        effective_remote
             .iter()
             .map(|s| format!("{s}#{MAIN_GROUP}"))
             .collect()
@@ -1735,6 +1744,14 @@ mod tests {
         let doc = parse(&built);
         assert_eq!(doc["tun"]["enable"].as_bool(), Some(true));
         assert_eq!(doc["tun"]["auto-route"].as_bool(), Some(true));
+        assert_eq!(
+            doc["tun"]["route-exclude-address"][0].as_str(),
+            Some("127.0.0.0/8")
+        );
+        assert_eq!(
+            doc["tun"]["route-exclude-address"][1].as_str(),
+            Some("::1/128")
+        );
         assert_eq!(doc["tun"]["dns-hijack"][0].as_str(), Some("any:53"));
         assert_eq!(doc["dns"]["enhanced-mode"].as_str(), Some("fake-ip"));
         assert!(doc["dns"]["fake-ip-range"].as_str().is_some());
@@ -1811,6 +1828,30 @@ mod tests {
         let nameserver = direct["dns"]["nameserver"].as_sequence().unwrap();
         assert_eq!(nameserver[0].as_str(), Some("https://1.1.1.1/dns-query"));
         assert_eq!(nameserver[1].as_str(), Some("https://8.8.8.8/dns-query"));
+    }
+
+    /// A user-configured remote pool replaces the built-in addresses and
+    /// keeps the per-entry proxy-egress fragment (whole pool races).
+    #[test]
+    fn custom_remote_dns_pool_overrides_builtin() {
+        let node = vless_node("n1", None);
+        let mut opts = default_opts();
+        opts.dns.remote_dns = vec![
+            "https://9.9.9.9/dns-query".into(),
+            "https://94.140.14.14/dns-query".into(),
+        ];
+        let built = build_mihomo_config(&[node], &opts).expect("build");
+        let dns = &parse(&built)["dns"];
+        let nameserver = dns["nameserver"].as_sequence().unwrap();
+        assert_eq!(nameserver.len(), 2);
+        assert_eq!(
+            nameserver[0].as_str(),
+            Some("https://9.9.9.9/dns-query#proxy")
+        );
+        assert_eq!(
+            nameserver[1].as_str(),
+            Some("https://94.140.14.14/dns-query#proxy")
+        );
     }
 
     /// mihomo supports the `system` resolver natively —

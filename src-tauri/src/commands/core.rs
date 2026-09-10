@@ -29,6 +29,14 @@ pub struct CoreInfo {
     /// `bundled` | `downloaded` | `missing`
     pub source: String,
     pub bundled_version: Option<String>,
+    /// Pinned factory version (`CoreKind::fallback_version`, kept in sync
+    /// with the fetch-bundled-* scripts). Restore target for cores with no
+    /// bundled copy: the card re-downloads this exact tag.
+    pub factory_version: Option<String>,
+    /// Unix seconds, from the installed binary's mtime — "last installed"
+    /// on the core card. `None` when nothing is installed or mtime is
+    /// unreadable.
+    pub installed_at: Option<i64>,
 }
 
 /// Local core status only (no network). Prefer this for page load.
@@ -47,6 +55,10 @@ pub fn get_core_info(
     // Metadata-only inspection: do not stage/copy the bundled core during page load.
     let version = active_core_version(&state.app_data_dir, res, kind);
     let bundled_version = bundled_core_version(res, kind);
+    // "Last installed" = the binary's mtime — set whenever it's written
+    // (download, factory reset, or first-run staging of the bundled copy).
+    // No separate persisted timestamp needed.
+    let installed_at = path.as_deref().and_then(core_bin_mtime);
 
     Ok(CoreInfo {
         kind: kind.as_str().into(),
@@ -63,7 +75,19 @@ pub fn get_core_info(
             CoreSource::Missing => "missing".into(),
         },
         bundled_version,
+        factory_version: Some(kind.fallback_version().into()),
+        installed_at,
     })
+}
+
+/// Binary mtime as unix seconds — best-effort, `None` on any metadata error.
+fn core_bin_mtime(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(secs).ok()
 }
 
 /// Remote latest version only (network). Call after local info is shown.
@@ -241,12 +265,17 @@ pub async fn download_core(
     let kind = parse_kind(kind);
     let proxy_url = current_download_proxy(&state)?;
     let progress_app = app.clone();
-    let result =
-        download_latest_core_with_progress(kind, &state.app_data_dir, tag, proxy_url.clone(), move |progress| {
+    let result = download_latest_core_with_progress(
+        kind,
+        &state.app_data_dir,
+        tag,
+        proxy_url.clone(),
+        move |progress| {
             let _ = progress_app.emit(CORE_DOWNLOAD_EVENT, progress);
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // The binary is installed — eagerly fetch its runtime assets (geodata,
     // wintun) through the same download proxy, so the first start doesn't
@@ -328,6 +357,39 @@ pub async fn set_core_type(
     })
     .await
     .map_err(|e| format!("core type switch task: {e}"))?
+}
+
+/// Restore the bundled core over a user-downloaded one (core card "factory
+/// reset"): drops the downloaded binary + version file so resolution falls
+/// back to the bundled copy, which is re-staged on the next start. Only a
+/// running core of this same kind is restarted — resetting one core must
+/// not disrupt traffic flowing through another.
+#[tauri::command(async)]
+pub async fn reset_core_to_bundled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<(), String> {
+    let kind = parse_kind(kind);
+    let app_data_dir = state.app_data_dir.clone();
+    let resource_dir = app.path().resource_dir().ok();
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::core::reset_core_to_bundled(&app_data_dir, resource_dir.as_deref(), kind)
+            .map_err(|e| e.to_string())?;
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or_else(|| "app state unavailable".to_string())?;
+        let active_kind = state
+            .with_store(|store| Ok(store.settings.core_type.clone()))
+            .unwrap_or_else(|_| "singbox".into());
+        if active_kind == kind.as_str() && state.is_core_running() {
+            crate::rule_apply::request_restart(worker_app.clone(), Vec::new());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("core reset task: {e}"))?
 }
 
 #[derive(Debug, Serialize)]
@@ -435,7 +497,7 @@ fn mihomo_geodata_info(app_data_dir: &std::path::Path) -> GeodataInfo {
             })
     };
     GeodataInfo {
-        geosite: find("geosite.dat"),
+        geosite: find("GeoSite.dat"),
         geoip: find("Country.mmdb"),
     }
 }
@@ -449,14 +511,28 @@ pub fn get_app_install_path() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Proxy to use for the download path, in priority order:
+/// 1. The core's own mixed inbound, once it's actually running.
+/// 2. Standard proxy env vars (`HTTPS_PROXY` etc.) — set on terminal-launched
+///    or dev builds; GUI apps started from Finder/Dock don't inherit these.
+/// 3. The OS's own proxy setting (macOS System Settings / Windows Internet
+///    Settings), which GUI apps do see.
+///
+/// This only matters before the core has ever run (first install, or after
+/// a core update wipes the binary) — otherwise there's no proxy loop yet to
+/// route the download through, so falling straight to "no proxy" would send
+/// GitHub traffic direct even when the user has one configured.
 fn current_download_proxy(state: &AppState) -> Result<Option<String>, String> {
-    if !state.is_core_running() {
-        return Ok(None);
+    if state.is_core_running() {
+        let mixed_port = state
+            .with_store(|store| Ok(store.settings.mixed_port))
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(format!("http://127.0.0.1:{mixed_port}")));
     }
-    let mixed_port = state
-        .with_store(|store| Ok(store.settings.mixed_port))
-        .map_err(|error| error.to_string())?;
-    Ok(Some(format!("http://127.0.0.1:{mixed_port}")))
+    if let Some(proxy) = crate::core::system_proxy::read_env_proxy() {
+        return Ok(Some(proxy));
+    }
+    Ok(crate::core::system_proxy::read_system_proxy())
 }
 
 fn normalize_cmp(v: &str) -> String {
@@ -477,24 +553,62 @@ fn parse_version(v: &str) -> Vec<u32> {
         .collect()
 }
 
-/// The machine's LAN IPv4 (of the default-route interface), for the
-/// dashboard's listen card. The UDP "connect" trick only makes the OS pick
-/// a route — no packet is sent — so it works offline as long as an
-/// interface with a default route exists. `None` when there is no such
-/// address (e.g. fully offline).
+/// The machine's LAN IPv4, for the dashboard's listen card.
+///
+/// Enumerates real network interfaces instead of the UDP "connect" trick:
+/// once tun mode grabs the default route, that trick returns the tun
+/// interface's own address (sing-box's fixed 172.19.0.1, mihomo's default
+/// 198.18.0.1) instead of the machine's actual LAN IP. Skips loopback and
+/// tun/tap interfaces (by name prefix, since tun adapters aren't otherwise
+/// distinguishable from a real NIC) and returns the first private IPv4
+/// found. `None` when no such address exists (e.g. fully offline).
 #[tauri::command]
 pub fn get_lan_ip() -> Option<String> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    match sock.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
-        _ => None,
-    }
+    let ifaces = if_addrs::get_if_addrs().ok()?;
+    ifaces.into_iter().find_map(|iface| {
+        if is_virtual_interface(&iface.name) {
+            return None;
+        }
+        match iface.ip() {
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() && v4.is_private() => {
+                Some(v4.to_string())
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Name prefixes used by tun/tap adapters created by sing-box and mihomo
+/// (utunN/tunN on macOS/Linux, "Meta"/"sing-tun" on Windows via wintun).
+fn is_virtual_interface(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["utun", "tun", "tap", "ppp", "meta", "wintun"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer_version;
+    use super::{is_newer_version, is_virtual_interface};
+
+    #[test]
+    fn recognizes_known_tun_interface_names() {
+        // Regression: after enabling tun mode, the old UDP-connect trick
+        // returned the tun adapter's own address (sing-box 172.19.0.1,
+        // mihomo 198.18.0.1) instead of the real LAN IP, because the
+        // default route now points at the tun interface.
+        assert!(is_virtual_interface("utun7"));
+        assert!(is_virtual_interface("tun0"));
+        assert!(is_virtual_interface("Meta"));
+        assert!(is_virtual_interface("wintun"));
+    }
+
+    #[test]
+    fn does_not_flag_real_nics() {
+        assert!(!is_virtual_interface("en0"));
+        assert!(!is_virtual_interface("eth0"));
+        assert!(!is_virtual_interface("Wi-Fi"));
+    }
 
     #[test]
     fn bundled_ahead_of_latest_release_is_not_an_update() {

@@ -81,11 +81,26 @@ pub async fn fetch_latest_release_with_proxy(
     proxy_url: Option<&str>,
 ) -> AppResult<LatestReleaseInfo> {
     let platform = detect_platform()?;
+    crate::app_log::info(
+        "core",
+        format!(
+            "{}: fetching latest release (proxy={})",
+            kind.display_name(),
+            proxy_url.unwrap_or("none")
+        ),
+    );
     match fetch_release_json(&github_latest_url(kind), proxy_url).await {
         Ok(release) => pick_asset(kind, release, platform),
         Err(api_err) => {
             // API blocked/unreachable → direct asset URL with pinned fallback version
-            let _ = api_err;
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "{}: github api unreachable ({api_err}); falling back to pinned {}",
+                    kind.display_name(),
+                    kind.fallback_version()
+                ),
+            );
             Ok(synthetic_release_info(
                 kind,
                 kind.fallback_version(),
@@ -103,9 +118,26 @@ async fn fetch_release_by_tag_with_proxy(
     let platform = detect_platform()?;
     let tag = normalize_version(tag);
     let url = format!("{}{tag}", github_tag_url(kind));
+    crate::app_log::info(
+        "core",
+        format!(
+            "{}: fetching release {tag} (proxy={})",
+            kind.display_name(),
+            proxy_url.unwrap_or("none")
+        ),
+    );
     match fetch_release_json(&url, proxy_url).await {
         Ok(release) => pick_asset(kind, release, platform),
-        Err(_) => Ok(synthetic_release_info(kind, &tag, platform)),
+        Err(api_err) => {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "{}: github api unreachable ({api_err}); falling back to synthetic {tag}",
+                    kind.display_name()
+                ),
+            );
+            Ok(synthetic_release_info(kind, &tag, platform))
+        }
     }
 }
 
@@ -227,10 +259,26 @@ fn pick_asset(
     let version = normalize_version(&release.tag_name);
     let suffix = platform.asset_suffix_for(kind);
     let expected = kind.asset_name(&version, suffix, platform.is_windows);
-    let ext = if platform.is_windows { "zip" } else { "tar.gz" };
     // sing-box assets embed the version (`sing-box-1.13.15-darwin-arm64.tar.gz`);
     // Xray assets don't (`Xray-macos-arm64-v8a.zip`); mihomo embeds it too
-    // (`mihomo-darwin-arm64-v1.19.30.gz`).
+    // (`mihomo-darwin-arm64-v1.19.30.gz`, amd64 with a `-compatible` infix —
+    // see `CoreKind::asset_name`).
+    let ext = match kind {
+        CoreKind::Mihomo => {
+            if platform.is_windows {
+                "zip"
+            } else {
+                "gz"
+            }
+        }
+        _ => {
+            if platform.is_windows {
+                "zip"
+            } else {
+                "tar.gz"
+            }
+        }
+    };
     let prefix = match kind {
         CoreKind::SingBox => format!("sing-box-{}", version.trim_start_matches('v')),
         CoreKind::Xray => "Xray-".to_string(),
@@ -242,12 +290,16 @@ fn pick_asset(
         .iter()
         .find(|a| a.name == expected)
         .or_else(|| {
-            // fallback: kind prefix + platform suffix + correct extension
+            // fallback: kind prefix + platform suffix + correct extension.
+            // `go1*` excludes mihomo's old-Go-toolchain variants (go120/go122/
+            // go124 builds for legacy OSes) so the fallback stays on the
+            // current-toolchain asset.
             release.assets.iter().find(|a| {
                 a.name.starts_with(&prefix)
                     && a.name.contains(suffix)
                     && a.name.ends_with(ext)
                     && !a.name.contains("legacy")
+                    && !a.name.contains("go1")
             })
         })
         .ok_or_else(|| {
@@ -266,6 +318,60 @@ fn pick_asset(
     })
 }
 
+/// Public GitHub release-asset mirror. Used only as a last-resort fallback
+/// when a direct `github.com` download fails outright (e.g. blocked network) —
+/// tried without any proxy, since the point of a mirror is reaching the file
+/// through a path that doesn't need one.
+const GITHUB_ASSET_MIRROR_PREFIX: &str = "https://gh-proxy.com/";
+
+/// Fetch a release asset, retrying through a mirror if the direct request
+/// fails outright (connection/DNS error) or comes back with a non-success
+/// status. The mirror attempt never uses `proxy_url` — the whole point of a
+/// mirror is a path that doesn't depend on the user having a working proxy.
+///
+/// When there's no proxy at all, direct GitHub access is unlikely to work
+/// from mainland China — skip straight to the mirror instead of waiting out
+/// a ~120s connection timeout first.
+async fn fetch_asset_with_mirror_fallback(
+    download_url: &str,
+    proxy_url: Option<&str>,
+) -> AppResult<reqwest::Response> {
+    crate::app_log::info(
+        "core",
+        format!(
+            "downloading asset (proxy={}): {download_url}",
+            proxy_url.unwrap_or("none")
+        ),
+    );
+
+    let direct_err = if let Some(proxy_url) = proxy_url {
+        match http_client(Some(proxy_url))?.get(download_url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) => format!("download status {}", resp.status()),
+            Err(e) => format!("download: {e}"),
+        }
+    } else {
+        crate::app_log::info("core", "no proxy configured — going straight to mirror");
+        "no proxy configured".into()
+    };
+
+    let mirror_url = format!("{GITHUB_ASSET_MIRROR_PREFIX}{download_url}");
+    crate::app_log::warn(
+        "core",
+        format!("direct download failed ({direct_err}); trying mirror: {mirror_url}"),
+    );
+    match http_client(None)?.get(&mirror_url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(resp),
+        Ok(resp) => Err(AppError::Core(format!(
+            "{direct_err}; mirror status {}",
+            resp.status()
+        ))),
+        Err(mirror_err) => Err(AppError::Core(format!(
+            "{direct_err}; mirror: {mirror_err}"
+        ))),
+    }
+}
+
 fn http_client(proxy_url: Option<&str>) -> AppResult<reqwest::Client> {
     http_client_with_redirect(proxy_url, reqwest::redirect::Policy::default())
 }
@@ -275,6 +381,7 @@ fn http_client_with_redirect(
     policy: reqwest::redirect::Policy,
 ) -> AppResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(120))
         .user_agent("SateliteProxy/0.1 (core-downloader)")
         .redirect(policy);
@@ -365,15 +472,7 @@ where
     let via_proxy = proxy_url.is_some();
     let progress = Arc::new(progress);
 
-    let client = http_client(proxy_url)?;
-    let resp = client
-        .get(&info.download_url)
-        .send()
-        .await
-        .map_err(|e| AppError::Core(format!("download: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(AppError::Core(format!("download status {}", resp.status())));
-    }
+    let resp = fetch_asset_with_mirror_fallback(&info.download_url, proxy_url).await?;
     let declared_total = (info.size > 0).then_some(info.size);
     let mut last_percent = None;
     let download_progress = Arc::clone(&progress);
@@ -533,7 +632,9 @@ fn staged_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
     return dest.with_file_name(format!("{stem}.new"));
 }
 
-fn previous_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
+// pub(crate): `paths::reset_core_to_bundled` reuses the same aside-name
+// convention when retiring a locked (running) downloaded binary.
+pub(crate) fn previous_core_path(kind: CoreKind, dest: &Path) -> PathBuf {
     let stem = kind.binary_name().trim_end_matches(".exe");
     #[cfg(target_os = "windows")]
     return dest.with_file_name(format!("{stem}.previous.exe"));
@@ -552,10 +653,25 @@ fn replace_installed_core(
     previous: &Path,
 ) -> AppResult<bool> {
     let _ = fs::remove_file(previous);
+
+    // A currently-setuid core (TUN elevation) can only be replaced with
+    // authorization; reuse that single authorization to also carry the
+    // setuid bit over to the new binary, so an in-place upgrade doesn't
+    // silently drop back to non-root (see macos_auth::replace_setuid_core).
     #[cfg(target_os = "macos")]
-    if dest.exists() {
-        crate::core::macos_auth::remove_setuid_core_if_needed(dest)?;
+    if dest.exists() && crate::core::macos_auth::core_has_setuid(dest) {
+        crate::app_log::info(
+            "core",
+            format!(
+                "{}: previous binary is setuid — authorizing in-place upgrade",
+                kind.display_name()
+            ),
+        );
+        crate::core::macos_auth::replace_setuid_core(staged, dest, previous)?;
+        let _ = kind;
+        return Ok(true);
     }
+
     let _ = kind;
     let had_previous = dest.exists();
     if had_previous {
@@ -671,6 +787,14 @@ fn extract_from_zip(kind: CoreKind, archive: &Path, dest: &Path, bin_dir: &Path)
             }
         } else if kind == CoreKind::Xray && (file_name == "geosite.dat" || file_name == "geoip.dat")
         {
+            dat_indexes.push((i, file_name.to_string()));
+        } else if cfg!(target_os = "windows")
+            && kind == CoreKind::SingBox
+            && file_name == "libcronet.dll"
+        {
+            // Required at runtime by naive outbounds (loaded from the
+            // executable directory); official sing-box Windows archives ship
+            // it alongside the binary. Staging counterpart: `paths.rs`.
             dat_indexes.push((i, file_name.to_string()));
         }
     }
@@ -804,6 +928,18 @@ mod tests {
             zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.30.exe"),
             Some(1)
         );
+        // The compatible-variant zips carry their own inner exe names.
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64-compatible.exe"),
+            Some(1)
+        );
+        assert_eq!(
+            zip_binary_match_rank(
+                CoreKind::Mihomo,
+                "mihomo-windows-amd64-compatible-v1.19.30.exe"
+            ),
+            Some(1)
+        );
         // Exact names still win (rank 2).
         assert_eq!(zip_binary_match_rank(CoreKind::Mihomo, "mihomo"), Some(2));
         assert_eq!(
@@ -825,8 +961,8 @@ mod tests {
     }
 
     /// End-to-end over the real release artifact: extract the binary from an
-    /// actual mihomo Windows zip. `#[ignore]` — needs network like the other
-    /// live core tests; run with
+    /// actual mihomo Windows zip (the GOAMD64=v1 compatible variant).
+    /// `#[ignore]` — needs network like the other live core tests; run with
     /// `cargo test --lib core::download::tests::live_extracts_mihomo_windows_zip -- --ignored`.
     #[test]
     #[ignore = "live network test"]
@@ -834,7 +970,7 @@ mod tests {
         let bytes = std::process::Command::new("curl")
             .args([
                 "-sSL",
-                "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-v1.19.30.zip",
+                "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-compatible-v1.19.30.zip",
             ])
             .output()
             .expect("curl mihomo zip");

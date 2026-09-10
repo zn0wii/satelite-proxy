@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "resources": [
+      "resources/bin/linux-amd64/sing-box",
+      "resources/bin/linux-amd64/version.txt",
+      "resources/bin/linux-amd64/xray",
+      "resources/bin/linux-amd64/xray-version.txt",
+      "resources/bin/linux-amd64/geosite.dat",
+      "resources/bin/linux-amd64/geoip.dat",
+      "resources/bin/linux-amd64/mihomo",
+      "resources/bin/linux-amd64/mihomo-version.txt",
+      "resources/bin/linux-amd64/mihomo-geodata/Country.mmdb",
+      "resources/bin/linux-amd64/mihomo-geodata/GeoSite.dat",
+      "resources/rule-sets",
+      "resources/dns"
+    ]
+  }
+}

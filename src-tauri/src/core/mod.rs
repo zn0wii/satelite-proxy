@@ -14,13 +14,16 @@ pub use macos_auth::{core_has_setuid, ensure_core_setuid};
 pub mod manager;
 mod memory;
 mod paths;
+pub mod system_proxy;
 
 pub use assets::ensure_geodata;
 #[cfg(target_os = "windows")]
+pub use assets::ensure_libcronet;
+#[cfg(target_os = "windows")]
 pub use assets::ensure_wintun;
+pub use assets::prefetch_runtime_assets;
 pub use assets::{download_missing_geodata, geodata_state};
 pub use assets::{download_missing_mihomo_geodata, ensure_mihomo_geodata, mihomo_geodata_state};
-pub use assets::prefetch_runtime_assets;
 pub use kind::CoreKind;
 pub use memory::read_process_mem_info;
 pub use memory::ProcessMemInfo;
@@ -33,6 +36,6 @@ pub use download::{
 #[cfg(test)]
 pub use paths::find_bundled_core;
 pub use paths::{
-    active_core_version, bundled_core_version, detect_platform, inspect_core_bin, resolve_core_bin,
-    CoreSource,
+    active_core_version, bundled_core_version, detect_platform, inspect_core_bin, reset_core_to_bundled,
+    resolve_core_bin, CoreSource,
 };

@@ -39,7 +39,7 @@ pub async fn start_proxy(
 pub async fn set_system_proxy(app: AppHandle, enabled: bool) -> Result<ProxyStatus, String> {
     let resource_dir = app.path().resource_dir().ok();
     let worker_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let state = worker_app
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
@@ -48,7 +48,10 @@ pub async fn set_system_proxy(app: AppHandle, enabled: bool) -> Result<ProxyStat
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("system proxy task: {e}"))?
+    .map_err(|e| format!("system proxy task: {e}"))?;
+    // Delegates to set_capture_mode — keep the tray's 流量接管 checkmarks in sync.
+    crate::tray::refresh_icon(&app);
+    result
 }
 
 /// Enable/disable TUN. Persists setting; restarts core if currently running so config applies.
@@ -56,7 +59,7 @@ pub async fn set_system_proxy(app: AppHandle, enabled: bool) -> Result<ProxyStat
 pub async fn set_tun_enabled(app: AppHandle, enabled: bool) -> Result<ProxyStatus, String> {
     let resource_dir = app.path().resource_dir().ok();
     let worker_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let state = worker_app
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
@@ -65,7 +68,10 @@ pub async fn set_tun_enabled(app: AppHandle, enabled: bool) -> Result<ProxyStatu
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("TUN task: {e}"))?
+    .map_err(|e| format!("TUN task: {e}"))?;
+    // Delegates to set_capture_mode — keep the tray's 流量接管 checkmarks in sync.
+    crate::tray::refresh_icon(&app);
+    result
 }
 
 /// Traffic capture: `off` | `system` | `tun` (mutually exclusive).
@@ -75,9 +81,9 @@ pub async fn set_tun_enabled(app: AppHandle, enabled: bool) -> Result<ProxyStatu
 #[tauri::command]
 pub async fn set_capture_mode(app: AppHandle, mode: String) -> Result<ProxyStatus, String> {
     let resource_dir = app.path().resource_dir().ok();
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app
+    let worker_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
         state
@@ -85,7 +91,11 @@ pub async fn set_capture_mode(app: AppHandle, mode: String) -> Result<ProxyStatu
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("capture mode task: {e}"))?
+    .map_err(|e| format!("capture mode task: {e}"))?;
+    // UI-side switches must re-check the tray's 流量接管 submenu items;
+    // without this the tray keeps showing the mode chosen before the switch.
+    crate::tray::refresh_icon(&app);
+    result
 }
 
 /// Switch outbound mode: rule | global | direct. Restarts core when running.

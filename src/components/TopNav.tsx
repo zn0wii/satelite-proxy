@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { getProxyStatus } from "../api";
+import { getProxyStatus, onProxySnapshot } from "../api";
 import { useCoreBusy } from "../coreBusy";
 import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { useI18n } from "../i18n";
@@ -68,6 +68,15 @@ export function TopNav({ active, onChange }: Props) {
   useEffect(() => {
     void tick();
   }, [tick]);
+
+  // Watchdog push: the shared snapshot was just refreshed from a backend
+  // lifecycle edge — read it instead of waiting out the 3s poll.
+  useEffect(() => {
+    return onProxySnapshot((status) => {
+      setRunning(status.running);
+      setCoreState(status.core_state);
+    });
+  }, []);
 
   // Steady poll when idle. While coreBusy the status pill already spins via
   // useCoreBusy — avoid hammering get_proxy_status (it contends for the same

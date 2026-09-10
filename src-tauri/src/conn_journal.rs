@@ -1,6 +1,7 @@
 //! Connection journal: stream Clash API snapshots and maintain history.
 //!
-//! Interval adapts: faster when UI is visible, slower when tray-only.
+//! Interval adapts: fast while a connection-data consumer is on screen,
+//! slow otherwise (docs/webview2-memory-optimization-plan.md).
 
 use crate::api::{parse_connections_json, ClashApi};
 use crate::state::AppState;
@@ -12,11 +13,24 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::Message;
 use tungstenite::{client as ws_client, Error as WsError};
 
-/// Active UI: catch short-lived conns.
+/// Fast rate: catch short-lived conns (live tables + journal fidelity).
 const WS_INTERVAL_ACTIVE_MS: u64 = 100;
-/// UI hidden / tray-only. Slow enough to keep history alive without churning
-/// the Rust heap while nobody is looking (docs/webview2-memory-optimization-plan.md).
+/// Idle rate: no connection-data consumer on screen (UI pages poll at
+/// 1.5–2.5s; anything reading faster than this keeps ACTIVE alive).
 const WS_INTERVAL_BACKGROUND_MS: u64 = 1000;
+/// A connection-data command within this window counts as live demand.
+const DEMAND_WINDOW: Duration = Duration::from_secs(4);
+/// Re-evaluate the interval at most this often — the rate is baked into the
+/// WS URL, so every change is a reconnect; boundary flapping (snapshot size
+/// hovering at a tier edge, page switches) must not churn sockets.
+const INTERVAL_RECHECK: Duration = Duration::from_secs(2);
+/// TUN sees every machine connection — frames reach thousands of rows and
+/// MB-scale JSON. Stretch the interval so per-frame cost stays bounded.
+/// Floors must stay ≥ ACTIVE (mihomo's /connections ticker panics on ≤ 0).
+const TUN_TIER1_CONNS: usize = 1_500;
+const TUN_TIER1_MS: u64 = 250;
+const TUN_TIER2_CONNS: usize = 4_000;
+const TUN_TIER2_MS: u64 = 1_000;
 /// HTTP poll when WS is unavailable.
 const FALLBACK_HTTP_MS: u64 = 350;
 const IDLE_MS: u64 = 500;
@@ -35,15 +49,29 @@ pub fn spawn_connection_journal(app: AppHandle) {
 }
 
 fn journal_interval_ms(state: &AppState) -> u64 {
-    interval_for_visibility(state.is_ui_visible())
+    interval_for(
+        state.is_ui_visible(),
+        state.conn_query_recent(DEMAND_WINDOW),
+        state.snapshot_connections(),
+    )
 }
 
-fn interval_for_visibility(visible: bool) -> u64 {
-    if visible {
+/// Pure rate decision (unit-tested): fast only when visible AND someone is
+/// actually reading connection data; TUN-sized frames back off regardless.
+fn interval_for(visible: bool, demand: bool, last_frame_conns: usize) -> u64 {
+    let base = if visible && demand {
         WS_INTERVAL_ACTIVE_MS
     } else {
         WS_INTERVAL_BACKGROUND_MS
-    }
+    };
+    let tun_floor = if last_frame_conns > TUN_TIER2_CONNS {
+        TUN_TIER2_MS
+    } else if last_frame_conns > TUN_TIER1_CONNS {
+        TUN_TIER1_MS
+    } else {
+        WS_INTERVAL_ACTIVE_MS
+    };
+    base.max(tun_floor)
 }
 
 fn journal_loop(app: AppHandle) {
@@ -80,11 +108,15 @@ fn journal_loop(app: AppHandle) {
         }
 
         let interval = journal_interval_ms(&state);
+        let chosen_at = std::time::Instant::now();
 
         match stream_ws_snapshots(
             &api,
             interval,
-            || journal_interval_ms(&state) != interval,
+            // Rate changes cost a WS reconnect (the interval is baked into
+            // the URL) — throttle re-evaluation so demand expiry / tier-edge
+            // flapping cannot churn sockets.
+            || chosen_at.elapsed() >= INTERVAL_RECHECK && journal_interval_ms(&state) != interval,
             |text| {
                 if state.is_core_transitioning() {
                     return;
@@ -214,9 +246,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn visibility_selects_the_expected_sampling_interval() {
-        assert_eq!(interval_for_visibility(true), WS_INTERVAL_ACTIVE_MS);
-        assert_eq!(interval_for_visibility(false), WS_INTERVAL_BACKGROUND_MS);
-        assert!(WS_INTERVAL_BACKGROUND_MS > WS_INTERVAL_ACTIVE_MS);
+    fn fast_rate_needs_visibility_and_demand() {
+        assert_eq!(
+            interval_for(true, true, 0),
+            WS_INTERVAL_ACTIVE_MS,
+            "visible + live consumer → fast"
+        );
+        // No consumer on screen (nodes/settings pages) or hidden to tray:
+        // nothing reads faster than 1.5s — journal at background rate.
+        assert_eq!(interval_for(true, false, 0), WS_INTERVAL_BACKGROUND_MS);
+        assert_eq!(interval_for(false, true, 0), WS_INTERVAL_BACKGROUND_MS);
+        assert_eq!(interval_for(false, false, 0), WS_INTERVAL_BACKGROUND_MS);
+    }
+
+    #[test]
+    fn tun_sized_frames_back_off_even_with_consumers() {
+        assert_eq!(
+            interval_for(true, true, TUN_TIER1_CONNS),
+            WS_INTERVAL_ACTIVE_MS
+        );
+        assert_eq!(interval_for(true, true, TUN_TIER1_CONNS + 1), TUN_TIER1_MS);
+        assert_eq!(interval_for(true, true, TUN_TIER2_CONNS + 1), TUN_TIER2_MS);
+        // Floors never push the background rate back down to ACTIVE, and
+        // never below ACTIVE (mihomo's ticker panics on ≤ 0).
+        assert_eq!(
+            interval_for(false, false, TUN_TIER2_CONNS + 1),
+            WS_INTERVAL_BACKGROUND_MS
+        );
+        assert!(interval_for(true, true, usize::MAX) >= WS_INTERVAL_ACTIVE_MS);
+        assert!(WS_INTERVAL_ACTIVE_MS > 0);
     }
 }

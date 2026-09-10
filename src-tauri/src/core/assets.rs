@@ -469,6 +469,43 @@ pub fn ensure_wintun(
     Ok(())
 }
 
+/// sing-box (Windows): ensure `libcronet.dll` sits next to the core binary
+/// in `bin/`. Naive outbounds load Cronet dynamically from the executable
+/// directory — without the DLL, any config containing a naive node FATALs
+/// at core startup ("cronet: library not found"). Fresh installs are covered
+/// by binary staging (`paths::stage_bundled_core`) and core downloads
+/// (`download.rs::extract_from_zip`); this bootstraps installs whose
+/// sing-box binary already predates those two paths. Best-effort: a missing
+/// bundled copy (custom packaging) only warns — everything except naive
+/// nodes works without the DLL.
+#[cfg(target_os = "windows")]
+pub fn ensure_libcronet(app_data_dir: &Path, resource_dir: Option<&Path>) {
+    let dest = crate::core::paths::core_dir(app_data_dir).join("libcronet.dll");
+    if dest.is_file() {
+        return;
+    }
+    // The DLL ships next to the bundled sing-box in official archives and in
+    // our packaging, so piggyback on the bundled-binary lookup.
+    if let Some(bundled) =
+        crate::core::paths::find_bundled_core(resource_dir, crate::core::kind::CoreKind::SingBox)
+    {
+        if let Some(parent) = bundled.parent() {
+            let src = parent.join("libcronet.dll");
+            if src.is_file() {
+                if let Err(error) = std::fs::copy(&src, &dest) {
+                    crate::app_log::warn("core_assets", format!("copy libcronet.dll: {error}"));
+                } else {
+                    return;
+                }
+            }
+        }
+    }
+    crate::app_log::warn(
+        "core_assets",
+        "libcronet.dll not found: naive outbounds will fail to start on this core",
+    );
+}
+
 /// Pull `wintun/bin/amd64/wintun.dll` out of the official wintun.zip.
 #[cfg(target_os = "windows")]
 fn extract_wintun_amd64(zip_bytes: &[u8], dest: &Path) -> AppResult<()> {

@@ -17,7 +17,11 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Pin IPv4 loopback: on Windows `localhost` resolves to ::1 first, so the
+    // default (localhost) binds IPv6-only and tauri-cli's dev-wait probe on
+    // 127.0.0.1 never sees the server ("Waiting for your frontend dev
+    // server…" forever despite Vite being ready). devUrl is 127.0.0.1 too.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

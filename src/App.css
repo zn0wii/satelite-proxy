@@ -698,6 +698,12 @@ button {
      pages (rules <-> dns) don't wobble the content box width sideways. */
   scrollbar-gutter: stable;
   overscroll-behavior-x: none;
+  /* Virtualized lists (useVirtualRange) swap rows and resize spacers
+     above the viewport on every scroll; Chromium's scroll anchoring
+     "compensates" those DOM changes by adjusting scrollTop and fights the
+     virtualizer's own exact compensation — visible as jerky, non-linear
+     scrolling. The virtualizer owns scroll position; disable anchoring. */
+  overflow-anchor: none;
   padding: 0.75rem 1.5rem 1.75rem;
   background: transparent;
   /* Flex items honour z-index while static: keep page content above the
@@ -1141,7 +1147,7 @@ button {
   padding: 0 1px;
 }
 
-tr.row-active {
+.row-active {
   background: var(--primary-muted);
 }
 
@@ -1548,7 +1554,10 @@ tr.row-active {
 /* auto-fit: three columns at the 960px pro window, gracefully 2/1 below. */
 .version-core-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  /* 16rem floor: the compact three-button action row needs ~211px of card
+     width (zh labels) to stay on one line; auto-fit still degrades to two
+     columns gracefully on narrower panes. */
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: 0.85rem;
   align-items: stretch;
 }
@@ -1695,10 +1704,20 @@ tr.row-active {
 }
 
 /* Inside the vertical kernel card: actions sit flush left, and the path foot
-   pins to the card bottom so all three equal-height cards line up. */
+   pins to the card bottom so all three equal-height cards line up. The row
+   never wraps — a second line would misalign the three equal-height cards —
+   so the buttons themselves go compact (the labels are shortened to match;
+   see settings.coreCheck/coreDownload/coreRestore). */
 .kernel-card .kernel-row-actions {
   margin-left: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  gap: 0.3rem;
+}
+
+.kernel-card .kernel-row-actions .glass-btn {
+  padding: 0.32rem 0.6rem;
+  font-size: 0.72rem;
+  gap: 0.25rem;
 }
 
 .kernel-card .kernel-row-foot {
@@ -1799,11 +1818,21 @@ tr.row-active {
   min-width: 9rem;
 }
 
-/* Delegated-protocol badge on node rows (list + grid). */
+/* Delegated-protocol badge on node rows (list + grid): same metrics as the
+   protocol <code> pill, rendered as a square outlined box to its right.
+   The multi-core settings table pairs it with .pill, which overrides most
+   of these back to the pill look there. */
 .sidecar-tag {
-  margin-left: 0.35rem;
-  font-size: 0.62rem;
-  padding: 0.05rem 0.4rem;
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  margin-left: 0.3rem;
+  white-space: nowrap;
 }
 
 /* —— Version tab: app bar (full width under the kernel cards) ——
@@ -1841,9 +1870,19 @@ tr.row-active {
   flex-shrink: 0;
 }
 
-.app-bar-ver .ver-ver {
+/* Current + latest are twin label/value columns: give both values identical
+   metrics so the pair reads as one aligned row (they used to diverge — 1.08rem
+   vs the late .mono rule's 0.78rem). The shared line-height stays taller than
+   the status pill so the latest column keeps the same height (and thus stays
+   centered in line) whether or not a pill is showing. */
+.app-bar-ver .ver-ver,
+.app-bar-latest .ver-stat {
   justify-content: flex-start;
-  font-size: 1.08rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .app-bar-actions {
@@ -2012,6 +2051,58 @@ tr.row-active {
   font-size: 0.7rem;
 }
 
+/* Bottom-right floating toast: shows core download/restore progress while
+   the user is away from the Settings tab (SettingsPage unmounts and its
+   local listener would otherwise miss the updates — see coreDownload.ts). */
+.core-download-toast {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 60;
+  width: 15.5rem;
+  padding: 0.7rem 0.8rem;
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+  backdrop-filter: blur(20px) saturate(1.42) brightness(0.96);
+  -webkit-backdrop-filter: blur(20px) saturate(1.42) brightness(0.96);
+  animation: core-download-toast-in 0.18s ease-out;
+}
+
+@keyframes core-download-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.core-download-toast-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.core-download-toast-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.core-download-toast-head .lat-spinner {
+  margin-left: auto;
+}
+
+.core-download-toast-error {
+  font-size: 0.75rem;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
 @keyframes core-progress-slide {
   from {
     transform: translateX(-110%);
@@ -2046,6 +2137,66 @@ tr.row-active {
 .nodes-view-segs {
   display: flex;
   gap: 0.5rem;
+}
+
+/* Collapse-all / expand-all pair next to the group seg — always present,
+   dims when grouping is off instead of disappearing (avoids layout shift). */
+.node-group-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.3rem;
+}
+
+/* CSS-drawn ⊖/⊕ glyphs: Segoe UI Symbol places the Unicode math glyphs
+   off-center inside the em box on Windows, so they don't line up with the
+   neighbouring seg labels (macOS SF Pro happens to render them centered).
+   Drawing them with borders/stripes keeps both platforms pixel-identical. */
+.node-group-fold-label {
+  position: relative;
+  box-sizing: border-box;
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  color: var(--accent, #5eb89a);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Horizontal stroke shared by ⊖ and ⊕. */
+.node-group-fold-label::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 55%;
+  height: 1.5px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+/* Vertical stroke, ⊕ only. */
+.node-group-fold-label.plus::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1.5px;
+  height: 55%;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.node-group-fold-label:hover:not(.disabled) {
+  opacity: 0.75;
+}
+
+.node-group-fold-label.disabled {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .segmented.compact {
@@ -2161,12 +2312,52 @@ tr.row-active {
   height: 49px;
 }
 
-/* —— Nodes page grouping (subscription / protocol / country) ——
-   Header rows share the node row height so the fixed-size virtualizer
-   math stays exact; the grid header spans all columns at card height and
-   is padded with filler cells to keep the per-cell indexing aligned. */
-.node-group-row > td {
-  height: 30px;
+/* —— Nodes page list view (div/grid layout, replaces native <table>) ——
+   Group header rows need to grow past a single line without fighting
+   table row-height rules, so the whole list is div-based; columns are
+   aligned via a shared grid-template-columns instead of table auto-layout. */
+.node-list {
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+.node-list-head {
+  display: grid;
+  color: var(--muted);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--border);
+}
+
+.node-list-head > span {
+  padding: 0.45rem 0.55rem;
+}
+
+.node-list-row {
+  display: grid;
+}
+
+.node-list-row > span {
+  display: flex;
+  align-items: center;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+.node-list-group-row {
+  /* Flex-center so the caret aligns with the label regardless of the
+     platform font's baseline handling. */
+  display: flex;
+  align-items: center;
   padding: 0 0.75rem;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--muted) 7%, transparent);
@@ -2175,11 +2366,16 @@ tr.row-active {
   user-select: none;
 }
 
+/* Border triangle (same trick as .solid-select-caret) — the ▾ glyph sits
+   above the baseline in Segoe UI, making it look vertically off on Windows. */
 .node-group-caret {
-  display: inline-block;
+  flex-shrink: 0;
+  width: 0;
+  height: 0;
   margin-right: 0.4rem;
-  font-size: 0.7em;
-  color: var(--muted);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--muted);
   transition: transform 0.15s ease;
 }
 
@@ -2204,46 +2400,24 @@ tr.row-active {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  min-width: 0;
+  text-align: left;
 }
 
 .node-group-flag {
   font-size: 1.05em;
+  flex-shrink: 0;
 }
 
 .node-group-count {
   color: var(--muted);
   font-size: 0.75rem;
+  flex-shrink: 0;
+  margin-left: 0.35rem;
 }
 
 
-/* —— 单点测试 armed: every node wears a green outline so the
-   click-to-test affordance stays visible across the whole list/grid.
-   Cards take a real border + soft glow; table rows draw theirs via the
-   cells (tr can't carry borders reliably under border-collapse). */
-.spot-armed .node-card {
-  border-color: var(--success-border);
-  box-shadow:
-    0 0 0 1px var(--success-border),
-    0 0 10px color-mix(in srgb, var(--success) 20%, transparent);
-}
-
-.spot-armed .node-virtual-row > td {
-  border-top: 1px solid var(--success-border);
-  border-bottom: 1px solid var(--success-border);
-}
-
-.spot-armed .node-virtual-row > td:first-child {
-  border-left: 1px solid var(--success-border);
-  border-radius: var(--radius) 0 0 var(--radius);
-}
-
-.spot-armed .node-virtual-row > td:last-child {
-  border-right: 1px solid var(--success-border);
-  border-radius: 0 var(--radius) var(--radius) 0;
-}
-
-
-.node-virtual-spacer > td {
+.node-virtual-spacer {
   padding: 0;
   border: 0;
 }
@@ -2265,6 +2439,7 @@ button.node-card,
 .node-card {
   position: relative;
   text-align: left;
+  cursor: pointer;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface) !important;
@@ -2283,8 +2458,20 @@ button.node-card,
   transition: border-color 0.12s, background 0.12s;
 }
 
+.node-card.disabled {
+  cursor: default;
+}
+
+/* .node-card clips overflow for text ellipsis, which would also clip the
+   ⋮ dropdown poking out past the card's edge. Lift the clip and stack the
+   card above its neighbors only while its own menu is open. */
+.node-card:has(.sub-menu-pop) {
+  overflow: visible;
+  z-index: 5;
+}
+
 button.node-card:hover:not(:disabled),
-.node-card:hover:not(:disabled) {
+.node-card:hover:not(.disabled) {
   background: var(--surface-2) !important;
   border-color: var(--border-strong);
   box-shadow: none;
@@ -2299,7 +2486,7 @@ button.node-card.active,
 }
 
 button.node-card:disabled,
-.node-card:disabled {
+.node-card.disabled {
   opacity: 0.7;
 }
 
@@ -2323,14 +2510,111 @@ button.node-card:disabled,
 
 .node-card-top {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
+  /* Leaves room on the right so the name/meta never runs under the
+     absolutely-positioned corner group. */
+  padding-right: 2.6rem;
+}
+
+/* Heart + ⋮ menu, pinned to the card's top-right corner regardless of how
+   long the protocol/meta content to their left grows. */
+.node-card-corner {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+/* —— 节点详情弹窗（⋮ 菜单「详情」） —— */
+.node-detail-modal {
+  width: min(30rem, calc(100vw - 3rem));
+}
+
+.node-detail-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-height: min(30rem, 60vh);
+  overflow-y: auto;
+}
+
+.node-detail-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.node-detail-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.node-detail-row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.22rem 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  align-items: baseline;
+}
+
+.node-detail-label {
+  flex: 0 0 8.5rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.node-detail-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
 }
 
 .node-dot {
   color: var(--primary);
   font-size: 0.75rem;
+}
+
+/* List-row lead cell: dot + favorite heart share the first column. */
+.node-list-lead {
+  gap: 0.35rem;
+}
+
+.node-fav-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+.node-fav-btn:hover {
+  opacity: 1;
+}
+
+.node-fav-btn.on {
+  color: #e0455f;
+  opacity: 1;
 }
 
 .node-card-latency {
@@ -2364,7 +2648,7 @@ button.node-card:disabled,
 
 .node-card-name {
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 0.8rem; /* 12.8px */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2393,8 +2677,17 @@ button.node-card:disabled,
 .node-card-meta {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 0.15rem;
   font-size: 0.75rem;
+}
+
+/* Protocol pill + sidecar badge on one line (node list cells and card meta);
+   without this the badge wraps to a second row and stretches the card. */
+.node-proto-tags {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .node-card-footer {
@@ -3102,6 +3395,16 @@ tr.rule-row:hover {
   overflow: visible;
 }
 
+/* Row ⋮ popovers open UPWARD: for the first rows they escape the table card
+   into the toolbar band, but .card's isolation traps their z-index inside the
+   card while the toolbar sits at z-index:70 (so its own downward popover can
+   overlay the table). Lift the table card above the toolbar while a row menu
+   is open — same :has idiom as the DNS panels / chain cards. */
+.rules-table-wrap:has(.rule-menu-pop) {
+  position: relative;
+  z-index: 80;
+}
+
 .rules-table {
   table-layout: fixed;
   width: 100%;
@@ -3505,7 +3808,9 @@ button.small {
 /* config — compact FlClash-like subscription cards */
 .sub-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 210px min → exactly 4 columns in the fixed 960px pro window (content
+     ≈912px after .main gutters); 240px only fit 3. */
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 0.65rem;
   align-items: stretch;
 }
@@ -3602,9 +3907,11 @@ button.mix-on {
   color: var(--warn);
 }
 
-.sub-card-foot {
+/* Relative "updated x hours ago" in the card's title row, before the ⋮ menu */
+.sub-card-updated {
   font-size: 0.7rem;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 /* FlClash SubscriptionInfoView: bar then "used / total · expire" */
@@ -3645,17 +3952,37 @@ button.mix-on {
 
 .traffic-line {
   display: flex;
-  flex-wrap: wrap;
+  /* Single line, never wraps: used/total stays intact, the expire label
+     shrinks into an ellipsis when the card is too narrow. */
+  flex-wrap: nowrap;
   align-items: baseline;
   gap: 0.2rem 0.35rem;
   font-size: 0.72rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The traffic figures keep their full width; only the tail label squeezes. */
+.traffic-line > span:first-child {
+  flex-shrink: 0;
 }
 
 .traffic-line .dot-sep {
   opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* Expire / remaining-time label: fills whatever line space is left and
+   ellipsizes when too long; full text stays in the tooltip. */
+.traffic-line .traffic-expire {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .sub-card-top-right {
@@ -4784,6 +5111,27 @@ tr.dns-diag-tr:hover {
   padding-top: 0.25rem;
 }
 
+/* —— 远程加密 DNS 池（⋯ 弹窗编辑） —— */
+.dns-remote-pool-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dns-remote-hint {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.dns-remote-error {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #f87171;
+  word-break: break-all;
+}
+
 .field-hint {
   font-size: 0.75rem;
   display: block;
@@ -5458,6 +5806,35 @@ tr.dns-diag-tr:hover {
 
 .instrument-kv .kv-v {
   color: var(--muted);
+}
+
+/* Exit-IP row of the network-probe card: keep long IPv6 answers on one
+   line, country code + direct badge trail after the address. */
+.instrument-kv .kv-v.exit-ip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: calc(100% - 4.55rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.instrument-kv .kv-v.exit-ip .lat-spinner {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+.exit-ip-direct {
+  flex: none;
+  font-size: 0.6rem;
+  line-height: 1;
+  padding: 0.14rem 0.3rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  color: var(--warning);
 }
 
 .kv-v-badge {
@@ -7097,11 +7474,13 @@ select:not([size]):disabled {
 }
 
 /* —— Core log lines (Logs page kernel-log view) ——
-   Core lines carry no separate timestamp/target columns (both live inside
-   the message text), so the row grid drops to level + message. */
+   The timestamp is parsed out of the raw message (ANSI codes stripped,
+   zone offset dropped), so the row grid is ts + level + message — the ts
+   column is slightly wider than the app log's to fit the `MM-DD HH:MM:SS`
+   fallback for lines from another day. */
 
 .log-line.core-log-line {
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 104px 52px 1fr;
 }
 
 /* Running indicator inside the kernel log tabs (green = process alive). */
@@ -7927,6 +8306,153 @@ button.active-soft {
   place-items: center;
   font-size: 0.72rem;
   pointer-events: none;
+}
+
+/* —— simple-spark fullscreen toggle（首页实时活动卡右上角） —— */
+
+.simple-spark-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.simple-spark-fs {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 0;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.simple-spark-fs:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.simple-spark-fs svg {
+  display: block;
+}
+
+.simple-spark-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 46;
+  background: var(--overlay);
+}
+
+/* Expanded: the card leaves the grid (fixed overlay above page content and
+   the z-40 topnav, below z-50 form modals / z-60 error modal + toast) and
+   fills the window; a placeholder keeps its grid cell so the other five
+   cards keep their spots. Selector keeps (0,3,0) so the !important padding
+   here wins over `.instrument-grid > .simple-spark`. */
+.instrument-grid > .simple-spark.expanded {
+  position: fixed;
+  inset: 1.1rem;
+  z-index: 47;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 1rem 1.25rem 0.9rem !important;
+  cursor: default;
+  /* Opaque panel in fullscreen — the translucent --surface would let the
+     page bleed through the oversized canvas (same rationale as .modal). */
+  background: var(--panel-solid) !important;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38) !important;
+  animation: spark-expand-in var(--page-enter-ms, 240ms)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes spark-expand-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .instrument-grid > .simple-spark.expanded {
+    animation: none;
+  }
+}
+
+.simple-spark-placeholder {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Freeze the scroll container behind the overlay; .main's reserved
+   scrollbar-gutter keeps the layout from shifting sideways. */
+html.spark-fullscreen-open .main {
+  overflow: hidden;
+}
+
+/* Expanded scale-up: bigger type so the larger canvas doesn't read sparse.
+   Rails widen to feed the longer arcs. */
+.instrument-grid > .simple-spark.expanded .instrument-label {
+  font-size: 0.82rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-tag {
+  font-size: 0.7rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-legend {
+  font-size: 0.78rem;
+  gap: 0.35rem 0.55rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-conns {
+  font-size: 0.85rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-fs {
+  width: 1.8rem;
+  height: 1.8rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-fs svg {
+  width: 15px;
+  height: 15px;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-flow {
+  grid-template-columns: auto minmax(0, 1fr) 11rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-rail.left {
+  max-width: 11rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-rail-kicker {
+  font-size: 0.64rem;
+  padding-bottom: 0.3rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-col {
+  padding: 0.1rem 0 0.2rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-col li {
+  font-size: 0.8rem;
+  line-height: 1.35;
+  padding: 0.12rem 0;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-idle {
+  font-size: 0.95rem;
 }
 
 .simple-page-head {

@@ -1,36 +1,53 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   generateSingboxConfig,
   getProxyStatus,
   getSettings,
+  listAllNodes,
   listCustomConfigNodes,
   listNodeIds,
-  listNodesPage,
   pingNodesLatency,
   setCurrentNode,
   testCustomNodesLatency,
   testNodesLatency,
+  toggleFavoriteNode,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
+import { GlassSwitch } from "../components/GlassSwitch";
 import { ErrorModal } from "../components/ErrorModal";
+import { NodeDetailModal } from "../components/NodeDetailModal";
 import { useI18n } from "../i18n";
 import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
 import { waitForCoreRestart } from "../coreBusy";
 import { useVirtualRange } from "../hooks/useVirtualRange";
-import { filterCustomNodes, applyCustomLatency, type CustomLatencyMap } from "../customNodes";
+import { filterCustomNodes, applyCustomLatency, sortNodes, type CustomLatencyMap } from "../customNodes";
+import { createLatencyResultBuffer } from "../latencyStream";
 import type { AutoSelectMode, ProxyNode, SortMode, ViewMode } from "../types";
 
 const VIRTUALIZE_AFTER = 200;
 const LIST_ROW_HEIGHT = 49;
 const GRID_ROW_HEIGHT = 94;
-const PAGE_SIZE = 200;
 
 /** Slim group header band height (px). */
 const NODE_GROUP_H = 30;
-/** .node-grid row gap (0.65rem) — a spanning header row is followed by the
- *  gap before the next card row, so its pitch includes it. */
-const GRID_GAP = 10.4;
+/** List view column template — shared by the head row and every data row so
+ *  they align without relying on native <table> auto-layout (dropped so the
+ *  group header row can span full width and grow past a single line). */
+const NODE_LIST_COLS = "40px minmax(0,1.44fr) 90px minmax(0,1fr) 70px 90px";
+/** .node-grid-virtual row gap (10px, tighter than the resting 0.65rem) —
+ *  a spanning header row is followed by the gap before the next card row,
+ *  so its pitch includes it. */
+const GRID_GAP = 10;
+
+/** Cards-per-row in the grid view. Must mirror the .node-grid
+ *  grid-template-columns breakpoints in App.css (≤720px → 2, ≤900px → 3,
+ *  else 4); the pro window is a fixed 960px so this is 4 in practice. */
+function gridColumns() {
+  if (window.innerWidth <= 720) return 2;
+  if (window.innerWidth <= 900) return 3;
+  return 4;
+}
 
 /** Flat render items with per-item heights: the virtualizer runs in pixel
  *  space (itemSize=1) and a prefix-offset window maps px → items, which
@@ -45,7 +62,20 @@ type ListItem =
       h: number;
     }
   | { type: "node"; n: ProxyNode; h: number };
-type GridItem = ListItem;
+/** Grid items are row-granular: one item = one row of cards carrying the
+ *  full row pitch. Charging every card the full row height (the pre-fix
+ *  bug) overstated the virtual total ~cols× and the initial window only
+ *  rendered a couple of rows past the fold. */
+type GridItem =
+  | {
+      type: "group";
+      key: string;
+      label: string;
+      flag?: string;
+      count: number;
+      h: number;
+    }
+  | { type: "row"; nodes: ProxyNode[]; h: number };
 
 /** Render latency cell: spinner / ms / timeout / needs-core / dash */
 function LatencyDisplay({
@@ -96,7 +126,6 @@ export function NodesPage() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -109,10 +138,15 @@ export function NodesPage() {
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     return (localStorage.getItem("nodes.sortMode") as SortMode) || "default";
   });
-  // Click-test mode: node clicks probe latency instead of selecting.
-  const [clickTest, setClickTest] = useState<boolean>(
-    () => localStorage.getItem("nodes.clickTest") === "1",
+  // "Show favorites only" — persisted like viewMode.
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState<boolean>(
+    () => localStorage.getItem("nodes.favoritesOnly") === "1",
   );
+  // Node card ⋮ action menu: id of the node whose menu is open, or null.
+  const [menuId, setMenuId] = useState<string | null>(null);
+  // Node-detail modal: the full node object (list payloads already carry
+  // protocol parameters — see ListedNode's serde-flattened ProxyNode).
+  const [detailNode, setDetailNode] = useState<ProxyNode | null>(null);
 
   const [customRuntime, setCustomRuntime] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
@@ -130,9 +164,39 @@ export function NodesPage() {
   const [delegatedProtocols, setDelegatedProtocols] = useState<Set<string>>(
     new Set(),
   );
-  const reload = useCallback(async (append = false) => {
+  // Batch-test streaming: the rAF buffer between channel messages and state
+  // (see latencyStream.ts); stopped on unmount so no flush lands post-dismount.
+  const latencyBufferRef = useRef<ReturnType<
+    typeof createLatencyResultBuffer
+  > | null>(null);
+  useEffect(
+    () => () => latencyBufferRef.current?.stop(),
+    [],
+  );
+
+  // Grouping: default (flat) / subscription / protocol / country, persisted
+  // like viewMode. v2 key: the first iteration persisted "sub" as its
+  // default — the feature is unreleased, so bump the key to let every
+  // profile start on the new "default = flat" preference.
+  const [groupBy, setGroupBy] = useState<GroupBy>(
+    () =>
+      (localStorage.getItem("nodes.groupBy.v2") as GroupBy | null) || "none",
+  );
+  useEffect(() => {
+    localStorage.setItem("nodes.groupBy.v2", groupBy);
+  }, [groupBy]);
+
+  // Grid column count follows the CSS breakpoints (see gridColumns); kept
+  // as state so a resize re-chunks the virtual row items.
+  const [gridCols, setGridCols] = useState(gridColumns);
+  useEffect(() => {
+    const update = () => setGridCols(gridColumns());
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  const reload = useCallback(async () => {
     setError(null);
-    if (append) setLoadingMore(true);
     try {
       const settings = await getSettings();
       const custom = (settings.runtime_source ?? "generated").startsWith("singbox:");
@@ -148,32 +212,26 @@ export function NodesPage() {
             )
           : new Set(),
       );
-      const offset = append ? nodes.length : 0;
-      if (custom) {
-        // Custom mode: read-only nodes extracted from the sing-box config,
-        // overlaid with this session's latency results.
-        const all = applyCustomLatency(await listCustomConfigNodes(), customLatency);
-        const filtered = filterCustomNodes(all, query, sortMode, offset, PAGE_SIZE);
-        setNodes((prev) => (append ? [...prev, ...filtered.nodes] : filtered.nodes));
-        setTotal(filtered.total);
-      } else {
-        const page = await listNodesPage(query, sortMode, offset, PAGE_SIZE);
-        setNodes((prev) => (append ? [...prev, ...page.nodes] : page.nodes));
-        setTotal(page.total);
-      }
+      // Always load the full node set — grouping needs to see everything to
+      // classify correctly, and pagination made "load more" ambiguous once
+      // grouped (unclear which group new items would land in).
+      const all = custom
+        ? applyCustomLatency(await listCustomConfigNodes(), customLatency)
+        : await listAllNodes();
+      const filtered = filterCustomNodes(all, query, sortMode, 0, Number.MAX_SAFE_INTEGER);
+      setNodes(filtered.nodes);
+      setTotal(filtered.total);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       setLoading(false);
-      setLoadingMore(false);
     }
-  }, [nodes.length, query, sortMode, customLatency]);
+  }, [query, sortMode, customLatency]);
 
   useEffect(() => {
     setLoading(true);
-    const timer = window.setTimeout(() => void reload(false), 150);
+    const timer = window.setTimeout(() => void reload(), 150);
     return () => window.clearTimeout(timer);
-    // nodes.length changes as pages append and must not restart the first page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, sortMode]);
 
@@ -186,22 +244,13 @@ export function NodesPage() {
   }, [sortMode]);
 
   useEffect(() => {
-    localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
-  }, [clickTest]);
+    localStorage.setItem("nodes.favoritesOnly", showFavoritesOnly ? "1" : "0");
+  }, [showFavoritesOnly]);
 
-  // Grouping: default (flat) / subscription / protocol / country, persisted
-  // like viewMode. v2 key: the first iteration persisted "sub" as its
-  // default — the feature is unreleased, so bump the key to let every
-  // profile start on the new "default = flat" preference.
-  const [groupBy, setGroupBy] = useState<GroupBy>(
-    () =>
-      (localStorage.getItem("nodes.groupBy.v2") as GroupBy | null) || "none",
+  const displayed = useMemo(
+    () => (showFavoritesOnly ? nodes.filter((n) => n.favorite) : nodes),
+    [nodes, showFavoritesOnly],
   );
-  useEffect(() => {
-    localStorage.setItem("nodes.groupBy.v2", groupBy);
-  }, [groupBy]);
-
-  const displayed = nodes;
 
   // Flat render items: slim collapsible group headers interleave with
   // nodes; each item carries its own height (headers are slimmer than
@@ -215,10 +264,38 @@ export function NodesPage() {
     [displayed, groupBy, locale, t],
   );
 
-  // Collapsed group keys (session-only — collapse is a browsing gesture).
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    () => new Set(),
+  // Collapsed group keys, persisted per grouping dimension (keys from one
+  // dimension aren't meaningful in another). Default is every group
+  // expanded; the user's last collapse state is restored on return.
+  function collapsedStorageKey(by: GroupBy) {
+    return `nodes.collapsedGroups.${by}`;
+  }
+  function loadCollapsed(by: GroupBy): Set<string> {
+    if (by === "none") return new Set();
+    try {
+      const raw = localStorage.getItem(collapsedStorageKey(by));
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      return new Set();
+    }
+  }
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() =>
+    loadCollapsed(groupBy),
   );
+  // Reload persisted state when the dimension changes (keys don't carry over).
+  const prevGroupByRef = useRef<GroupBy>(groupBy);
+  useEffect(() => {
+    if (prevGroupByRef.current === groupBy) return;
+    prevGroupByRef.current = groupBy;
+    setCollapsedGroups(loadCollapsed(groupBy));
+  }, [groupBy]);
+  useEffect(() => {
+    if (groupBy === "none") return;
+    localStorage.setItem(
+      collapsedStorageKey(groupBy),
+      JSON.stringify([...collapsedGroups]),
+    );
+  }, [groupBy, collapsedGroups]);
   function toggleGroup(key: string) {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -226,6 +303,12 @@ export function NodesPage() {
       else next.add(key);
       return next;
     });
+  }
+  function collapseAll() {
+    setCollapsedGroups(new Set(groups.map((g) => g.key)));
+  }
+  function expandAll() {
+    setCollapsedGroups(new Set());
   }
 
   const listItems = useMemo(() => {
@@ -254,9 +337,17 @@ export function NodesPage() {
 
   const gridItems = useMemo(() => {
     const out: GridItem[] = [];
+    const pushRows = (list: ProxyNode[]) => {
+      for (let i = 0; i < list.length; i += gridCols) {
+        out.push({
+          type: "row",
+          nodes: list.slice(i, i + gridCols),
+          h: GRID_ROW_HEIGHT,
+        });
+      }
+    };
     if (groups.length === 0) {
-      for (const n of displayed)
-        out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
+      pushRows(displayed);
       return out;
     }
     for (const g of groups) {
@@ -270,13 +361,10 @@ export function NodesPage() {
         count: g.nodes.length,
         h: NODE_GROUP_H + GRID_GAP,
       });
-      if (open) {
-        for (const n of g.nodes)
-          out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
-      }
+      if (open) pushRows(g.nodes);
     }
     return out;
-  }, [groups, displayed, collapsedGroups]);
+  }, [groups, displayed, collapsedGroups, gridCols]);
 
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
 
@@ -384,10 +472,11 @@ export function NodesPage() {
     setTesting(true);
     setTestKind(kind);
     setError(null);
-    // no top banner / completion message
-    // Custom mode probes the extracted (unsaved) nodes — ids come from the
-    // loaded list because they are not in the node store.
-    const ids = customRuntime ? nodes.map((n) => n.id) : await listNodeIds(query);
+    // Ids in current display order — the backend launches probes (and
+    // streams results back) top to bottom of the list as shown. Custom mode
+    // probes the extracted (unsaved) nodes — ids come from the loaded list
+    // because they are not in the node store.
+    const ids = customRuntime ? nodes.map((n) => n.id) : await listNodeIds(query, sortMode);
     const idSet = new Set(ids);
     setTestingIds(idSet);
 
@@ -400,31 +489,35 @@ export function NodesPage() {
       ),
     );
 
-    try {
-      // Custom mode can't map into the running config, so both probes are
-      // the same direct-TCP path there.
-      const batch = customRuntime
-        ? await testCustomNodesLatency(3000)
-        : kind === "ping"
-          ? await pingNodesLatency(ids, 3000)
-          : await testNodesLatency(ids, 3000);
-      const map = new Map(batch.results.map((r) => [r.id, r]));
-      setUnsupportedIds(
-        new Set(batch.results.filter((r) => r.method === "unsupported").map((r) => r.id)),
-      );
+    // Per-node streaming: the backend pushes each result over an IPC channel
+    // the moment its probe completes; the buffer applies them per animation
+    // frame (see latencyStream.ts).
+    const buffer = createLatencyResultBuffer((batch) => {
+      setUnsupportedIds((prev) => {
+        const next = new Set(prev);
+        for (const r of batch.values())
+          if (r.method === "unsupported") next.add(r.id);
+        return next;
+      });
       if (customRuntime) {
         // Session-only — remember results across filter / sort / page reloads.
         setCustomLatency((prev) => {
           const next = new Map(prev);
-          for (const r of batch.results) {
-            next.set(r.id, { ms: r.latency_ms ?? null, at: r.tested_at });
+          for (const [id, r] of batch) {
+            next.set(id, { ms: r.latency_ms ?? null, at: r.tested_at });
           }
           return next;
         });
       }
-      setNodes((prev) =>
-        prev.map((n) => {
-          const r = map.get(n.id);
+      // Retire the finished spinners as their results land.
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of batch.keys()) next.delete(id);
+        return next;
+      });
+      setNodes((prev) => {
+        const next = prev.map((n) => {
+          const r = batch.get(n.id);
           if (!r) return n;
           return {
             ...n,
@@ -432,9 +525,28 @@ export function NodesPage() {
             latency_ms: r.latency_ms ?? null,
             latency_at: r.tested_at,
           };
-        }),
+        });
+        // Re-sort in place as results stream in so the latency sort mode
+        // moves faster nodes to the top live, not just after reload.
+        return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+      });
+    });
+    latencyBufferRef.current = buffer;
+
+    try {
+      // Custom mode can't map into the running config, so both probes are
+      // the same direct-TCP path there.
+      const batch = customRuntime
+        ? await testCustomNodesLatency(3000, buffer.push)
+        : kind === "ping"
+          ? await pingNodesLatency(ids, 3000, buffer.push)
+          : await testNodesLatency(ids, 3000, buffer.push);
+      buffer.flushNow();
+      setUnsupportedIds(
+        new Set(batch.results.filter((r) => r.method === "unsupported").map((r) => r.id)),
       );
     } catch (e) {
+      buffer.flushNow();
       setError(typeof e === "string" ? e : String(e));
       if (!customRuntime) await reload();
     } finally {
@@ -442,7 +554,7 @@ export function NodesPage() {
       setTestingIds(new Set());
       // Custom results are session-only — keep the merged values instead of
       // re-reading the latency-less extracted list.
-      if (!customRuntime) await reload(false);
+      if (!customRuntime) await reload();
     }
   }
 
@@ -473,13 +585,14 @@ export function NodesPage() {
         return next;
       });
       if (r) {
-        setNodes((prev) =>
-          prev.map((n) =>
+        setNodes((prev) => {
+          const next = prev.map((n) =>
             n.id === id
               ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
               : n,
-          ),
-        );
+          );
+          return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+        });
       }
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
@@ -492,27 +605,176 @@ export function NodesPage() {
     }
   }
 
-  /** Slim collapsible group header row (list). */
+  // Optimistic favorite toggle: flip local state immediately, then confirm
+  // with the backend. Reverts on failure (e.g. node no longer in the store).
+  async function toggleFavorite(id: string) {
+    const prevValue = nodes.find((n) => n.id === id)?.favorite ?? false;
+    setNodes((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, favorite: !prevValue } : n)),
+    );
+    try {
+      const next = await toggleFavoriteNode(id);
+      setNodes((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, favorite: next } : n)),
+      );
+    } catch (e) {
+      setNodes((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, favorite: prevValue } : n)),
+      );
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  // Dismiss the ⋮ menu on outside click / Escape — same pattern as the
+  // subscription card's action menu (ConfigPage's data-sub-menu guard).
+  useEffect(() => {
+    if (!menuId) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-node-menu]")) return;
+      setMenuId(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuId(null);
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuId]);
+
+  /** Node card ⋮ action menu: ping / real-latency test the single node.
+   *  Favoriting has its own heart icon next to the menu trigger, so it's
+   *  not duplicated here. Same visual pattern as the subscription card's
+   *  action menu (.sub-menu / .sub-menu-pop in App.css). */
+  function renderNodeMenu(n: ProxyNode) {
+    const busy = testingIds.has(n.id);
+    const open = menuId === n.id;
+    return (
+      <div
+        className="sub-menu"
+        data-node-menu
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="sub-menu-trigger"
+          aria-label={t("common.actions")}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setMenuId((id) => (id === n.id ? null : n.id))}
+        >
+          ⋮
+        </button>
+        {open && (
+          <div className="sub-menu-pop" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
+              onClick={() => {
+                setMenuId(null);
+                setDetailNode(n);
+              }}
+            >
+              {t("nodes.ctxDetails")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
+              disabled={busy}
+              onClick={() => {
+                setMenuId(null);
+                void onTestOne(n.id);
+              }}
+            >
+              {t("nodes.ctxTestReal")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
+              disabled={busy}
+              onClick={() => {
+                setMenuId(null);
+                void onTestOnePing(n.id);
+              }}
+            >
+              {t("nodes.ctxTestPing")}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /** Single-node ping probe — same direct-TCP path as the toolbar's batch
+   *  ping, scoped to one id (context-menu "test ping"). */
+  async function onTestOnePing(id: string) {
+    if (testing || testingIds.size > 0 || busyId || switching) return;
+    setTestKind("ping");
+    setError(null);
+    setTestingIds(new Set([id]));
+    setNodes((prev) =>
+      prev.map((n) =>
+        n.id === id ? { ...n, latency_ms: undefined, latency_at: undefined } : n,
+      ),
+    );
+    try {
+      const batch = await pingNodesLatency([id], 3000);
+      const r = batch.results.find((x) => x.id === id);
+      setUnsupportedIds((prev) => {
+        const next = new Set(prev);
+        if (r?.method === "unsupported") next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      if (r) {
+        setNodes((prev) => {
+          const next = prev.map((n) =>
+            n.id === id
+              ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
+              : n,
+          );
+          return sortMode === "latency" ? sortNodes(next, sortMode) : next;
+        });
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  /** Slim collapsible group header row (list). Plain div, not a table row —
+   *  spans the full row width so it can grow past a single line later
+   *  without fighting native <table> row-height rules. */
   function renderGroupRow(item: Extract<ListItem, { type: "group" }>) {
     const open = !collapsedGroups.has(item.key);
     return (
-      <tr
+      <div
         key={item.key}
-        className="node-group-row"
+        className="node-list-group-row"
+        style={{ height: NODE_GROUP_H }}
         onClick={() => toggleGroup(item.key)}
         title={t("nodes.groupToggleHint")}
       >
-        <td colSpan={6}>
-          <span className={`node-group-caret${open ? "" : " closed"}`}>
-            ▾
-          </span>
-          <span className="node-group-label">
-            {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
-            {item.label}
-          </span>
-          <span className="node-group-count mono">{item.count}</span>
-        </td>
-      </tr>
+        {/* CSS-drawn caret — the ▾ glyph renders off-center in Segoe UI. */}
+        <span className={`node-group-caret${open ? "" : " closed"}`} />
+        <span className="node-group-label">
+          {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
+          {item.label}
+        </span>
+        <span className="node-group-count mono">{item.count}</span>
+      </div>
     );
   }
 
@@ -527,9 +789,7 @@ export function NodesPage() {
         onClick={() => toggleGroup(item.key)}
         title={t("nodes.groupToggleHint")}
       >
-        <span className={`node-group-caret${open ? "" : " closed"}`}>
-          ▾
-        </span>
+        <span className={`node-group-caret${open ? "" : " closed"}`} />
         <span className="node-group-label">
           {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
           {item.label}
@@ -543,39 +803,50 @@ export function NodesPage() {
                 const active = n.id === currentId;
                 const isTesting = testingIds.has(n.id);
                 return (
-                  <tr
+                  <div
                     key={n.id}
-                    className={`node-virtual-row ${active ? "row-active" : ""}`}
-                    onClick={
-                      customRuntime
-                        ? undefined
-                        : clickTest
-                          ? () => void onTestOne(n.id)
-                          : () => void onSelect(n.id)
-                    }
-                    style={{ cursor: customRuntime ? "default" : "pointer" }}
-                    title={
-                      !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
-                    }
+                    className={`node-list-row node-virtual-row ${active ? "row-active" : ""}`}
+                    style={{
+                      gridTemplateColumns: NODE_LIST_COLS,
+                      cursor: customRuntime ? "default" : "pointer",
+                    }}
+                    onClick={customRuntime ? undefined : () => void onSelect(n.id)}
                   >
-                    <td>{active ? "●" : "○"}</td>
-                    <td>
+                    <span className="node-list-lead">
+                      {!customRuntime && (
+                        <button
+                          type="button"
+                          className={`node-fav-btn${n.favorite ? " on" : ""}`}
+                          title={t("nodes.favoriteToggleHint")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleFavorite(n.id);
+                          }}
+                        >
+                          {n.favorite ? "♥" : "♡"}
+                        </button>
+                      )}
+                      <span>{active ? "●" : "○"}</span>
+                    </span>
+                    <span>
                       <div className="node-list-name">{n.name}</div>
                       {n.subscription_name ? (
                         <div className="node-sub-label" title={n.subscription_name}>
                           {n.subscription_name}
                         </div>
                       ) : null}
-                    </td>
-                    <td>
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
-                    </td>
-                    <td>{n.server}</td>
-                    <td>{n.port}</td>
-                    <td className="node-list-latency">
+                    </span>
+                    <span>
+                      <span className="node-proto-tags">
+                        <code>{n.protocol}</code>
+                        {delegatedProtocols.has(n.protocol) ? (
+                          <span className="sidecar-tag">Xray</span>
+                        ) : null}
+                      </span>
+                    </span>
+                    <span>{n.server}</span>
+                    <span>{n.port}</span>
+                    <span className="node-list-latency">
                       <LatencyDisplay
                         ms={n.latency_ms}
                         latencyAt={n.latency_at}
@@ -583,33 +854,61 @@ export function NodesPage() {
                         unsupported={unsupportedIds.has(n.id)}
                         unsupportedLabel={pingNote}
                       />
-                    </td>
-                  </tr>
+                    </span>
+                  </div>
                 );
   }
 
   function renderNodeCard(n: ProxyNode) {
               const active = n.id === currentId;
               const isTesting = testingIds.has(n.id);
+              const disabled = customRuntime || busyId === n.id;
               return (
-                <button
+                <div
                   key={n.id}
-                  type="button"
-                  className={`node-card ${active ? "active" : ""}`}
-                  onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
-                  disabled={customRuntime || busyId === n.id}
-                  title={
-                    !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
+                  role="button"
+                  tabIndex={disabled ? -1 : 0}
+                  aria-disabled={disabled}
+                  className={`node-card ${active ? "active" : ""}${disabled ? " disabled" : ""}`}
+                  onClick={disabled ? undefined : () => void onSelect(n.id)}
+                  onKeyDown={
+                    disabled
+                      ? undefined
+                      : (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            void onSelect(n.id);
+                          }
+                        }
                   }
                 >
                   <div className="node-card-top">
                     <span className="node-dot">{active ? "●" : "○"}</span>
                     <div className="node-card-meta">
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
+                      <div className="node-proto-tags">
+                        <code>{n.protocol}</code>
+                        {delegatedProtocols.has(n.protocol) ? (
+                          <span className="sidecar-tag">Xray</span>
+                        ) : null}
+                      </div>
                     </div>
+                    {!customRuntime && (
+                      <div className="node-card-corner">
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          className={`node-fav-btn${n.favorite ? " on" : ""}`}
+                          title={t("nodes.favoriteToggleHint")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleFavorite(n.id);
+                          }}
+                        >
+                          {n.favorite ? "♥" : "♡"}
+                        </span>
+                        {renderNodeMenu(n)}
+                      </div>
+                    )}
                   </div>
                   <div className="node-card-name" title={n.name}>
                     {n.name}
@@ -628,7 +927,7 @@ export function NodesPage() {
                       />
                     </span>
                   </div>
-                </button>
+                </div>
               );
   }
 
@@ -700,28 +999,16 @@ export function NodesPage() {
               {testing && testKind === "ping" ? t("nodes.pinging") : t("nodes.pingTest")}
             </GlassButton>
           )}
-          {/* 单点测试 toggle: state reads from the LED dot alone — gray
-              while off, green while armed (same LED language as the logs
-              page kernel tabs). Label stays constant in both states.
-              Meaningless in custom mode (rows are not clickable there) —
-              hidden with ping. */}
-          {!customRuntime && (
-            <GlassButton
-              icon={
-                <span
-                  className={`seg-dot${clickTest ? " on" : ""}`}
-                  aria-hidden
-                />
-              }
-              onClick={() => setClickTest((v) => !v)}
-              title={t("nodes.clickTestHint")}
-            >
-              {t("nodes.clickTest")}
-            </GlassButton>
-          )}
 
           {/* Grouping + view segs glue together on one wrapped row. */}
           <div className="nodes-view-segs">
+            <GlassSwitch
+              checked={showFavoritesOnly}
+              onChange={setShowFavoritesOnly}
+              label={`♥ ${t("nodes.favoritesOnly")}`}
+              title={t("nodes.favoritesOnlyHint")}
+              capsule
+            />
             <GlassSeg
               value={groupBy}
               ariaLabel={t("nodes.groupBy")}
@@ -733,6 +1020,20 @@ export function NodesPage() {
                 { value: "country", label: t("nodes.groupCountry") },
               ]}
             />
+            <div className="node-group-fold" role="group" aria-label={t("nodes.groupBy")}>
+              {/* CSS-drawn ⊖/⊕ — Unicode math glyphs sit off-center in
+                  Segoe UI Symbol on Windows (fine on macOS SF Pro). */}
+              <span
+                className={`node-group-fold-label minus${groupBy === "none" ? " disabled" : ""}`}
+                onClick={groupBy === "none" ? undefined : collapseAll}
+                title={t("nodes.collapseAll")}
+              />
+              <span
+                className={`node-group-fold-label plus${groupBy === "none" ? " disabled" : ""}`}
+                onClick={groupBy === "none" ? undefined : expandAll}
+                title={t("nodes.expandAll")}
+              />
+            </div>
             <GlassSeg
               value={viewMode}
               ariaLabel="视图"
@@ -768,23 +1069,19 @@ export function NodesPage() {
             : "—"}
         </div>
       ) : viewMode === "list" ? (
-        <div className={`card table-wrap${clickTest ? " spot-armed" : ""}`}>
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 40 }}></th>
-                <th>{t("nodes.sortName")}</th>
-                <th>proto</th>
-                <th>host</th>
-                <th>port</th>
-                <th style={{ width: 90 }}>{t("nodes.sortLatency")}</th>
-              </tr>
-            </thead>
-            <tbody ref={listPx.containerRef as React.RefObject<HTMLTableSectionElement>}>
+        <div className="card table-wrap">
+          <div className="node-list">
+            <div className="node-list-head" style={{ gridTemplateColumns: NODE_LIST_COLS }}>
+              <span></span>
+              <span>{t("nodes.sortName")}</span>
+              <span>proto</span>
+              <span>host</span>
+              <span>port</span>
+              <span>{t("nodes.sortLatency")}</span>
+            </div>
+            <div ref={listPx.containerRef as React.RefObject<HTMLDivElement>}>
               {listWin.top > 0 && (
-                <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listWin.top }} />
-                </tr>
+                <div className="node-virtual-spacer" aria-hidden="true" style={{ height: listWin.top }} />
               )}
               {listItems
                 .slice(listWin.first, listWin.last)
@@ -796,12 +1093,14 @@ export function NodesPage() {
                   ),
                 )}
               {listWin.bottom < (listOffsets[listOffsets.length - 1] ?? 0) && (
-                <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listWin.bottomPad }} />
-                </tr>
+                <div
+                  className="node-virtual-spacer"
+                  aria-hidden="true"
+                  style={{ height: listWin.bottomPad }}
+                />
               )}
-            </tbody>
-          </table>
+            </div>
+          </div>
         </div>
       ) : (
         <div
@@ -812,14 +1111,14 @@ export function NodesPage() {
             <div style={{ height: gridWin.top }} aria-hidden="true" />
           )}
           <div
-            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}${clickTest ? " spot-armed" : ""}`}
+            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}`}
           >
             {gridItems
               .slice(gridWin.first, gridWin.last)
               .map((item) =>
                 item.type === "group"
                   ? renderGroupHead(item)
-                  : renderNodeCard(item.n),
+                  : item.nodes.map((n) => renderNodeCard(n)),
               )}
           </div>
           {gridWin.bottom < (gridOffsets[gridOffsets.length - 1] ?? 0) && (
@@ -827,12 +1126,9 @@ export function NodesPage() {
           )}
         </div>
       )}
-      {!loading && nodes.length < total && (
-        <div style={{ display: "flex", justifyContent: "center", padding: 12 }}>
-          <GlassButton disabled={loadingMore} onClick={() => void reload(true)}>
-            {loadingMore ? t("common.loading") : `加载更多（${nodes.length}/${total}）`}
-          </GlassButton>
-        </div>
+
+      {detailNode && (
+        <NodeDetailModal node={detailNode} onClose={() => setDetailNode(null)} />
       )}
     </div>
   );

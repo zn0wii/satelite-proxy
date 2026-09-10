@@ -6,7 +6,7 @@
 use crate::config::punycode::to_ascii_domain;
 use crate::domain::{
     read_system_hosts_pairs, DnsAction, DnsRule, DnsSettings, DomainMatcher, FakeIpConfig,
-    HostsConfig, Rule, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
+    HostsConfig, Rule, DOMESTIC_DNS_POOL,
 };
 use serde_json::{json, Value};
 
@@ -57,14 +57,32 @@ fn dns_final_tag(dns_final: &str) -> &'static str {
     }
 }
 
-/// Extract the host from a DoH pool URL (`https://1.1.1.1/dns-query` →
-/// `1.1.1.1`). sing-box expresses DoH as `{type:"https", server:<host>}`,
-/// so the shared pool URL form needs this bridge. Pools only ever carry
-/// IP-literal DoH endpoints (no bootstrap dependency), so plain string
-/// slicing is enough.
-fn doh_host(url: &str) -> &str {
+/// Split a DoH pool URL into `(host, port, path)`. sing-box's https server
+/// takes discrete `server` / `server_port` / `path` fields, so pool URLs
+/// (the built-in IP-literal entries and user-configured ones with domains,
+/// ports and custom paths alike) must be decomposed. Port/path are returned
+/// only when the URL carries them; the default path (`/dns-query`) is
+/// normalized away to keep the built-in pool's output unchanged.
+fn doh_parts(url: &str) -> (&str, Option<u16>, Option<String>) {
     let rest = url.strip_prefix("https://").unwrap_or(url);
-    rest.split('/').next().unwrap_or(rest)
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(format!("/{p}"))),
+        None => (rest, None),
+    };
+    // `[ipv6]:port` keeps the bracketed host; `host:port` splits when the
+    // tail is all digits.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            (h, p.parse().ok())
+        }
+        _ => (authority, None),
+    };
+    // Default path → emit nothing (matches the built-in pool's output).
+    let path = match path {
+        Some(p) if p != "/dns-query" => Some(p),
+        _ => None,
+    };
+    (host, port, path)
 }
 
 /// sing-box server definitions (local + the shared pools).
@@ -78,16 +96,27 @@ fn doh_host(url: &str) -> &str {
 /// 1.1.1.1 are commonly blocked on direct connections, and with TUN +
 /// hijack-dns every system query funnels into this server — a dead direct
 /// DoH therefore takes down name resolution for the whole machine.
-fn builtin_servers(fake_ip: &FakeIpConfig) -> Vec<Value> {
+/// Domain-based user endpoints resolve through `route.default_domain_resolver`
+/// (sing-box's implicit bootstrap for https servers without `domain_resolver`).
+fn builtin_servers(settings: &DnsSettings, fake_ip: &FakeIpConfig) -> Vec<Value> {
+    let remote = settings.effective_remote_pool();
+    let (remote_host, remote_port, remote_path) = doh_parts(remote.first().map(String::as_str).unwrap_or(""));
+    let mut dns_remote = json!({
+        "type": "https",
+        "tag": TAG_REMOTE,
+        "server": remote_host,
+        "detour": "proxy"
+    });
+    if let Some(port) = remote_port {
+        dns_remote["server_port"] = json!(port);
+    }
+    if let Some(path) = remote_path {
+        dns_remote["path"] = json!(path);
+    }
     let mut servers = vec![
         json!({ "type": "local", "tag": TAG_LOCAL }),
         json!({ "type": "udp", "tag": TAG_CN, "server": DOMESTIC_DNS_POOL[0] }),
-        json!({
-            "type": "https",
-            "tag": TAG_REMOTE,
-            "server": doh_host(REMOTE_DNS_POOL[0]),
-            "detour": "proxy"
-        }),
+        dns_remote,
     ];
     if fake_ip.enabled {
         let mut fi = json!({
@@ -232,7 +261,7 @@ fn build_default(
     final_tag: &str,
     tun_enabled: bool,
 ) -> BuiltDns {
-    let mut servers = builtin_servers(&settings.fake_ip);
+    let mut servers = builtin_servers(settings, &settings.fake_ip);
     let mut rules: Vec<Value> = Vec::new();
 
     if let Some((host_srv, host_rule)) = hosts_layer(&settings.hosts) {
@@ -248,11 +277,15 @@ fn build_default(
     );
     rules.extend(fakeip_rules(&settings.fake_ip, TAG_LOCAL));
 
+    // `independent_cache` was removed in sing-box 1.14 with no replacement —
+    // the cache is now always keyed by transport name, making the field
+    // unnecessary. Omitted unconditionally: on pre-1.14 cores this is
+    // exactly the "independent cache" behavior (the field's default), so
+    // dropping it is a no-op there too.
     let dns = json!({
         "servers": servers,
         "rules": rules,
         "final": final_tag,
-        "independent_cache": settings.cache,
         "strategy": "prefer_ipv4"
     });
     BuiltDns {
@@ -321,7 +354,7 @@ fn normalize_suffix(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::DnsSettings;
+    use crate::domain::{DnsSettings, REMOTE_DNS_POOL};
 
     #[test]
     fn dns_remote_detours_through_proxy() {
@@ -339,6 +372,15 @@ mod tests {
     }
 
     #[test]
+    fn independent_cache_is_never_emitted() {
+        // Removed in sing-box 1.14 with no replacement — the cache is now
+        // always keyed by transport name, so omitting the field matches the
+        // old default (`cache: true`, independent caching) on every core.
+        let b = build_dns_section(&DnsSettings::default(), false, &[]);
+        assert!(b.dns.get("independent_cache").is_none());
+    }
+
+    #[test]
     fn builtin_servers_follow_the_shared_pools() {
         // Pool unification guard: sing-box must resolve from the same
         // addresses the other two cores use (domain::REMOTE/DOMESTIC_DNS_POOL).
@@ -348,7 +390,7 @@ mod tests {
         assert_eq!(by_tag(TAG_CN)["server"], json!(DOMESTIC_DNS_POOL[0]));
         assert_eq!(
             by_tag(TAG_REMOTE)["server"],
-            json!(doh_host(REMOTE_DNS_POOL[0]))
+            json!(doh_parts(REMOTE_DNS_POOL[0]).0)
         );
         // sing-box addresses one server tag per rule (no racing/fallback),
         // so only pool[0] of each pool is emitted — no dead second tags.
@@ -357,10 +399,43 @@ mod tests {
         let b = build_dns_section(&s, false, &[]);
         assert_eq!(b.dns["servers"].as_array().unwrap().len(), 3);
         // The shared pool must stay IP-literal so no bootstrap lookup is
-        // ever needed (see doh_host).
+        // ever needed (see doh_parts).
         assert!(REMOTE_DNS_POOL
             .iter()
-            .all(|u| doh_host(u).parse::<std::net::IpAddr>().is_ok()));
+            .all(|u| doh_parts(u).0.parse::<std::net::IpAddr>().is_ok()));
+    }
+
+    #[test]
+    fn custom_remote_dns_overrides_the_builtin_pool() {
+        // User pool wins when non-empty; the emitted server follows the
+        // URL's host/port/path fields, and the proxy detour is preserved.
+        let mut s = DnsSettings::default();
+        s.remote_dns = vec!["https://9.9.9.9/dns-query".into()];
+        let b = build_dns_section(&s, true, &[]);
+        let remote = b.dns["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["tag"] == TAG_REMOTE)
+            .unwrap();
+        assert_eq!(remote["server"], json!("9.9.9.9"));
+        assert_eq!(remote["detour"], json!("proxy"));
+        assert!(remote.get("path").is_none());
+
+        // Domain + port + custom path entry (NextDNS-style profile URL).
+        let mut s = DnsSettings::default();
+        s.remote_dns = vec!["https://dns.example.com:8443/profile".into()];
+        let b = build_dns_section(&s, false, &[]);
+        let remote = b.dns["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["tag"] == TAG_REMOTE)
+            .unwrap();
+        assert_eq!(remote["server"], json!("dns.example.com"));
+        assert_eq!(remote["server_port"], json!(8443));
+        assert_eq!(remote["path"], json!("/profile"));
+        assert_eq!(remote["detour"], json!("proxy"));
     }
 
     #[test]

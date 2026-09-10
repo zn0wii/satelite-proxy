@@ -335,6 +335,64 @@ pub fn remove_setuid_core_if_needed(core: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Replace an old setuid-root core with a newly staged binary and carry the
+/// setuid bit over, in a SINGLE privileged shell call.
+///
+/// An in-place kernel upgrade (same binary path) that was previously elevated
+/// (TUN) needs authorization anyway to remove the old root-owned file; if we
+/// stop there, the new binary lands with normal permissions and the next
+/// manual restart fails on a port already held by leftover root-owned
+/// connections. Reusing that one authorization to also chown/chmod the new
+/// binary avoids a second prompt and that failure mode.
+///
+/// The old binary is moved aside to `previous` (not deleted outright) so the
+/// caller's existing rollback path still works; it's chowned back to the
+/// invoking user since root:admin+setuid also blocks unprivileged unlink/
+/// rename, same as `dest` itself.
+pub fn replace_setuid_core(staged: &Path, dest: &Path, previous: &Path) -> AppResult<()> {
+    let current_user = current_user_name()?;
+    let staged_q = shell_single_quote(&staged.to_string_lossy());
+    let dest_q = shell_single_quote(&dest.to_string_lossy());
+    let previous_q = shell_single_quote(&previous.to_string_lossy());
+    let user_q = shell_single_quote(&current_user);
+    let shell = format!(
+        "mv -f {dest} {previous} && chown {user} {previous} && \
+         mv -f {staged} {dest} && chown root:admin {dest} && chmod +sx {dest} && \
+         {{ xattr -dr com.apple.quarantine {dest} 2>/dev/null || true; }}",
+        dest = dest_q,
+        previous = previous_q,
+        staged = staged_q,
+        user = user_q,
+    );
+    let (code, output) = run_privileged(Path::new("/bin/sh"), &["-c", &shell])?;
+    if code != 0 {
+        return Err(AppError::Core(format!(
+            "升级 setuid sing-box 失败: {}",
+            output.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Name of the user invoking us, for chowning `previous` back after a
+/// privileged move so unprivileged cleanup/rollback keeps working.
+fn current_user_name() -> AppResult<String> {
+    let out = Command::new("id")
+        .arg("-un")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| AppError::Core(format!("id -un: {error}")))?;
+    if !out.status.success() {
+        return Err(AppError::Core("id -un: failed".into()));
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::Core("id -un: empty output".into()));
+    }
+    Ok(name)
+}
+
 /// Remove a `cache.db` left behind by a core session that ran as a
 /// different euid (typically root, under setuid TUN). The file is pure
 /// cache (fakeip mappings + rule-set cache) — safe to drop; the core

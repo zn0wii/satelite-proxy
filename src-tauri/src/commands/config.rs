@@ -29,6 +29,10 @@ pub struct ListedNode {
     pub node: ProxyNode,
     pub subscription_id: String,
     pub subscription_name: String,
+    /// Not part of `ProxyNode` — favorites are keyed on node id in a
+    /// separate store set (`AppStore::favorite_nodes`) so they survive a
+    /// subscription refresh that rebuilds every `ProxyNode` instance.
+    pub favorite: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +115,10 @@ pub fn update_settings(
     let mut find_process_changed = false;
     let mut bypass_lan_changed = false;
     let mut multi_core_changed = false;
+    let theme_changed = theme.is_some();
+    // Caption tint depends on accent/glow_color — re-apply live so the title
+    // bar follows a color change without waiting for a window (re)creation.
+    let mut titlebar_tint_changed = false;
     let settings = state
         .with_store_mut(|store| {
             if let Some(p) = mixed_port {
@@ -227,7 +235,10 @@ pub fn update_settings(
                     "green" | "blue" | "purple" | "pink" | "orange" | "cyan"
                 ) || is_hex
                 {
-                    store.settings.accent = ac;
+                    if store.settings.accent != ac {
+                        titlebar_tint_changed = true;
+                        store.settings.accent = ac;
+                    }
                 }
             }
             if let Some(gl) = glow_color {
@@ -244,7 +255,10 @@ pub fn update_settings(
                     )
                     || is_hex
                 {
-                    store.settings.glow_color = gl;
+                    if store.settings.glow_color != gl {
+                        titlebar_tint_changed = true;
+                        store.settings.glow_color = gl;
+                    }
                 }
             }
             if let Some(bg) = home_background {
@@ -382,6 +396,13 @@ pub fn update_settings(
         crate::autostart::set_launch_at_login(enabled).map_err(|e| e.to_string())?;
     }
     crate::tray::refresh_icon(&app);
+    if theme_changed {
+        crate::window_ctrl::apply_window_theme(&app);
+    } else if titlebar_tint_changed {
+        // Theme flip already re-tints via apply_window_theme; otherwise only
+        // refresh the caption color, not the whole window theme.
+        crate::window_ctrl::apply_titlebar_accent(&app);
+    }
 
     // route.final must restart: sing-box Clash PUT /configs often returns OK without
     // re-applying route.final (file updates, process keeps old final).
@@ -430,6 +451,15 @@ pub fn rename_node(
         .map_err(|e| e.to_string())
 }
 
+/// Toggle a node's favorite flag; returns the new state (true = now
+/// favorited). Fails if the node id doesn't exist in the store.
+#[tauri::command(async)]
+pub fn toggle_favorite_node(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state
+        .with_store_mut(|store| store.toggle_favorite_node(&id))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
     state
@@ -461,10 +491,31 @@ pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, Str
                         .copied()
                         .unwrap_or("")
                         .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect())
         })
         .map_err(|e| e.to_string())
+}
+
+/// Shared display sort for node listings. `list_nodes_page` and
+/// `list_node_ids` must agree so the Nodes-page latency test can run in
+/// the exact order the list is showing.
+fn sort_listed_nodes(nodes: &mut [ListedNode], sort_mode: Option<&str>) {
+    match sort_mode {
+        Some("name") => nodes.sort_by_cached_key(|n| n.node.name.to_lowercase()),
+        Some("latency") => nodes.sort_by(|a, b| {
+            let score = |n: &ListedNode| match n.node.latency_ms {
+                Some(ms) => (0u8, ms as u64),
+                None if n.node.latency_at.is_some() => (1, 0),
+                None => (2, 0),
+            };
+            score(a)
+                .cmp(&score(b))
+                .then_with(|| a.node.name.to_lowercase().cmp(&b.node.name.to_lowercase()))
+        }),
+        _ => {}
+    }
 }
 
 #[tauri::command(async)]
@@ -513,22 +564,10 @@ pub fn list_nodes_page(
                         .copied()
                         .unwrap_or("")
                         .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect();
-            match sort_mode.as_deref() {
-                Some("name") => nodes.sort_by_cached_key(|n| n.node.name.to_lowercase()),
-                Some("latency") => nodes.sort_by(|a, b| {
-                    let score = |n: &ListedNode| match n.node.latency_ms {
-                        Some(ms) => (0u8, ms as u64),
-                        None if n.node.latency_at.is_some() => (1, 0),
-                        None => (2, 0),
-                    };
-                    score(a)
-                        .cmp(&score(b))
-                        .then_with(|| a.node.name.to_lowercase().cmp(&b.node.name.to_lowercase()))
-                }),
-                _ => {}
-            }
+            sort_listed_nodes(&mut nodes, sort_mode.as_deref());
             let total = nodes.len();
             let offset = offset.unwrap_or(0).min(total);
             let limit = limit.unwrap_or(200).clamp(1, 500);
@@ -542,28 +581,32 @@ pub fn list_nodes_page(
         .map_err(|e| e.to_string())
 }
 
+/// Ids of listing-eligible nodes, in display order when `sort_mode` is
+/// given — the Nodes-page test buttons use this so probes start (and
+/// stream back) top to bottom of the current list.
 #[tauri::command(async)]
 pub fn list_node_ids(
     state: State<'_, AppState>,
     query: Option<String>,
+    sort_mode: Option<String>,
 ) -> Result<Vec<String>, String> {
     state
         .with_store(|store| {
+            let names: HashMap<&str, &str> = store
+                .subscriptions
+                .iter()
+                .map(|s| (s.id.as_str(), s.name.as_str()))
+                .collect();
             let enabled: std::collections::HashSet<&str> = store
                 .subscriptions
                 .iter()
                 .filter(|s| s.enabled)
                 .map(|s| s.id.as_str())
                 .collect();
-            let names: HashMap<&str, &str> = store
-                .subscriptions
-                .iter()
-                .map(|s| (s.id.as_str(), s.name.as_str()))
-                .collect();
             let query = query.unwrap_or_default().trim().to_lowercase();
             // Hide protocols the active core cannot serve (see list_all_nodes).
             let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
-            Ok(store
+            let mut nodes: Vec<ListedNode> = store
                 .nodes
                 .iter()
                 .filter(|n| enabled.contains(n.subscription_id.as_str()))
@@ -577,8 +620,19 @@ pub fn list_node_ids(
                             .get(n.subscription_id.as_str())
                             .is_some_and(|name| name.to_lowercase().contains(&query))
                 })
-                .map(|n| n.node.id.clone())
-                .collect())
+                .map(|n| ListedNode {
+                    node: n.node.clone(),
+                    subscription_id: n.subscription_id.clone(),
+                    subscription_name: names
+                        .get(n.subscription_id.as_str())
+                        .copied()
+                        .unwrap_or("")
+                        .to_string(),
+                    favorite: store.favorite_nodes.contains(&n.node.id),
+                })
+                .collect();
+            sort_listed_nodes(&mut nodes, sort_mode.as_deref());
+            Ok(nodes.into_iter().map(|n| n.node.id).collect())
         })
         .map_err(|e| e.to_string())
 }
@@ -599,6 +653,10 @@ fn extract_custom_nodes(
                 node,
                 subscription_id: sub_id.to_string(),
                 subscription_name: sub_name.to_string(),
+                // Custom-config nodes are parsed on demand from a raw config
+                // body, never stored in `AppStore.nodes` — there's no store
+                // access here and no id they could match in `favorite_nodes`.
+                favorite: false,
             })
             .collect()),
         Err(AppError::NoProxies) => Ok(Vec::new()),
@@ -957,7 +1015,12 @@ mod tests {
         // Round-trip: a generated-style config carries internal `node-{id16}`
         // tags; the display name is recovered via the embedded id prefix.
         use crate::domain::Protocol;
-        let id = ProxyNode::compute_id("香港 01", "a.example.com", 8388, Protocol::Shadowsocks);
+        let id = ProxyNode::compute_id(
+            "a.example.com",
+            8388,
+            Protocol::Shadowsocks,
+            "aes-128-gcm|pw",
+        );
         let tag = format!("node-{}", &id[..16]);
         let content = format!(
             r#"{{

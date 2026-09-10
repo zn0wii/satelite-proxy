@@ -11,7 +11,7 @@
       "resources/bin/darwin-amd64/mihomo",
       "resources/bin/darwin-amd64/mihomo-version.txt",
       "resources/bin/darwin-amd64/mihomo-geodata/Country.mmdb",
-      "resources/bin/darwin-amd64/mihomo-geodata/geosite.dat",
+      "resources/bin/darwin-amd64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",
       "resources/dns"
     ]

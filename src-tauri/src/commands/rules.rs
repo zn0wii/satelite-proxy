@@ -524,9 +524,30 @@ pub fn set_rule_set_strategy(
                     RuleSetStrategy::Block => RuleTarget::Block,
                     _ => RuleTarget::Proxy,
                 };
+                // Clear pins the new strategy can no longer represent —
+                // lingering `chain_id`s would resurface as phantom
+                // references (chain usage counts, delete guard), mirroring
+                // the whole-set route rewrite in `store::apply_set_route`.
+                let keep_chain = strategy == RuleSetStrategy::Chain;
                 for rule in set.rules.iter_mut() {
                     rule.target = fallback.clone();
+                    if !keep_chain {
+                        rule.chain_id = None;
+                        rule.chain_name = None;
+                    }
+                    rule.node_id = None;
+                    rule.node_name = None;
+                    rule.smart_include = Vec::new();
+                    rule.smart_exclude = Vec::new();
                 }
+            }
+            if !matches!(strategy, RuleSetStrategy::Chain | RuleSetStrategy::Smart) {
+                set.chain_id = None;
+                set.chain_name = None;
+                set.node_id = None;
+                set.node_name = None;
+                set.smart_include = Vec::new();
+                set.smart_exclude = Vec::new();
             }
             if let Some(dns_strategy) = strategy.recommended_dns_strategy() {
                 set.dns_strategy = dns_strategy;

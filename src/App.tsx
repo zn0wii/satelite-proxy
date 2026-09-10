@@ -1,8 +1,11 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { refreshProxyStatus } from "./api";
 import { TopNav } from "./components/TopNav";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorModal } from "./components/ErrorModal";
 import { beginCoreBusy } from "./coreBusy";
+import { CoreDownloadToast } from "./components/CoreDownloadToast";
 import { ImportIntentProvider, useImportIntent } from "./ImportIntentContext";
 import { LocaleProvider } from "./i18n";
 import { ThemeProvider } from "./theme";
@@ -14,7 +17,17 @@ import { useViewportScale } from "./hooks/useViewportScale";
 import { useTheme } from "./theme";
 import { OceanBackgroundLazy } from "./components/OceanBackgroundLazy";
 import { StarfieldBackgroundLazy } from "./components/StarfieldBackgroundLazy";
+import { useGlobalShortcuts } from "./hooks/useGlobalShortcuts";
 import "./App.css";
+
+// Cmd/Ctrl+<digit> → tab, matching TopNav's on-screen order.
+const PRO_SHORTCUT_MAP: Partial<Record<string, NavKey>> = {
+  "1": "dashboard",
+  "2": "nodes",
+  "3": "config",
+  "4": "traffic",
+  "5": "logs",
+};
 
 // Secondary pages: code-split so low-memory WebView recreate only parses home first.
 const ConfigPage = lazy(() =>
@@ -53,6 +66,8 @@ function ProShell() {
   useEffect(() => {
     if (token && prefill) setNav("config");
   }, [token, prefill]);
+
+  useGlobalShortcuts(PRO_SHORTCUT_MAP, setNav, "settings");
 
   return (
     <div
@@ -95,6 +110,7 @@ function ProShell() {
           )}
         </div>
       </main>
+      <CoreDownloadToast />
     </div>
   );
 }
@@ -106,6 +122,20 @@ function AppShell() {
   // Maximize magnification: zoom the whole UI when the OS window exceeds
   // the design size (see hooks/useViewportScale.ts).
   useViewportScale(mode);
+
+  // The watchdog announces core lifecycle edges (unexpected exit, auto
+  // revival, restarts). Polling alone leaves pages stale while hidden or
+  // while the runtime lock is busy — resync the shared snapshot the moment
+  // the backend announces a change; subscribed pages re-render from it.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen("core-status-changed", () => {
+      void refreshProxyStatus();
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
+  }, []);
 
   // Background rule/config apply restarts the core outside invoke wrappers —
   // keep the navbar spinner in sync via the apply-status event.
@@ -146,7 +176,14 @@ function AppShell() {
           onClose={() => setApplyError(null)}
         />
       )}
-      {mode === "simple" ? <SimpleShell /> : <ProShell />}
+      {/* Crash net: any render exception below would otherwise blank the
+         whole window; the boundary reports it to the app log and offers a
+         remount. Providers sit above it — a crash inside those still blanks
+         (they run before this boundary mounts), but page/shell crashes are
+         the realistic class and are fully covered. */}
+      <ErrorBoundary>
+        {mode === "simple" ? <SimpleShell /> : <ProShell />}
+      </ErrorBoundary>
     </>
   );
 }

@@ -3,11 +3,11 @@
 # Must be run on macOS (native or the requested arch via Rust target).
 #
 # Usage:
-#   scripts/build-dmg.sh                      # auto-detect host arch, sing-box core only
+#   scripts/build-dmg.sh                      # auto-detect host arch, all three cores (default)
 #   scripts/build-dmg.sh --arch arm64         # Apple Silicon
 #   scripts/build-dmg.sh --arch intel         # Intel (x86_64)
 #   scripts/build-dmg.sh --arch intel 1.13.18 # pin bundled sing-box version
-#   scripts/build-dmg.sh --all-cores          # also bundle the Xray + mihomo cores
+#   scripts/build-dmg.sh --singbox-only       # slim build: sing-box only, drop Xray + mihomo
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +19,7 @@ usage() {
 
 ARCH="auto"
 CORE_VER=""
-ALL_CORES=0
+SINGBOX_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,8 +39,8 @@ while [[ $# -gt 0 ]]; do
       ARCH="${1#*=}"
       shift
       ;;
-    --all-cores)
-      ALL_CORES=1
+    --singbox-only)
+      SINGBOX_ONLY=1
       shift
       ;;
     -*)
@@ -138,15 +138,16 @@ if [[ ! -f "$RULE_SETS_DIR/system-geosite-cn.srs" ]]; then
   "$ROOT/scripts/fetch-bundled-rule-sets.sh"
 fi
 
-# --- extra cores: bundle Xray + mihomo, or switch to the sing-box-only config.
-# The base config lists their resources too — a missing file fails the
-# bundler, so the sing-box-only build swaps in the slim resource overlay.
+# --- extra cores: bundle Xray + mihomo (default), or switch to the
+# sing-box-only config. The base config lists their resources too — a
+# missing file fails the bundler, so the sing-box-only build swaps in the
+# slim resource overlay.
 CONFIG_FILE=""
-if [[ "$ARCH" == "intel" && "$ALL_CORES" == "1" ]]; then
+if [[ "$ARCH" == "intel" && "$SINGBOX_ONLY" == "0" ]]; then
   CONFIG_FILE="$ROOT/src-tauri/tauri.macos-intel.conf.json"
 fi
-if [[ "$ALL_CORES" == "1" ]]; then
-  echo "AllCores: bundling Xray + mihomo alongside sing-box..."
+if [[ "$SINGBOX_ONLY" == "0" ]]; then
+  echo "Bundling Xray + mihomo alongside sing-box (pass --singbox-only to drop them)."
   if [[ ! -x "$ROOT/src-tauri/resources/bin/$CORE_DIR/xray" ]]; then
     echo "xray core missing ($CORE_DIR), fetching..."
     "$XRAY_FETCH"
@@ -156,7 +157,7 @@ if [[ "$ALL_CORES" == "1" ]]; then
     "$MIHOMO_FETCH"
   fi
 else
-  echo "Bundling sing-box only (pass --all-cores to include Xray + mihomo)."
+  echo "SingboxOnly: bundling sing-box only."
   CONFIG_FILE="$SINGBOX_ONLY_CONFIG"
 fi
 

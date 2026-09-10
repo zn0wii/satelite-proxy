@@ -8,6 +8,7 @@ mod conn_journal;
 mod core;
 mod domain;
 mod error;
+mod log_listener;
 mod log_retention;
 mod portable;
 mod proxy;
@@ -183,6 +184,11 @@ pub fn run() {
             app.manage(app_state);
             app_log::info("app", "Satelite started");
 
+            // Pin the title bar to the stored theme before the window paints —
+            // otherwise it starts on the OS light/dark mode and can mismatch
+            // the app's own theme setting (see window_ctrl::apply_window_theme).
+            window_ctrl::apply_window_theme(app.handle());
+
             // Seed bundled remote rule sets: copy the packaged `.srs` files
             // into the remote cache and heal their store entries. Must run
             // before `remote_rule_auto::spawn` so the copies are referenced
@@ -196,6 +202,13 @@ pub fn run() {
                         resource_dir.as_deref(),
                         store,
                     );
+                    // Backfill `contains_ip` for remote sets cached by builds
+                    // that predate the field — the builder needs it to drop
+                    // the DNS-side reference of IP-only sets, which sing-box
+                    // 1.14+ rejects outright (Legacy Address Filter Fields,
+                    // FATAL once a fakeip rule exists). Must run before the
+                    // auto-proxy start below builds its first config.
+                    crate::remote_rule_auto::heal_contains_ip(store);
                     Ok(())
                 }) {
                     app_log::warn(
@@ -218,6 +231,11 @@ pub fn run() {
             // Connection journal: WebSocket snapshots @100ms + ring history.
             // Clash API only yields live sockets; low-interval stream reduces misses.
             conn_journal::spawn_connection_journal(app.handle().clone());
+
+            // Kernel log stream (mihomo): `/logs` WS dial failures feed the
+            // passive smart-switch stats — mihomo never lists failed dials
+            // in /connections (see log_listener.rs).
+            log_listener::spawn_log_listener(app.handle().clone());
 
             // Profile auto-update (per-subscription interval, default 1440 min).
             subscription_auto::spawn(app.handle().clone());
@@ -392,9 +410,11 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::diagnose_network,
+            commands::check_exit_ip,
             commands::regenerate_api_secret,
             commands::set_current_node,
             commands::rename_node,
+            commands::toggle_favorite_node,
             commands::generate_singbox_config,
             commands::preview_singbox_config,
             commands::get_active_config_path,
@@ -406,6 +426,7 @@ pub fn run() {
             commands::download_core,
             commands::fetch_core_latest,
             commands::refresh_geodata,
+            commands::reset_core_to_bundled,
             commands::set_core_type,
             commands::test_nodes_latency,
             commands::ping_nodes_latency,
@@ -461,6 +482,7 @@ pub fn run() {
             commands::clear_request_history,
             commands::list_app_logs,
             commands::clear_app_logs,
+            commands::log_frontend_event,
             commands::clear_core_log,
             commands::get_core_log_tail,
             parse_subscription_text,

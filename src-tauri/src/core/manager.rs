@@ -131,9 +131,8 @@ impl CoreManager {
             return Ok(());
         };
         if path.exists() {
-            fs::write(&path, b"").map_err(|e| {
-                AppError::Core(format!("clear core log {}: {e}", path.display()))
-            })?;
+            fs::write(&path, b"")
+                .map_err(|e| AppError::Core(format!("clear core log {}: {e}", path.display())))?;
         }
         Ok(())
     }
@@ -183,7 +182,7 @@ impl CoreManager {
                             self.kind.display_name()
                         ),
                     );
-                    self.last_error = Some(map_tun_permission_hint(&strip_ansi(&detail)));
+                    self.last_error = Some(map_core_startup_hint(&strip_ansi(&detail)));
                 }
             }
             return;
@@ -213,7 +212,7 @@ impl CoreManager {
                             .unwrap_or_else(|| {
                                 format!("{} exited: {status}", self.kind.display_name())
                             });
-                        self.last_error = Some(map_tun_permission_hint(&strip_ansi(&detail)));
+                        self.last_error = Some(map_core_startup_hint(&strip_ansi(&detail)));
                     }
                 }
                 Ok(None) => {}
@@ -466,7 +465,7 @@ impl CoreManager {
         if elevated {
             if let Err(e) = super::macos_auth::ensure_core_setuid(binary) {
                 self.state = CoreState::Error;
-                let msg = map_tun_permission_hint(&e.to_string());
+                let msg = map_core_startup_hint(&e.to_string());
                 self.last_error = Some(msg.clone());
                 return Err(AppError::Core(msg));
             }
@@ -672,7 +671,7 @@ impl CoreManager {
         );
         self.state = CoreState::Error;
         self.run_mode = RunMode::None;
-        AppError::Core(map_tun_permission_hint(&err))
+        AppError::Core(map_core_startup_hint(&err))
     }
 
     fn wait_until_ready(&mut self, mixed_port: u16) -> AppResult<()> {
@@ -971,6 +970,34 @@ fn is_stale_cache_db_error(err: &str) -> bool {
     lower.contains("cache.db") && lower.contains("permission denied")
 }
 
+/// Appends actionable guidance for known core-startup / core-death failure
+/// classes. All error-surface call sites should go through this wrapper so
+/// every failure class gets exactly one hint. Currently: a locked `cache.db`
+/// (see below) and TUN permission failures (see [`map_tun_permission_hint`]).
+pub(crate) fn map_core_startup_hint(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if (lower.contains("cache-file") || lower.contains("cache_file")) && lower.contains("timeout") {
+        // `initialize cache-file: timeout` is the signature of an orphaned
+        // elevated core from a previous session: the helper/sing-box pair
+        // outlives a crashed session (nothing binds the helper to the app,
+        // and the unprivileged app cannot terminate a higher-integrity
+        // process), so the bolt file lock stays held until the user or a
+        // reboot clears it. Say so — the raw FATAL line alone reads like a
+        // config bug.
+        format!(
+            "{err}\n\n{}",
+            "sing-box 的 cache.db 被其他进程占用（初始化超时）。通常是上次会话异常退出后残留的管理员权限 sing-box 仍在运行，普通权限无法结束它。\n\
+             处理：以管理员身份运行任务管理器结束 sing-box.exe，或重启电脑后重试；残留进程还持有 TUN 虚拟网卡，放着不管可能导致无法上网。"
+        )
+    } else {
+        map_tun_permission_hint(err)
+    }
+}
+
+/// Appends the platform TUN-permission guidance when `err` matches a
+/// permission-denied failure. Also applied by the runtime's readiness
+/// windows: their embedded log tail is exactly where a FATAL "Access is
+/// denied" TUN line surfaces when a death slips past `wait_until_ready`.
 fn map_tun_permission_hint(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
     if lower.contains("operation not permitted")
@@ -994,6 +1021,30 @@ fn map_tun_permission_hint(err: &str) -> String {
     } else {
         err.to_string()
     }
+}
+
+/// sing-tun's slow-interface warning (`open interface take too much time to
+/// finish!`), logged 10s into a TUN start while the adapter is still coming
+/// up. Shared by the runtime's readiness windows (log-evidence deadline
+/// extension) and the failure hint below.
+pub(crate) const SLOW_TUN_WARN_NEEDLE: &str = "take too much time to finish";
+
+/// Appends guidance when the startup text shows the sing-tun slow-interface
+/// warning. Unlike the mappers above this one is applied to the *composed*
+/// readiness failure (message + core log tail) — the WARN only ever lives in
+/// the log file, never in `last_error`, so `map_core_startup_hint` cannot see
+/// it. Marker-guarded so re-applying on an already-hinted text is a no-op.
+pub(crate) fn map_slow_tun_start_hint(err: &str) -> String {
+    const MARKER: &str = "TUN 虚拟网卡在本机创建异常缓慢";
+    if !err.contains(SLOW_TUN_WARN_NEEDLE) || err.contains(MARKER) {
+        return err.to_string();
+    }
+    format!(
+        "{err}\n\n{}",
+        "TUN 虚拟网卡在本机创建异常缓慢，内核一直在等待网卡就绪。\n\
+         常见原因：其他 VPN/代理客户端占用 wintun 虚拟网卡、杀毒软件拦截、Windows 网络栈卡顿。\n\
+         处理：退出其他正在运行的 VPN/代理软件后重试；仍失败请重启电脑后再开启 TUN。"
+    )
 }
 
 fn port_has_listener(port: u16) -> bool {
@@ -1445,6 +1496,80 @@ mod stale_cache_db_tests {
         // (delete — it's rebuildable cache, not user data).
         let err = "open active.json: permission denied";
         assert!(!is_stale_cache_db_error(err));
+    }
+}
+
+#[cfg(test)]
+mod core_startup_hint_tests {
+    //! `map_core_startup_hint` routes each known failure class to its one
+    //! actionable hint: the locked-cache.db timeout (orphaned elevated core
+    //! from a crashed session) gets the cache hint, TUN permission failures
+    //! the UAC/setuid hint, and unknown errors pass through untouched.
+    //! `map_slow_tun_start_hint` owns the slow-wintun-adapter WARN (applied
+    //! to composed readiness failures that embed the core log tail).
+    use super::{map_core_startup_hint, map_slow_tun_start_hint};
+
+    #[test]
+    fn cache_file_timeout_gets_the_orphan_hint() {
+        // The exact FATAL from the field incident: an orphaned elevated
+        // sing-box (helper survived the crashed session; the app cannot
+        // terminate a higher-integrity process) holds cache.db's file lock.
+        let err = "FATAL[0010] start service: initialize cache-file: timeout";
+        let mapped = map_core_startup_hint(err);
+        assert!(mapped.contains("cache.db 被其他进程占用"));
+        assert!(mapped.contains("管理员身份"));
+        assert!(mapped.starts_with(err), "original FATAL text is preserved");
+    }
+
+    #[test]
+    fn cache_file_word_without_timeout_is_not_the_lock_case() {
+        // `is_stale_cache_db_error` owns the permission-denied variant; the
+        // hint here must not fire on unrelated cache-file wording.
+        let err = "FATAL start service: initialize cache-file: bad path";
+        assert_eq!(map_core_startup_hint(err), err);
+    }
+
+    #[test]
+    fn tun_permission_failures_still_get_the_tun_hint() {
+        let err = "FATAL start inbound/tun[tun-in]: configure tun interface: Access is denied.";
+        let mapped = map_core_startup_hint(err);
+        assert!(mapped.contains("TUN"));
+        assert!(!mapped.contains("cache.db 被其他进程占用"));
+    }
+
+    #[test]
+    fn unknown_errors_pass_through_untouched() {
+        let err = "FATAL something entirely unknown happened";
+        assert_eq!(map_core_startup_hint(err), err);
+    }
+
+    #[test]
+    fn slow_tun_warn_gets_the_wintun_hint() {
+        // Verbatim from the field report (ANSI level tags included): the WARN
+        // sing-tun logs 10s into a TUN start while the wintun adapter is
+        // still coming up. It must survive in the embedded log tail and map
+        // to the adapter-conflict guidance.
+        let err = "sing-box started but clash_api not responding at 127.0.0.1:19090\n\
+                   --- log ---\n\
+                   +0800 2026-08-31 22:03:30 \u{1b}[33mWARN\u{1b}[0m inbound/tun[tun-in]: open interface take too much time to finish!";
+        let mapped = map_slow_tun_start_hint(err);
+        assert!(mapped.starts_with(err), "original text is preserved");
+        assert!(mapped.contains("wintun"));
+        assert!(mapped.contains("重启电脑"));
+    }
+
+    #[test]
+    fn slow_tun_hint_is_idempotent() {
+        let err = "WARN inbound/tun[tun-in]: open interface take too much time to finish!";
+        let once = map_slow_tun_start_hint(err);
+        let twice = map_slow_tun_start_hint(&once);
+        assert_eq!(once, twice, "re-applying must not append the hint again");
+    }
+
+    #[test]
+    fn slow_tun_hint_ignores_text_without_the_warn() {
+        let err = "sing-box started but clash_api not responding at 127.0.0.1:19090";
+        assert_eq!(map_slow_tun_start_hint(err), err);
     }
 }
 

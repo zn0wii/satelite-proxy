@@ -18,7 +18,7 @@ import { ErrorModal } from "../components/ErrorModal";
 import {
   CORE_LEVELS,
   coreLevelRank,
-  coreLogLevel,
+  parseCoreLogLine,
   type CoreLogLevel,
 } from "../coreLog";
 
@@ -98,7 +98,7 @@ export function LogsPage() {
       });
       if (generation !== generationRef.current) return;
       cursorRef.current = batch.cursor;
-      setRows(batch.entries);
+      setRows(batch.entries.slice().reverse()); // newest first
       setError(null);
     } catch (e) {
       if (generation !== generationRef.current) return;
@@ -123,7 +123,10 @@ export function LogsPage() {
       if (generation !== generationRef.current) return;
       cursorRef.current = batch.cursor;
       if (batch.entries.length > 0) {
-        setRows((current) => [...current, ...batch.entries].slice(-800));
+        // Newest first — prepend the (ascending) batch reversed, drop oldest.
+        setRows((current) =>
+          [...batch.entries].reverse().concat(current).slice(0, 800),
+        );
       }
       setError(null);
     } catch (e) {
@@ -174,14 +177,12 @@ export function LogsPage() {
     1200,
   );
 
-  // Auto-scroll: app log pins to the bottom (append), kernel log pins to the
-  // top (newest-first).
+  // Auto-scroll: both views are newest-first, so pin to the top as new rows
+  // stream in.
   useEffect(() => {
     if (!autoScroll || !listRef.current) return;
-    listRef.current.scrollTop = tab === "app"
-      ? listRef.current.scrollHeight
-      : 0;
-  }, [tab, autoScroll, rows, coreLines]);
+    listRef.current.scrollTop = 0;
+  }, [autoScroll, rows, coreLines]);
 
   async function onClear() {
     try {
@@ -220,10 +221,15 @@ export function LogsPage() {
     const q = query.trim().toLowerCase();
     return coreLines
       .slice()
-      .reverse()
-      .map((line, i) => ({ id: i, level: coreLogLevel(line), msg: line }))
+      .reverse() // newest first
+      .map((line, i) => ({ id: i, ...parseCoreLogLine(line) }))
       .filter((r) => coreLevelRank(r.level) >= coreLevelRank(coreMinLevel))
-      .filter((r) => !q || r.msg.toLowerCase().includes(q));
+      .filter(
+        (r) =>
+          !q ||
+          r.msg.toLowerCase().includes(q) ||
+          r.ts.toLowerCase().includes(q),
+      );
   }, [coreLines, coreMinLevel, query]);
 
   const countLabel = tab === "app" ? appCountLabel : `${coreRows.length}`;
@@ -273,7 +279,6 @@ export function LogsPage() {
             {t("common.refresh")}
           </GlassButton>
           <GlassButton
-            variant="danger"
             icon="⌫"
             onClick={() => void onClear()}
             title={t("common.clear")}
@@ -374,6 +379,7 @@ export function LogsPage() {
                     data-level={r.level}
                     title={r.msg}
                   >
+                    <span className="log-ts">{r.ts}</span>
                     <span className={`log-lvl log-lvl-${r.level}`}>
                       {r.level}
                     </span>

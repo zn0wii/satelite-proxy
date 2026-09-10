@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import {
+  checkExitIp,
   getCoreInfo,
   getLanIp,
   getProxyStatus,
@@ -8,8 +9,10 @@ import {
   getSubscription,
   listAllNodes,
   listSubscriptions,
+  onProxySnapshot,
   peekProxyStatus,
   previewSingboxConfig,
+  refreshProxyStatus,
   restartProxy,
   peekSettings,
   setCoreType,
@@ -38,6 +41,7 @@ import { SimpleTrafficSpark } from "../ui/simple/SimpleTrafficSpark";
 import type {
   AutoSelectMode,
   CoreKind,
+  ExitIpInfo,
   GenerateConfigResult,
   OutboundMode,
   ProxyNode,
@@ -137,6 +141,26 @@ function latencyClass(ms?: number | null) {
   return "lat-slow";
 }
 
+/** Country code overrides, kept in sync with nodeGroups.ts REGIONS table. */
+const COUNTRY_NAME_OVERRIDES_ZH: Record<string, string> = {
+  HK: "香港",
+  TW: "台湾",
+};
+
+/** Country code → localized region name (zh: "US" → "美国") via CLDR.
+ *  Falls back to the raw code on invalid codes / engines without the API. */
+function countryDisplayName(cc: string, locale: string): string {
+  const code = cc.toUpperCase();
+  if (locale !== "en" && COUNTRY_NAME_OVERRIDES_ZH[code]) {
+    return COUNTRY_NAME_OVERRIDES_ZH[code];
+  }
+  try {
+    return new Intl.DisplayNames([locale], { type: "region" }).of(code) || cc;
+  } catch {
+    return cc;
+  }
+}
+
 /** Uptime from core_started_at (unix secs) to now, as "HH:MM:SS". */
 function fmtUptime(startedAt?: number | null) {
   if (startedAt == null) return "—";
@@ -181,7 +205,7 @@ export function DashboardPage({
   onGoNodes,
   onGoTraffic,
 }: Props) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { heroIsGlobe } = useTheme();
   const [subs, setSubs] = useState<SubscriptionView[]>([]);
   const [nodes, setNodes] = useState<ProxyNode[]>([]);
@@ -237,6 +261,14 @@ export function DashboardPage({
   const smartGenRef = useRef(0);
   const [modeBusy, setModeBusy] = useState(false);
   const [latencyProbing, setLatencyProbing] = useState(false);
+  /** Exit-IP half of the network-probe card. A monotonically increasing
+   *  version stamps each probe so a slow stale answer can never overwrite
+   *  a newer one (races auto + click triggers). */
+  const [exitIp, setExitIp] = useState<ExitIpInfo | null>(null);
+  const [exitIpProbing, setExitIpProbing] = useState(false);
+  const exitIpVersionRef = useRef(0);
+  /** `running:nodeId` the auto-probe last fired for (dedupes the triggers). */
+  const autoProbeKeyRef = useRef<string | null>(null);
   const [envCopied, setEnvCopied] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -363,7 +395,11 @@ function coreDisplayName(kind: string | null | undefined): string {
     null,
   );
 
-  const onCaptureError = useCallback((msg: string) => {
+  // Shared error sink for capture switches AND start/stop/restart: surface
+  // the message, and for TUN permission failures offer one-click
+  // re-authorization instead of leaving the user to guess which switch
+  // fixes a setuid/UAC failure.
+  const reportOpError = useCallback((msg: string) => {
     setError(msg);
     setErrorAction(
       isTunPermissionError(msg)
@@ -388,10 +424,22 @@ function coreDisplayName(kind: string | null | undefined): string {
   const { captureMode, captureBusy, requestCaptureMode } = useCaptureModeSwitch(
     proxy,
     setProxy,
-    onCaptureError,
+    reportOpError,
     onCaptureApplied,
   );
   requestCaptureModeRef.current = requestCaptureMode;
+
+  // Watchdog push (`core-status-changed` → refreshProxyStatus): resync the
+  // moment the backend observes a lifecycle edge (unexpected exit, auto
+  // revival) instead of waiting for the next 1s poll tick — which skips
+  // entirely while a capture switch is in flight.
+  useEffect(() => {
+    return onProxySnapshot((s) => {
+      setProxy(s);
+      pushSpark(s);
+      setPendingCore(peekSettings()?.core_type ?? s.core_type ?? null);
+    });
+  }, [pushSpark]);
 
   useVisibleInterval(() => {
     // Do not clobber optimistic capture UI while a switch is in flight.
@@ -420,6 +468,19 @@ function coreDisplayName(kind: string | null | undefined): string {
       })
       .catch(() => undefined);
   }, 1000);
+
+  // Auto-probe the exit IP once the first status wave lands (page mount),
+  // then again whenever the running edge flips (start/stop changes whether
+  // the probe goes through the core) or the selected node changes (likely
+  // new exit). Deduped by ref key; overlapping probes are version-stamped
+  // away inside onProbeExitIp.
+  const autoProbeKey = `${proxy?.running ?? false}:${currentNodeId ?? ""}`;
+  useEffect(() => {
+    if (!statusReady) return;
+    if (autoProbeKeyRef.current === autoProbeKey) return;
+    autoProbeKeyRef.current = autoProbeKey;
+    void onProbeExitIp();
+  }, [autoProbeKey, statusReady]);
 
   // Core switch transition: the setting flips instantly but the running core
   // only lands on the new binary after the debounced restart. While the two
@@ -472,7 +533,10 @@ function coreDisplayName(kind: string | null | undefined): string {
       setProxy(s);
       await reload();
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      // A failed start leaves the backend in Error; resync immediately so
+      // the status card cannot linger on a stale/starting state.
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
@@ -578,7 +642,8 @@ function coreDisplayName(kind: string | null | undefined): string {
       const s = await stopProxy();
       setProxy(s);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
@@ -592,7 +657,8 @@ function coreDisplayName(kind: string | null | undefined): string {
       const s = await restartProxy();
       setProxy(s);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
@@ -705,6 +771,28 @@ function coreDisplayName(kind: string | null | undefined): string {
     }
   }
 
+  /** Exit-IP probe: races the backend's public-IP sources through the core
+   *  (direct when stopped). Failures clear the readout to "—"; a stale
+   *  answer from an abandoned probe is dropped via the version stamp. */
+  async function onProbeExitIp() {
+    const version = ++exitIpVersionRef.current;
+    setExitIpProbing(true);
+    try {
+      const info = await checkExitIp();
+      if (version === exitIpVersionRef.current) setExitIp(info);
+    } catch {
+      if (version === exitIpVersionRef.current) setExitIp(null);
+    } finally {
+      if (version === exitIpVersionRef.current) setExitIpProbing(false);
+    }
+  }
+
+  /** Card click: refresh both halves of the probe in parallel. */
+  function onProbeNetwork() {
+    void onProbeLatency();
+    void onProbeExitIp();
+  }
+
   const running = proxy?.running ?? false;
   const stateLabel = proxy?.core_state ?? "stopped";
   const outboundMode = (proxy?.outbound_mode ?? "rule") as OutboundMode;
@@ -780,19 +868,6 @@ function coreDisplayName(kind: string | null | undefined): string {
 
   // Long node names shrink to one line instead of wrapping the hero.
   const heroTitleRef = useSingleLineFit<HTMLHeadingElement>(heroTitle ?? "");
-
-  /** Best / avg among nodes that have a successful latency sample. */
-  const latencyStats = useMemo(() => {
-    const samples: number[] = nodes
-      .map((n) => n.latency_ms)
-      .filter((ms): ms is number => ms != null && ms >= 0);
-    if (samples.length === 0) {
-      return { best: null as number | null, avg: null as number | null, n: 0 };
-    }
-    const best = Math.min(...samples);
-    const avg = Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
-    return { best, avg, n: samples.length };
-  }, [nodes]);
 
   async function onCopyEnv() {
     const proxyUrl = `http://127.0.0.1:${mixedPort}`;
@@ -1510,37 +1585,65 @@ function coreDisplayName(kind: string | null | undefined): string {
           className="instrument accent-cyan instrument-click"
           role="button"
           tabIndex={0}
-          title={t("dashboard.probeLatencyHint")}
-          onClick={() => void onProbeLatency()}
+          title={t("dashboard.probeNetworkHint")}
+          onClick={onProbeNetwork}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              void onProbeLatency();
+              onProbeNetwork();
             }
           }}
         >
           <header className="instrument-head">
             <span className="instrument-label">
-              {t("dashboard.cardQuality")}
+              {t("dashboard.cardProbe")}
             </span>
           </header>
           <div
             className={`instrument-value readout mono ${latencyClass(currentLatency)}`}
           >
             {latencyProbing ? (
-              <span className="lat-spinner" aria-label={t("dashboard.probeLatencyRunning")} />
+              <span className="lat-spinner" aria-label={t("dashboard.probeNetworkRunning")} />
             ) : (
               fmtLatency(currentLatency)
             )}
           </div>
           <div className="instrument-kv mono">
             <div>
-              <span className="kv-k">{t("dashboard.latencyAvg")}</span>
-              <span className="kv-v">{fmtLatency(latencyStats.avg)}</span>
+              <span className="kv-k">{t("dashboard.exitIp")}</span>
+              <span
+                className={`kv-v exit-ip ${exitIp ? "" : "lat-none"}`}
+                title={exitIp?.ip ?? undefined}
+              >
+                {exitIpProbing ? (
+                  <span
+                    className="lat-spinner"
+                    aria-label={t("dashboard.probeNetworkRunning")}
+                  />
+                ) : exitIp ? (
+                  <>
+                    {exitIp.ip}
+                    {!exitIp.viaProxy ? (
+                      <span className="exit-ip-direct">
+                        {t("dashboard.exitIpDirect")}
+                      </span>
+                    ) : null}
+                  </>
+                ) : (
+                  "—"
+                )}
+              </span>
             </div>
             <div>
-              <span className="kv-k">{t("dashboard.latencyBest")}</span>
-              <span className="kv-v">{fmtLatency(latencyStats.best)}</span>
+              <span className="kv-k">{t("dashboard.exitCountry")}</span>
+              <span
+                className={`kv-v ${exitIp?.countryCode ? "" : "lat-none"}`}
+                title={exitIp?.source ?? undefined}
+              >
+                {exitIp?.countryCode
+                  ? countryDisplayName(exitIp.countryCode, locale)
+                  : "—"}
+              </span>
             </div>
           </div>
         </article>

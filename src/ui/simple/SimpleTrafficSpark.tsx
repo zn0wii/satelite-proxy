@@ -180,6 +180,9 @@ export function SimpleTrafficSpark({
   const [rows, setRows] = useState<ConnectionView[]>([]);
   const revisionRef = useRef<number | null>(null);
   const orderRevRef = useRef<number | null>(null);
+  /** Fullscreen overlay on the dashboard: the card detaches from the grid
+   *  (position: fixed) and fills the window; a placeholder keeps its cell. */
+  const [expanded, setExpanded] = useState(false);
 
   const reloadLinks = useCallback(async () => {
     if (!running) {
@@ -205,6 +208,21 @@ export function SimpleTrafficSpark({
   }, [reloadLinks]);
 
   useVisibleInterval(() => reloadLinks(), 2000);
+
+  // While expanded: Escape exits, and the scroll container behind the overlay
+  // is frozen (class on <html>; .main keeps its reserved gutter, no reflow).
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.documentElement.classList.add("spark-fullscreen-open");
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.documentElement.classList.remove("spark-fullscreen-open");
+    };
+  }, [expanded]);
 
   const downs = samples.map((s) => s.down);
   const ups = samples.map((s) => s.up);
@@ -288,45 +306,91 @@ export function SimpleTrafficSpark({
   }, [measureArcs]);
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className={`simple-spark${hasTraffic ? " live" : ""}${quiet ? " quiet" : ""}`}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen?.();
-        }
-      }}
-      aria-label={label}
-    >
-      <header className="simple-spark-head">
-        <span className="instrument-label">
-          {label}
-          {quiet ? (
-            <span className="simple-spark-tag muted">{idleConnsLabel}</span>
-          ) : null}
-        </span>
-        <span className="simple-spark-legend mono">
-          <span className="simple-spark-conns">{connsLabel}</span>
-          <span className="tr-dir down">↓ {fmtRate(down)}</span>
-          <span className="tr-dir up">↑ {fmtRate(up)}</span>
-        </span>
-      </header>
-      <div className="simple-spark-plot">
-        <svg
-          className="simple-spark-bg"
-          viewBox={`0 0 ${W} ${H}`}
-          preserveAspectRatio="none"
+    <>
+      {expanded && (
+        <div
+          className="simple-spark-backdrop"
+          onClick={() => setExpanded(false)}
           aria-hidden
-        >
-          <path className="simple-spark-area down" d={downArea} />
-          <path className="simple-spark-area up" d={upArea} />
-          <path className="simple-spark-line down" d={downLine} />
-          <path className="simple-spark-line up" d={upLine} />
-        </svg>
-        <div className="simple-spark-flow" ref={flowRef}>
+        />
+      )}
+      <div
+        role="button"
+        tabIndex={0}
+        className={`simple-spark${hasTraffic ? " live" : ""}${quiet ? " quiet" : ""}${expanded ? " expanded" : ""}`}
+        onClick={expanded ? undefined : onOpen}
+        onKeyDown={
+          expanded
+            ? undefined
+            : (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpen?.();
+                }
+              }
+        }
+        aria-label={label}
+      >
+        <header className="simple-spark-head">
+          <span className="instrument-label">
+            {label}
+            {quiet ? (
+              <span className="simple-spark-tag muted">{idleConnsLabel}</span>
+            ) : null}
+          </span>
+          <span className="simple-spark-head-right">
+            <span className="simple-spark-legend mono">
+              <span className="simple-spark-conns">{connsLabel}</span>
+              <span className="tr-dir down">↓ {fmtRate(down)}</span>
+              <span className="tr-dir up">↑ {fmtRate(up)}</span>
+            </span>
+            {/* Fullscreen toggle: stopPropagation keeps the card's own
+                click/Enter "open traffic page" action out of the way. */}
+            <button
+              type="button"
+              className="icon-btn simple-spark-fs"
+              aria-label={expanded ? t("simple.sparkShrink") : t("simple.sparkExpand")}
+              title={expanded ? t("simple.sparkShrink") : t("simple.sparkExpand")}
+              aria-pressed={expanded}
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded((v) => !v);
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="12"
+                height="12"
+                aria-hidden
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                {expanded ? (
+                  <path d="M6.5 2v4.5H2M9.5 2v4.5H14M6.5 14V9.5H2M9.5 14V9.5H14" />
+                ) : (
+                  <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" />
+                )}
+              </svg>
+            </button>
+          </span>
+        </header>
+        <div className="simple-spark-plot">
+          <svg
+            className="simple-spark-bg"
+            viewBox={`0 0 ${W} ${H}`}
+            preserveAspectRatio="none"
+            aria-hidden
+          >
+            <path className="simple-spark-area down" d={downArea} />
+            <path className="simple-spark-area up" d={upArea} />
+            <path className="simple-spark-line down" d={downLine} />
+            <path className="simple-spark-line up" d={upLine} />
+          </svg>
+          <div className="simple-spark-flow" ref={flowRef}>
           <aside className="simple-spark-rail left">
             <div className="simple-spark-rail-kicker">
               {t("simple.sparkApps")}
@@ -384,8 +448,10 @@ export function SimpleTrafficSpark({
               />
             ))}
           </svg>
+          </div>
         </div>
       </div>
-    </div>
+      {expanded && <div className="simple-spark-placeholder" aria-hidden />}
+    </>
   );
 }

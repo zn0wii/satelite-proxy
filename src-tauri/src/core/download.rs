@@ -266,6 +266,39 @@ fn pick_asset(
     })
 }
 
+/// Public GitHub release-asset mirror. Used only as a last-resort fallback
+/// when a direct `github.com` download fails outright (e.g. blocked network) —
+/// tried without any proxy, since the point of a mirror is reaching the file
+/// through a path that doesn't need one.
+const GITHUB_ASSET_MIRROR_PREFIX: &str = "https://gh-proxy.com/";
+
+/// Fetch a release asset, retrying through a mirror if the direct request
+/// fails outright (connection/DNS error) or comes back with a non-success
+/// status. The mirror attempt never uses `proxy_url` — the whole point of a
+/// mirror is a path that doesn't depend on the user having a working proxy.
+async fn fetch_asset_with_mirror_fallback(
+    download_url: &str,
+    proxy_url: Option<&str>,
+) -> AppResult<reqwest::Response> {
+    let direct_err = match http_client(proxy_url)?.get(download_url).send().await {
+        Ok(resp) if resp.status().is_success() => return Ok(resp),
+        Ok(resp) => format!("download status {}", resp.status()),
+        Err(e) => format!("download: {e}"),
+    };
+
+    let mirror_url = format!("{GITHUB_ASSET_MIRROR_PREFIX}{download_url}");
+    match http_client(None)?.get(&mirror_url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(resp),
+        Ok(resp) => Err(AppError::Core(format!(
+            "{direct_err}; mirror status {}",
+            resp.status()
+        ))),
+        Err(mirror_err) => Err(AppError::Core(format!(
+            "{direct_err}; mirror: {mirror_err}"
+        ))),
+    }
+}
+
 fn http_client(proxy_url: Option<&str>) -> AppResult<reqwest::Client> {
     http_client_with_redirect(proxy_url, reqwest::redirect::Policy::default())
 }
@@ -365,15 +398,7 @@ where
     let via_proxy = proxy_url.is_some();
     let progress = Arc::new(progress);
 
-    let client = http_client(proxy_url)?;
-    let resp = client
-        .get(&info.download_url)
-        .send()
-        .await
-        .map_err(|e| AppError::Core(format!("download: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(AppError::Core(format!("download status {}", resp.status())));
-    }
+    let resp = fetch_asset_with_mirror_fallback(&info.download_url, proxy_url).await?;
     let declared_total = (info.size > 0).then_some(info.size);
     let mut last_percent = None;
     let download_progress = Arc::clone(&progress);
@@ -554,10 +579,18 @@ fn replace_installed_core(
     previous: &Path,
 ) -> AppResult<bool> {
     let _ = fs::remove_file(previous);
+
+    // A currently-setuid core (TUN elevation) can only be replaced with
+    // authorization; reuse that single authorization to also carry the
+    // setuid bit over to the new binary, so an in-place upgrade doesn't
+    // silently drop back to non-root (see macos_auth::replace_setuid_core).
     #[cfg(target_os = "macos")]
-    if dest.exists() {
-        crate::core::macos_auth::remove_setuid_core_if_needed(dest)?;
+    if dest.exists() && crate::core::macos_auth::core_has_setuid(dest) {
+        crate::core::macos_auth::replace_setuid_core(staged, dest, previous)?;
+        let _ = kind;
+        return Ok(true);
     }
+
     let _ = kind;
     let had_previous = dest.exists();
     if had_previous {

@@ -43,7 +43,7 @@
       "resources/bin/darwin-arm64/mihomo",
       "resources/bin/darwin-arm64/mihomo-version.txt",
       "resources/bin/darwin-arm64/mihomo-geodata/Country.mmdb",
-      "resources/bin/darwin-arm64/mihomo-geodata/geosite.dat",
+      "resources/bin/darwin-arm64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",
       "resources/dns"
     ]

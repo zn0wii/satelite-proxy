@@ -188,8 +188,7 @@ portable and installed editions cannot run at the same time.
 
   $OutDir = Join-Path $ROOT "src-tauri\target\release\bundle\portable"
   New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-  $NameTag = if ($SingboxOnly) { "Satelite" } else { "Satelite-fullcores" }
-  $Artifact = Join-Path $OutDir "${NameTag}_${Version}_x64_portable.zip"
+  $Artifact = Join-Path $OutDir "Satelite_${Version}_x64_portable.zip"
   if (Test-Path $Artifact) { Remove-Item -Force $Artifact }
   Compress-Archive -Path $Stage -DestinationPath $Artifact -CompressionLevel Optimal
 } else {

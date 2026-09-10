@@ -314,7 +314,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 - 设计系统：`GlassButton`、`GlassSeg`（区分用户点击与状态重绘才做动画）、`GlassSwitch(+Control)`、`SolidSelect`（**自绘下拉：macOS WKWebView 原生 select 无法主题化**，SolidSelect.tsx:26 注释）。
 - 首页视觉：`HeroVisual`（按 `heroStyle` 分发）→ `ParticleSphere`（three.js，lazy）/ `FaceMark`（Canvas2D 笑脸）/ 经典轨道。
-- 弹窗：`AddConfigModal`（url/file/paste/手动节点/sing-box 五种来源）、`EditLocalNodesModal`、`NodeDraftFields`（16 协议条件字段表单，与 `ManualNodeDraft` 对应）、`AccentColorPickerModal`（自定义主题色取色器；`theme/accents.ts` 支持 `#rrggbb` 自定义 accent，Rust `update_settings` 同步放行）、`DecryptReveal`。
+- 弹窗：`AddConfigModal`（url/file/paste/手动节点/sing-box 五种来源）、`EditLocalNodesModal`、`NodeDraftFields`（16 协议条件字段表单，与 `ManualNodeDraft` 对应）、`NodeDetailModal`（节点卡片 ⋮ 菜单「详情」只读弹窗：按协议渲染协议参数/TLS/传输层；数据来自 `list_all_nodes` 载荷里 serde-flatten 的完整 `ProxyNode`（`config/tls/transport`），前端 `types.ts` 已镜像为 `ProtocolConfig` tagged union，**纯前端无后端命令**）、`AccentColorPickerModal`（自定义主题色取色器；`theme/accents.ts` 支持 `#rrggbb` 自定义 accent，Rust `update_settings` 同步放行）、`DecryptReveal`。
 - hooks：
   - `useVisibleInterval` — **通用轮询原语**：页面隐藏暂停、回调不重叠、可见即重发；
   - `useVirtualRange` — 基于 `.main` 滚动容器的列表虚拟化（支持网格 itemsPerRow）；

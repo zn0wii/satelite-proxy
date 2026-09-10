@@ -2475,6 +2475,58 @@ button.node-card:disabled,
   gap: 0.15rem;
 }
 
+/* —— 节点详情弹窗（⋮ 菜单「详情」） —— */
+.node-detail-modal {
+  width: min(30rem, calc(100vw - 3rem));
+}
+
+.node-detail-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-height: min(30rem, 60vh);
+  overflow-y: auto;
+}
+
+.node-detail-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.node-detail-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.node-detail-row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.22rem 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  align-items: baseline;
+}
+
+.node-detail-label {
+  flex: 0 0 8.5rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.node-detail-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
 .node-dot {
   color: var(--primary);
   font-size: 0.75rem;

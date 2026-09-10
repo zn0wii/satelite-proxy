@@ -15,6 +15,7 @@ import {
 import { GlassButton } from "../components/GlassButton";
 import { GlassSwitch } from "../components/GlassSwitch";
 import { ErrorModal } from "../components/ErrorModal";
+import { NodeDetailModal } from "../components/NodeDetailModal";
 import { useI18n } from "../i18n";
 import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
@@ -143,6 +144,9 @@ export function NodesPage() {
   );
   // Node card ⋮ action menu: id of the node whose menu is open, or null.
   const [menuId, setMenuId] = useState<string | null>(null);
+  // Node-detail modal: the full node object (list payloads already carry
+  // protocol parameters — see ListedNode's serde-flattened ProxyNode).
+  const [detailNode, setDetailNode] = useState<ProxyNode | null>(null);
 
   const [customRuntime, setCustomRuntime] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
@@ -671,6 +675,17 @@ export function NodesPage() {
               type="button"
               role="menuitem"
               className="sub-menu-item"
+              onClick={() => {
+                setMenuId(null);
+                setDetailNode(n);
+              }}
+            >
+              {t("nodes.ctxDetails")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="sub-menu-item"
               disabled={busy}
               onClick={() => {
                 setMenuId(null);
@@ -1110,6 +1125,10 @@ export function NodesPage() {
             <div style={{ height: gridWin.bottomPad }} aria-hidden="true" />
           )}
         </div>
+      )}
+
+      {detailNode && (
+        <NodeDetailModal node={detailNode} onClose={() => setDetailNode(null)} />
       )}
     </div>
   );

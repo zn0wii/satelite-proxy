@@ -163,3 +163,13 @@ pwsh scripts/build-windows.ps1 -Bundle portable   # 便携版：解压即用的 
 ## 友情链接
 
 - **佬友聚集地** [linux.do](https://linux.do/)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=zn0wii%2Fsatelite-proxy&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=zn0wii/satelite-proxy&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=zn0wii/satelite-proxy&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=zn0wii/satelite-proxy&type=date&legend=top-left" />
+ </picture>
+</a>

@@ -437,6 +437,8 @@ export interface CoreInfo {
   /** Pinned factory version (backend `fallback_version`); restore target
    *  for cores with no bundled copy — re-downloads this exact tag. */
   factory_version?: string | null;
+  /** Unix seconds, from the installed binary's mtime — "last installed". */
+  installed_at?: number | null;
 }
 
 export interface CoreDownloadResult {

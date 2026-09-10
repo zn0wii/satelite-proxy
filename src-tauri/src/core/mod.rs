@@ -14,6 +14,7 @@ pub use macos_auth::{core_has_setuid, ensure_core_setuid};
 pub mod manager;
 mod memory;
 mod paths;
+pub mod system_proxy;
 
 pub use assets::ensure_geodata;
 #[cfg(target_os = "windows")]

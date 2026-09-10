@@ -81,11 +81,26 @@ pub async fn fetch_latest_release_with_proxy(
     proxy_url: Option<&str>,
 ) -> AppResult<LatestReleaseInfo> {
     let platform = detect_platform()?;
+    crate::app_log::info(
+        "core",
+        format!(
+            "{}: fetching latest release (proxy={})",
+            kind.display_name(),
+            proxy_url.unwrap_or("none")
+        ),
+    );
     match fetch_release_json(&github_latest_url(kind), proxy_url).await {
         Ok(release) => pick_asset(kind, release, platform),
         Err(api_err) => {
             // API blocked/unreachable → direct asset URL with pinned fallback version
-            let _ = api_err;
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "{}: github api unreachable ({api_err}); falling back to pinned {}",
+                    kind.display_name(),
+                    kind.fallback_version()
+                ),
+            );
             Ok(synthetic_release_info(
                 kind,
                 kind.fallback_version(),
@@ -103,9 +118,26 @@ async fn fetch_release_by_tag_with_proxy(
     let platform = detect_platform()?;
     let tag = normalize_version(tag);
     let url = format!("{}{tag}", github_tag_url(kind));
+    crate::app_log::info(
+        "core",
+        format!(
+            "{}: fetching release {tag} (proxy={})",
+            kind.display_name(),
+            proxy_url.unwrap_or("none")
+        ),
+    );
     match fetch_release_json(&url, proxy_url).await {
         Ok(release) => pick_asset(kind, release, platform),
-        Err(_) => Ok(synthetic_release_info(kind, &tag, platform)),
+        Err(api_err) => {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "{}: github api unreachable ({api_err}); falling back to synthetic {tag}",
+                    kind.display_name()
+                ),
+            );
+            Ok(synthetic_release_info(kind, &tag, platform))
+        }
     }
 }
 
@@ -276,17 +308,38 @@ const GITHUB_ASSET_MIRROR_PREFIX: &str = "https://gh-proxy.com/";
 /// fails outright (connection/DNS error) or comes back with a non-success
 /// status. The mirror attempt never uses `proxy_url` — the whole point of a
 /// mirror is a path that doesn't depend on the user having a working proxy.
+///
+/// When there's no proxy at all, direct GitHub access is unlikely to work
+/// from mainland China — skip straight to the mirror instead of waiting out
+/// a ~120s connection timeout first.
 async fn fetch_asset_with_mirror_fallback(
     download_url: &str,
     proxy_url: Option<&str>,
 ) -> AppResult<reqwest::Response> {
-    let direct_err = match http_client(proxy_url)?.get(download_url).send().await {
-        Ok(resp) if resp.status().is_success() => return Ok(resp),
-        Ok(resp) => format!("download status {}", resp.status()),
-        Err(e) => format!("download: {e}"),
+    crate::app_log::info(
+        "core",
+        format!(
+            "downloading asset (proxy={}): {download_url}",
+            proxy_url.unwrap_or("none")
+        ),
+    );
+
+    let direct_err = if let Some(proxy_url) = proxy_url {
+        match http_client(Some(proxy_url))?.get(download_url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) => format!("download status {}", resp.status()),
+            Err(e) => format!("download: {e}"),
+        }
+    } else {
+        crate::app_log::info("core", "no proxy configured — going straight to mirror");
+        "no proxy configured".into()
     };
 
     let mirror_url = format!("{GITHUB_ASSET_MIRROR_PREFIX}{download_url}");
+    crate::app_log::warn(
+        "core",
+        format!("direct download failed ({direct_err}); trying mirror: {mirror_url}"),
+    );
     match http_client(None)?.get(&mirror_url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(resp),
         Ok(resp) => Err(AppError::Core(format!(
@@ -308,6 +361,7 @@ fn http_client_with_redirect(
     policy: reqwest::redirect::Policy,
 ) -> AppResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(120))
         .user_agent("SateliteProxy/0.1 (core-downloader)")
         .redirect(policy);
@@ -586,6 +640,13 @@ fn replace_installed_core(
     // silently drop back to non-root (see macos_auth::replace_setuid_core).
     #[cfg(target_os = "macos")]
     if dest.exists() && crate::core::macos_auth::core_has_setuid(dest) {
+        crate::app_log::info(
+            "core",
+            format!(
+                "{}: previous binary is setuid — authorizing in-place upgrade",
+                kind.display_name()
+            ),
+        );
         crate::core::macos_auth::replace_setuid_core(staged, dest, previous)?;
         let _ = kind;
         return Ok(true);

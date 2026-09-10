@@ -1662,8 +1662,8 @@ button {
 }
 
 .kernel-card .kernel-row-actions .glass-btn {
-  padding: 0.22rem 0.45rem;
-  font-size: 0.62rem;
+  padding: 0.32rem 0.6rem;
+  font-size: 0.72rem;
   gap: 0.25rem;
 }
 
@@ -1996,6 +1996,58 @@ button {
   margin-top: 0.45rem;
   text-align: right;
   font-size: 0.7rem;
+}
+
+/* Bottom-right floating toast: shows core download/restore progress while
+   the user is away from the Settings tab (SettingsPage unmounts and its
+   local listener would otherwise miss the updates — see coreDownload.ts). */
+.core-download-toast {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 60;
+  width: 15.5rem;
+  padding: 0.7rem 0.8rem;
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+  backdrop-filter: blur(20px) saturate(1.42) brightness(0.96);
+  -webkit-backdrop-filter: blur(20px) saturate(1.42) brightness(0.96);
+  animation: core-download-toast-in 0.18s ease-out;
+}
+
+@keyframes core-download-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.core-download-toast-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.core-download-toast-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.core-download-toast-head .lat-spinner {
+  margin-left: auto;
+}
+
+.core-download-toast-error {
+  font-size: 0.75rem;
+  color: var(--danger);
+  line-height: 1.4;
 }
 
 @keyframes core-progress-slide {

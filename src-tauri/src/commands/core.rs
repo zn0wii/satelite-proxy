@@ -33,6 +33,10 @@ pub struct CoreInfo {
     /// with the fetch-bundled-* scripts). Restore target for cores with no
     /// bundled copy: the card re-downloads this exact tag.
     pub factory_version: Option<String>,
+    /// Unix seconds, from the installed binary's mtime — "last installed"
+    /// on the core card. `None` when nothing is installed or mtime is
+    /// unreadable.
+    pub installed_at: Option<i64>,
 }
 
 /// Local core status only (no network). Prefer this for page load.
@@ -51,6 +55,10 @@ pub fn get_core_info(
     // Metadata-only inspection: do not stage/copy the bundled core during page load.
     let version = active_core_version(&state.app_data_dir, res, kind);
     let bundled_version = bundled_core_version(res, kind);
+    // "Last installed" = the binary's mtime — set whenever it's written
+    // (download, factory reset, or first-run staging of the bundled copy).
+    // No separate persisted timestamp needed.
+    let installed_at = path.as_deref().and_then(core_bin_mtime);
 
     Ok(CoreInfo {
         kind: kind.as_str().into(),
@@ -68,7 +76,18 @@ pub fn get_core_info(
         },
         bundled_version,
         factory_version: Some(kind.fallback_version().into()),
+        installed_at,
     })
+}
+
+/// Binary mtime as unix seconds — best-effort, `None` on any metadata error.
+fn core_bin_mtime(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(secs).ok()
 }
 
 /// Remote latest version only (network). Call after local info is shown.
@@ -492,14 +511,28 @@ pub fn get_app_install_path() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Proxy to use for the download path, in priority order:
+/// 1. The core's own mixed inbound, once it's actually running.
+/// 2. Standard proxy env vars (`HTTPS_PROXY` etc.) — set on terminal-launched
+///    or dev builds; GUI apps started from Finder/Dock don't inherit these.
+/// 3. The OS's own proxy setting (macOS System Settings / Windows Internet
+///    Settings), which GUI apps do see.
+///
+/// This only matters before the core has ever run (first install, or after
+/// a core update wipes the binary) — otherwise there's no proxy loop yet to
+/// route the download through, so falling straight to "no proxy" would send
+/// GitHub traffic direct even when the user has one configured.
 fn current_download_proxy(state: &AppState) -> Result<Option<String>, String> {
-    if !state.is_core_running() {
-        return Ok(None);
+    if state.is_core_running() {
+        let mixed_port = state
+            .with_store(|store| Ok(store.settings.mixed_port))
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(format!("http://127.0.0.1:{mixed_port}")));
     }
-    let mixed_port = state
-        .with_store(|store| Ok(store.settings.mixed_port))
-        .map_err(|error| error.to_string())?;
-    Ok(Some(format!("http://127.0.0.1:{mixed_port}")))
+    if let Some(proxy) = crate::core::system_proxy::read_env_proxy() {
+        return Ok(Some(proxy));
+    }
+    Ok(crate::core::system_proxy::read_system_proxy())
 }
 
 fn normalize_cmp(v: &str) -> String {

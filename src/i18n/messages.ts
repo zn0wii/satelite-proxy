@@ -310,6 +310,7 @@ const en = {
   "settings.coreMissing": "missing",
   "settings.coreBundledShort": "bundled",
   "settings.coreLatestShort": "latest",
+  "settings.coreInstalledAt": "installed",
   "settings.coreCheck": "Check",
   "settings.coreChecking": "Checking…",
   "settings.coreDownload": "Install",
@@ -1200,11 +1201,12 @@ const zh: Record<MessageKey, string> = {
   "settings.coreMissing": "未安装",
   "settings.coreBundledShort": "内置",
   "settings.coreLatestShort": "最新",
-  "settings.coreCheck": "检测更新",
+  "settings.coreInstalledAt": "安装于",
+  "settings.coreCheck": "检测",
   "settings.coreChecking": "检测中…",
-  "settings.coreDownload": "下载安装",
+  "settings.coreDownload": "下载",
   "settings.coreRedownload": "重新下载",
-  "settings.coreRestore": "恢复出厂",
+  "settings.coreRestore": "重置",
   "settings.coreRestoreHint":
     "放弃已下载的内核，恢复为随应用内置的版本（{v}）。内核运行中将自动重启。",
   "settings.coreRestoreConfirm":

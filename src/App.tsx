@@ -5,6 +5,7 @@ import { TopNav } from "./components/TopNav";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorModal } from "./components/ErrorModal";
 import { beginCoreBusy } from "./coreBusy";
+import { CoreDownloadToast } from "./components/CoreDownloadToast";
 import { ImportIntentProvider, useImportIntent } from "./ImportIntentContext";
 import { LocaleProvider } from "./i18n";
 import { ThemeProvider } from "./theme";
@@ -92,6 +93,7 @@ function ProShell() {
           )}
         </div>
       </main>
+      <CoreDownloadToast />
     </div>
   );
 }

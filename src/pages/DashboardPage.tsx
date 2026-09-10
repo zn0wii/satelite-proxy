@@ -141,8 +141,8 @@ function latencyClass(ms?: number | null) {
 
 /** Country code overrides, kept in sync with nodeGroups.ts REGIONS table. */
 const COUNTRY_NAME_OVERRIDES_ZH: Record<string, string> = {
-  HK: "中国香港",
-  TW: "中国台湾",
+  HK: "香港",
+  TW: "台湾",
 };
 
 /** Country code → localized region name (zh: "US" → "美国") via CLDR.

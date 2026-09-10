@@ -88,8 +88,12 @@ impl CoreKind {
     /// sing-box `sing-box-{ver}-darwin-arm64.tar.gz`, Xray
     /// `Xray-macos-arm64-v8a.zip` (no version, `64` not `amd64`), mihomo
     /// `mihomo-{plat}-v{ver}.zip|.gz` (same plat suffixes as sing-box;
-    /// Windows zips carry a versioned inner exe, darwin/linux ship a bare
-    /// gzipped binary).
+    /// Windows zips carry a platform-suffixed inner exe, darwin/linux ship
+    /// a bare gzipped binary). On amd64, mihomo assets get the
+    /// `-compatible` infix: upstream's plain amd64 builds are GOAMD64=v3
+    /// (AVX2/BMI2) and fatal at startup on Rosetta 2 and pre-Haswell
+    /// Intel CPUs — see AGENTS.md §9.17⑦. `compatible` == GOAMD64=v1,
+    /// which costs nothing here (the crypto hot path is AES-NI, v1-level).
     pub fn asset_name(self, version: &str, platform_suffix: &str, is_windows: bool) -> String {
         let ver_num = version.trim_start_matches('v');
         match self {
@@ -100,7 +104,11 @@ impl CoreKind {
             Self::Xray => format!("Xray-{platform_suffix}.zip"),
             Self::Mihomo => {
                 let ext = if is_windows { "zip" } else { "gz" };
-                format!("mihomo-{platform_suffix}-v{ver_num}.{ext}")
+                if platform_suffix.ends_with("amd64") {
+                    format!("mihomo-{platform_suffix}-compatible-v{ver_num}.{ext}")
+                } else {
+                    format!("mihomo-{platform_suffix}-v{ver_num}.{ext}")
+                }
             }
         }
     }
@@ -375,9 +383,20 @@ mod tests {
             CoreKind::Xray.asset_name("26.3.27", "macos-arm64-v8a", false),
             "Xray-macos-arm64-v8a.zip"
         );
+        // mihomo amd64 uses the -compatible (GOAMD64=v1) variant: the plain
+        // amd64 asset is v3-compiled and fails the `-v` self-check on
+        // Rosetta 2 / pre-Haswell Intel. arm64 has no microarch variants.
         assert_eq!(
             CoreKind::Mihomo.asset_name("1.19.30", "windows-amd64", true),
-            "mihomo-windows-amd64-v1.19.30.zip"
+            "mihomo-windows-amd64-compatible-v1.19.30.zip"
+        );
+        assert_eq!(
+            CoreKind::Mihomo.asset_name("1.19.30", "darwin-amd64", false),
+            "mihomo-darwin-amd64-compatible-v1.19.30.gz"
+        );
+        assert_eq!(
+            CoreKind::Mihomo.asset_name("1.19.30", "linux-amd64", false),
+            "mihomo-linux-amd64-compatible-v1.19.30.gz"
         );
         assert_eq!(
             CoreKind::Mihomo.asset_name("1.19.30", "darwin-arm64", false),

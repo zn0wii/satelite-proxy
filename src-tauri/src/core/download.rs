@@ -259,10 +259,26 @@ fn pick_asset(
     let version = normalize_version(&release.tag_name);
     let suffix = platform.asset_suffix_for(kind);
     let expected = kind.asset_name(&version, suffix, platform.is_windows);
-    let ext = if platform.is_windows { "zip" } else { "tar.gz" };
     // sing-box assets embed the version (`sing-box-1.13.15-darwin-arm64.tar.gz`);
     // Xray assets don't (`Xray-macos-arm64-v8a.zip`); mihomo embeds it too
-    // (`mihomo-darwin-arm64-v1.19.30.gz`).
+    // (`mihomo-darwin-arm64-v1.19.30.gz`, amd64 with a `-compatible` infix —
+    // see `CoreKind::asset_name`).
+    let ext = match kind {
+        CoreKind::Mihomo => {
+            if platform.is_windows {
+                "zip"
+            } else {
+                "gz"
+            }
+        }
+        _ => {
+            if platform.is_windows {
+                "zip"
+            } else {
+                "tar.gz"
+            }
+        }
+    };
     let prefix = match kind {
         CoreKind::SingBox => format!("sing-box-{}", version.trim_start_matches('v')),
         CoreKind::Xray => "Xray-".to_string(),
@@ -274,12 +290,16 @@ fn pick_asset(
         .iter()
         .find(|a| a.name == expected)
         .or_else(|| {
-            // fallback: kind prefix + platform suffix + correct extension
+            // fallback: kind prefix + platform suffix + correct extension.
+            // `go1*` excludes mihomo's old-Go-toolchain variants (go120/go122/
+            // go124 builds for legacy OSes) so the fallback stays on the
+            // current-toolchain asset.
             release.assets.iter().find(|a| {
                 a.name.starts_with(&prefix)
                     && a.name.contains(suffix)
                     && a.name.ends_with(ext)
                     && !a.name.contains("legacy")
+                    && !a.name.contains("go1")
             })
         })
         .ok_or_else(|| {
@@ -908,6 +928,18 @@ mod tests {
             zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.30.exe"),
             Some(1)
         );
+        // The compatible-variant zips carry their own inner exe names.
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64-compatible.exe"),
+            Some(1)
+        );
+        assert_eq!(
+            zip_binary_match_rank(
+                CoreKind::Mihomo,
+                "mihomo-windows-amd64-compatible-v1.19.30.exe"
+            ),
+            Some(1)
+        );
         // Exact names still win (rank 2).
         assert_eq!(zip_binary_match_rank(CoreKind::Mihomo, "mihomo"), Some(2));
         assert_eq!(
@@ -929,8 +961,8 @@ mod tests {
     }
 
     /// End-to-end over the real release artifact: extract the binary from an
-    /// actual mihomo Windows zip. `#[ignore]` — needs network like the other
-    /// live core tests; run with
+    /// actual mihomo Windows zip (the GOAMD64=v1 compatible variant).
+    /// `#[ignore]` — needs network like the other live core tests; run with
     /// `cargo test --lib core::download::tests::live_extracts_mihomo_windows_zip -- --ignored`.
     #[test]
     #[ignore = "live network test"]
@@ -938,7 +970,7 @@ mod tests {
         let bytes = std::process::Command::new("curl")
             .args([
                 "-sSL",
-                "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-v1.19.30.zip",
+                "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-compatible-v1.19.30.zip",
             ])
             .output()
             .expect("curl mihomo zip");

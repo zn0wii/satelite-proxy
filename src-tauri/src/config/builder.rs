@@ -1485,8 +1485,13 @@ fn node_to_outbound_tagged(
                 "uuid": uuid,
                 "packet_encoding": packet_encoding,
             });
+            // sing-box only accepts "xtls-rprx-vision" / "xtls-rprx-direct".
+            // Some subscriptions carry Xray-core-only variants (e.g.
+            // "xtls-rprx-vision-udp443"); passing those through verbatim
+            // makes sing-box reject the outbound at startup, so anything
+            // outside the known set is dropped rather than forwarded.
             if let Some(f) = flow {
-                if !f.is_empty() {
+                if matches!(f.as_str(), "xtls-rprx-vision" | "xtls-rprx-direct") {
                     o["flow"] = json!(f);
                 }
             }
@@ -1524,12 +1529,16 @@ fn node_to_outbound_tagged(
             if let Some(d) = down_mbps {
                 o["down_mbps"] = json!(d);
             }
+            // sing-box requires obfs.password whenever obfs.type is set
+            // (e.g. "salamander"). Malformed subscription links occasionally
+            // carry obfs without a usable password (truncated/missing query
+            // param); emitting `{"type": ..}` without it makes sing-box
+            // reject the whole config at startup, so obfs is only emitted
+            // when both fields are present.
             if let Some(t) = obfs {
-                let mut obfs_obj = json!({ "type": t });
-                if let Some(p) = obfs_password {
-                    obfs_obj["password"] = json!(p);
+                if let Some(p) = obfs_password.as_ref().filter(|p| !p.is_empty()) {
+                    o["obfs"] = json!({ "type": t, "password": p });
                 }
-                o["obfs"] = obfs_obj;
             }
             o
         }
@@ -4423,5 +4432,88 @@ mod tests {
         });
         let err = build_singbox_config(&[n], &sidecar_opts(None)).unwrap_err();
         assert!(err.to_string().contains("xhttp"), "got: {err}");
+    }
+
+    fn sample_hysteria2(obfs: Option<&str>, obfs_password: Option<&str>) -> ProxyNode {
+        ProxyNode {
+            id: "0011223344556677".into(),
+            name: "HY2".into(),
+            protocol: Protocol::Hysteria2,
+            server: "hy2.example.com".into(),
+            port: 52056,
+            tls: None,
+            transport: None,
+            udp: Some(true),
+            config: ProtocolConfig::Hysteria2 {
+                password: "pw".into(),
+                up_mbps: None,
+                down_mbps: None,
+                obfs: obfs.map(String::from),
+                obfs_password: obfs_password.map(String::from),
+            },
+            source: Some("hysteria2".into()),
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    fn sample_vless(flow: Option<&str>) -> ProxyNode {
+        ProxyNode {
+            id: "8899aabbccddeeff".into(),
+            name: "VL".into(),
+            protocol: Protocol::Vless,
+            server: "vl.example.com".into(),
+            port: 443,
+            tls: None,
+            transport: None,
+            udp: Some(true),
+            config: ProtocolConfig::Vless {
+                uuid: "uuid".into(),
+                flow: flow.map(String::from),
+                packet_encoding: "xudp".into(),
+            },
+            source: Some("vless".into()),
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    #[test]
+    fn hysteria2_obfs_without_password_is_dropped() {
+        // Malformed subscription links sometimes carry obfs=salamander with
+        // a truncated/missing obfs-password param. sing-box fatals at
+        // startup ("missing obfs password") if obfs.type is set without
+        // obfs.password, so the whole obfs field must be omitted instead.
+        let (_, outbound, _) = node_to_outbound(&sample_hysteria2(Some("salamander"), None)).unwrap();
+        assert!(
+            outbound.get("obfs").is_none(),
+            "expected no obfs field, got: {outbound}"
+        );
+    }
+
+    #[test]
+    fn hysteria2_obfs_with_password_is_kept() {
+        let (_, outbound, _) =
+            node_to_outbound(&sample_hysteria2(Some("salamander"), Some("secret"))).unwrap();
+        assert_eq!(outbound["obfs"]["type"], "salamander");
+        assert_eq!(outbound["obfs"]["password"], "secret");
+    }
+
+    #[test]
+    fn vless_non_standard_flow_is_dropped() {
+        // "xtls-rprx-vision-udp443" is an Xray-core-only flow value; sing-box
+        // rejects it, so it must not be forwarded verbatim.
+        let (_, outbound, _) =
+            node_to_outbound(&sample_vless(Some("xtls-rprx-vision-udp443"))).unwrap();
+        assert!(
+            outbound.get("flow").is_none(),
+            "expected no flow field, got: {outbound}"
+        );
+    }
+
+    #[test]
+    fn vless_standard_flow_is_kept() {
+        let (_, outbound, _) = node_to_outbound(&sample_vless(Some("xtls-rprx-vision"))).unwrap();
+        assert_eq!(outbound["flow"], "xtls-rprx-vision");
     }
 }

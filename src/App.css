@@ -2930,6 +2930,44 @@ button.node-card:disabled,
   font-size: 0.85rem;
 }
 
+/* Route-param pane: the right column of the edit-set modal. Fixed width
+   from the start (set by the column itself) — picking a target never
+   resizes the modal, only this pane's *contents* change. */
+.route-target-params {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.route-target-params .rule-node-pick,
+.route-target-params .rule-chain-pick {
+  flex: 1;
+  min-height: 0;
+}
+
+.route-target-params .solid-select-list {
+  flex: 1;
+  min-height: 0;
+}
+
+.route-target-params-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
 .traffic-grid {
   margin-top: 0;
 }
@@ -3621,12 +3659,6 @@ tr.rule-row:hover {
 .rules-more-title {
   font-size: 0.72rem;
   margin: 0 0.2rem 0.3rem;
-}
-
-.rules-more-divider {
-  height: 1px;
-  background: var(--border);
-  margin: 0.35rem 0.25rem;
 }
 
 /* Radio-style DNS options: plain menu items with a leading dot — solid by
@@ -5101,6 +5133,15 @@ tr.dns-diag-tr:hover {
   line-height: 1.4;
 }
 
+/* "Batch set route" label + the "change overwrites all nodes" hint that
+   appears to its right once the picker deviates from the set's current route. */
+.batch-route-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 /* Inline pill next to a field label, e.g. flagging the API port isn't the
    proxy port — small enough to not compete with the label. */
 .field-badge {
@@ -5153,6 +5194,7 @@ tr.dns-diag-tr:hover {
    pattern as config-add-modal. All SolidSelects inside use inline `list`
    mode, so no popover is clipped by the scrolling body. */
 .modal.rules-form-modal {
+  width: min(560px, 100%);
   max-height: min(92vh, 860px);
   display: flex;
   flex-direction: column;
@@ -5161,6 +5203,114 @@ tr.dns-diag-tr:hover {
 .modal.rules-form-modal .modal-body {
   overflow-y: auto;
   min-height: 0;
+}
+
+/* The edit-set modal's body must itself be a flex container so
+   .edit-set-body's `flex: 1` actually has something to fill — otherwise the
+   two-column row sizes to its own content and the left column (stretched to
+   match) grows/shrinks along with whatever the right column is showing. */
+.modal.rules-form-modal.edit-set-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Edit-set modal's two-column body: left = plain fields + route-target
+   picker, right = the detail pane for whichever route target is selected
+   (node/filter/chain, or a plain hint for proxy/direct/block/unchanged).
+   Fixed width AND height from the start — switching targets swaps the
+   right pane's content only, it never grows/shrinks the modal itself. */
+.modal.rules-form-modal.edit-set-modal {
+  width: min(760px, 100%);
+  height: min(600px, 92vh);
+}
+
+.edit-set-body {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 1.1rem;
+  min-height: 0;
+  flex: 1;
+}
+
+.edit-set-col-left {
+  flex: 0 0 17rem;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  overflow-y: auto;
+}
+
+.edit-set-col-right {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Set metadata (rule count, origin, last update) pinned to the bottom of the
+   left column — fills the space left over by the shorter field stacks
+   (e.g. a local set with no remote/DNS fields) instead of leaving it empty. */
+.edit-set-info {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.edit-set-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+}
+
+/* First few rules of the set being edited — gives the user a quick sense of
+   what's actually in it without leaving the modal. */
+.edit-set-rule-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+}
+
+.edit-set-rule-preview ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.edit-set-rule-preview li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.edit-set-rule-preview-type {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.edit-set-rule-preview-payload {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
 }
 
 .field-grid {

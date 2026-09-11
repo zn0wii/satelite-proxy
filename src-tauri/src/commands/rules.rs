@@ -661,6 +661,7 @@ pub fn create_rule_set(
     smart_include: Option<Vec<String>>,
     smart_exclude: Option<Vec<String>>,
     chain_id: Option<String>,
+    dns_strategy: Option<RuleSetDnsStrategy>,
 ) -> Result<RuleSet, String> {
     let set = state
         .with_store_mut(|store| {
@@ -729,19 +730,38 @@ pub fn create_rule_set(
             }
         })
         .map_err(|e| e.to_string())?;
+    // Route-derived DNS default already landed via `apply_set_route`; an
+    // explicit choice from the new-set dialog overrides it.
+    let set = if let Some(dns_strategy) = dns_strategy {
+        state
+            .with_store_mut(|store| {
+                let set = store
+                    .rule_sets
+                    .iter_mut()
+                    .find(|s| s.id == set.id)
+                    .ok_or_else(|| crate::error::AppError::NotFound(set.id.clone()))?;
+                set.dns_strategy = dns_strategy;
+                Ok(set.clone())
+            })
+            .map_err(|e| e.to_string())?
+    } else {
+        set
+    };
     dump_set(&state, &set.id);
     Ok(set)
 }
 
 #[tauri::command(async)]
 pub fn update_rule_set(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     name: String,
     remote_url: Option<String>,
     update_interval: Option<String>,
+    dns_strategy: Option<RuleSetDnsStrategy>,
 ) -> Result<RuleSet, String> {
-    let set = state
+    let (set, needs_restart) = state
         .with_store_mut(|store| {
             let name = name.trim();
             if name.is_empty() {
@@ -795,9 +815,21 @@ pub fn update_rule_set(
                 remote.url = url.to_string();
                 remote.update_interval = interval.to_string();
             }
-            Ok(set.clone())
+            if let Some(dns_strategy) = dns_strategy {
+                set.dns_strategy = dns_strategy;
+            }
+            // DNS policy is the only field here that reaches the generated
+            // kernel config (name/url/interval only affect display and
+            // download scheduling) — skip the restart when it is unchanged
+            // or the set is effectively empty.
+            let needs_restart =
+                dns_strategy.is_some() && !crate::config::rule_set_is_empty_for_config(set);
+            Ok((set.clone(), needs_restart))
         })
         .map_err(|error| error.to_string())?;
+    if needs_restart {
+        apply_running(&app);
+    }
     dump_set(&state, &id);
     Ok(set)
 }

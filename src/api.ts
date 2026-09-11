@@ -757,6 +757,7 @@ export function createRuleSet(
   smartInclude?: string[] | null,
   smartExclude?: string[] | null,
   chainId?: string | null,
+  dnsStrategy?: RuleSetDnsStrategy | null,
 ) {
   return invoke<RuleSet>("create_rule_set", {
     name,
@@ -767,6 +768,7 @@ export function createRuleSet(
     smartInclude: smartInclude ?? null,
     smartExclude: smartExclude ?? null,
     chainId: chainId ?? null,
+    dnsStrategy: dnsStrategy ?? null,
   });
 }
 
@@ -779,12 +781,14 @@ export function updateRuleSet(
   name: string,
   remoteUrl?: string | null,
   updateInterval?: "disabled" | "1h" | "12h" | "24h" | null,
+  dnsStrategy?: RuleSetDnsStrategy | null,
 ) {
   return invoke<RuleSet>("update_rule_set", {
     id,
     name,
     remoteUrl: remoteUrl ?? null,
     updateInterval: updateInterval ?? null,
+    dnsStrategy: dnsStrategy ?? null,
   });
 }
 

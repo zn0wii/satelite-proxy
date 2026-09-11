@@ -928,6 +928,18 @@ async fn tick(state: &AppState) -> Result<(), String> {
             .unwrap_or_else(|| best_id.clone())
     };
 
+    // Re-check auto_select before applying: mode may have changed during
+    // network probing. If no longer smart, return silently instead of
+    // logging an error from select_current_node_serialized.
+    let still_smart = state
+        .with_store(|s| Ok(s.settings.auto_select.is_smart()))
+        .unwrap_or(false);
+    if !still_smart {
+        app_log::debug("smart_switch", "tick cancelled: auto_select no longer smart");
+        ctrl().set_phase(Phase::Ok);
+        return Ok(());
+    }
+
     apply_switch(state, &best_id, hard_fail)?;
 
     {

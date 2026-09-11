@@ -37,14 +37,14 @@ struct TrafficViewCache {
 fn apply_selected_node(
     settings: &mut crate::domain::AppSettings,
     node_id: String,
-    manual: bool,
+    _manual: bool,
 ) -> bool {
     let was_kernel = settings.auto_select.is_kernel();
     settings.current_node_id = Some(node_id);
-    if manual {
-        settings.auto_select = crate::domain::AutoSelectMode::Off;
-        settings.smart_switch = false;
-    }
+    // Manual node selection no longer resets auto_select mode.
+    // Mode (smart/auto/manual) and node selection are independent:
+    // manually picking a node is a temporary override of the current node,
+    // not a switch to permanent manual mode.
     was_kernel
 }
 
@@ -167,7 +167,11 @@ mod kernel_selection_poll_tests {
             .expect("kernel-mode manual select must not touch the urltest group");
         assert!(!selected_live);
         assert!(was_kernel);
-        assert_eq!(settings.auto_select, crate::domain::AutoSelectMode::Off);
+        assert_eq!(
+            settings.auto_select,
+            crate::domain::AutoSelectMode::Kernel,
+            "manual select should not change auto_select mode"
+        );
         assert_eq!(settings.current_node_id.as_deref(), Some("node-a"));
 
         let _ = std::fs::remove_dir_all(test_dir);

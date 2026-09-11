@@ -754,6 +754,7 @@ export function createRuleSet(
   target?: RuleTarget | null,
   updateInterval?: "disabled" | "1h" | "12h" | "24h" | null,
   nodeId?: string | null,
+  nodeIds?: string[] | null,
   smartInclude?: string[] | null,
   smartExclude?: string[] | null,
   chainId?: string | null,
@@ -765,6 +766,7 @@ export function createRuleSet(
     target: target ?? null,
     updateInterval: updateInterval ?? null,
     nodeId: nodeId ?? null,
+    nodeIds: nodeIds ?? null,
     smartInclude: smartInclude ?? null,
     smartExclude: smartExclude ?? null,
     chainId: chainId ?? null,
@@ -792,11 +794,13 @@ export function updateRuleSet(
   });
 }
 
-/** Apply one target to every rule of a local set (batch set-routes). */
+/** Apply one target to every rule of a local set (batch set-routes).
+ * `nodeIds` carries the full multi-pick selection (2+ = explicit pool). */
 export function batchSetRuleTargets(
   id: string,
   target: "proxy" | "direct" | "block" | "node" | "smart" | "chain",
   nodeId?: string | null,
+  nodeIds?: string[] | null,
   smartInclude?: string[] | null,
   smartExclude?: string[] | null,
   chainId?: string | null,
@@ -805,6 +809,7 @@ export function batchSetRuleTargets(
     id,
     target,
     nodeId: nodeId ?? null,
+    nodeIds: nodeIds ?? null,
     smartInclude: smartInclude ?? null,
     smartExclude: smartExclude ?? null,
     chainId: chainId ?? null,

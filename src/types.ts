@@ -568,8 +568,6 @@ export interface CoreInfo {
   /** Pinned factory version (backend `fallback_version`); restore target
    *  for cores with no bundled copy — re-downloads this exact tag. */
   factory_version?: string | null;
-  /** Unix seconds, from the installed binary's mtime — "last installed". */
-  installed_at?: number | null;
 }
 
 export interface CoreDownloadResult {
@@ -673,6 +671,8 @@ export interface RuleSetSummary {
   /** Set-level route parameters (strategy === "node" | "filter" | "chain"). */
   node_id?: string | null;
   node_name?: string | null;
+  /** Explicit multi-node pool members (strategy === "node", 2+ picks). */
+  node_ids?: string[];
   smart_include?: string[];
   smart_exclude?: string[];
   /** When strategy is `chain`: whole-set chain id. */

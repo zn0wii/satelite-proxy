@@ -468,7 +468,10 @@ impl DnsPathAnalyzer {
                     strategy: DnsPathStrategy::Remote,
                     servers: vec![format!(
                         "{}（DoH · 经代理出口）",
-                        self.remote_pool.first().map(String::as_str).unwrap_or_default()
+                        self.remote_pool
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or_default()
                     )],
                     via_proxy: true,
                     matched_by,
@@ -543,7 +546,10 @@ impl DnsPathAnalyzer {
                     // only (dns_final stays the sole fallback).
                     servers: vec![format!(
                         "{}（DoH · 经主出站）",
-                        self.remote_pool.first().map(String::as_str).unwrap_or_default()
+                        self.remote_pool
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or_default()
                     )],
                     via_proxy: true,
                     matched_by,
@@ -1008,6 +1014,7 @@ mod tests {
             strategy: crate::domain::RuleSetStrategy::Proxy,
             node_id: None,
             node_name: None,
+            node_ids: Vec::new(),
             smart_include: Vec::new(),
             smart_exclude: Vec::new(),
             chain_id: None,

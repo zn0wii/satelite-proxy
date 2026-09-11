@@ -2930,9 +2930,9 @@ button.node-card:disabled,
   font-size: 0.85rem;
 }
 
-/* Route-param pane: the right column of the edit-set modal. Fixed width
-   from the start (set by the column itself) — picking a target never
-   resizes the modal, only this pane's *contents* change. */
+/* Route-param pane of the edit-set modal: fixed area below the picker —
+   picking a target never resizes the modal, only this pane's *contents*
+   change. Every target fills it (pickers, matched nodes, or desc+preview). */
 .route-target-params {
   flex: 1;
   display: flex;
@@ -2942,7 +2942,8 @@ button.node-card:disabled,
 }
 
 .route-target-params .rule-node-pick,
-.route-target-params .rule-chain-pick {
+.route-target-params .rule-chain-pick,
+.route-target-params .rule-smart-filters {
   flex: 1;
   min-height: 0;
 }
@@ -2952,20 +2953,59 @@ button.node-card:disabled,
   min-height: 0;
 }
 
-.route-target-params-empty {
-  flex: 1;
+/* Multi-pick node picker (edit/new-set modal 指定): grid of checkbox rows —
+ * wide cells read faster than one long list, and picked rows still pin to
+ * the top-left (DOM order = grid order). Compound selector outranks the
+ * later `.solid-select-list` flex base. */
+.solid-select-list.node-multi-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
+  align-content: start;
+  gap: 0.15rem 0.35rem;
+}
+
+.node-multi-option {
   display: flex;
   align-items: center;
-  justify-content: center;
-  text-align: center;
-  color: var(--muted);
-  font-size: 0.85rem;
-  line-height: 1.6;
-  max-width: 26rem;
-  margin: 0 auto;
-  padding: 1.5rem;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
+  gap: 0.5rem;
+}
+
+.node-multi-check {
+  flex: 0 0 auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 4px;
+  border: 1.5px solid var(--muted);
+  background: transparent;
+  position: relative;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.node-multi-option.active .node-multi-check {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.node-multi-option.active .node-multi-check::after {
+  content: "";
+  position: absolute;
+  left: 0.26rem;
+  top: 0.1rem;
+  width: 0.2rem;
+  height: 0.42rem;
+  border: solid var(--on-primary, #fff);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.node-multi-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .traffic-grid {
@@ -5205,112 +5245,131 @@ tr.dns-diag-tr:hover {
   min-height: 0;
 }
 
-/* The edit-set modal's body must itself be a flex container so
-   .edit-set-body's `flex: 1` actually has something to fill — otherwise the
-   two-column row sizes to its own content and the left column (stretched to
-   match) grows/shrinks along with whatever the right column is showing. */
+/* The edit-set modal's body must FILL the fixed-height modal (flex:1) and be
+   a flex container itself, so .route-target-params' `flex: 1` has something
+   constant to fill — otherwise the body sizes to its content and the pane
+   height varies with whichever target is picked. */
 .modal.rules-form-modal.edit-set-modal .modal-body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-/* Edit-set modal's two-column body: left = plain fields + route-target
-   picker, right = the detail pane for whichever route target is selected
-   (node/filter/chain, or a plain hint for proxy/direct/block/unchanged).
-   Fixed width AND height from the start — switching targets swaps the
-   right pane's content only, it never grows/shrinks the modal itself. */
+/* Edit-set modal: single-column form (field rows → route picker → fixed
+   detail pane). Fixed width AND height — switching route targets swaps the
+   detail pane's content only, the modal itself never grows/shrinks. */
 .modal.rules-form-modal.edit-set-modal {
-  width: min(760px, 100%);
+  width: min(720px, 100%);
   height: min(600px, 92vh);
 }
 
-.edit-set-body {
+/* Field rows: main input flexes, the side field (DNS seg / auto-update seg)
+   hugs its own content so the segmented control keeps its natural width. */
+.edit-set-field-row {
   display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  gap: 1.1rem;
-  min-height: 0;
-  flex: 1;
+  align-items: flex-start;
+  gap: 0.9rem;
 }
 
-.edit-set-col-left {
-  flex: 0 0 17rem;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-  overflow-y: auto;
-}
-
-.edit-set-col-right {
+.edit-set-field-row .edit-set-field-main {
   flex: 1;
   min-width: 0;
-  min-height: 0;
-  border-left: 1px solid var(--border);
-  padding-left: 1.1rem;
-  display: flex;
-  flex-direction: column;
 }
 
-/* Set metadata (rule count, origin, last update) pinned to the bottom of the
-   left column — fills the space left over by the shorter field stacks
-   (e.g. a local set with no remote/DNS fields) instead of leaving it empty. */
-.edit-set-info {
-  margin-top: auto;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+.edit-set-field-row .edit-set-field-side {
+  flex: 0 0 auto;
 }
 
-.edit-set-info-row {
+/* Route picker block: label row + seven-way seg + status line. */
+.edit-set-route-block {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+/* One constant-height line below the seg: set meta (count/origin/updated)
+   when the pick matches the current route, the overwrite warning in red
+   once it deviates — same slot either way, so the pane below never shifts. */
+.edit-set-status-line {
+  margin: 0;
+  min-height: 1.15rem;
   font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* First few rules of the set being edited — gives the user a quick sense of
-   what's actually in it without leaving the modal. */
-.edit-set-rule-preview {
+.edit-set-status-warn {
+  color: var(--danger);
+}
+
+/* Plain targets (Mixed/Proxy/Direct/Block): one dashed box filling the whole
+   pane — full width, down to the footer — with the effect description
+   centered in it, so the modal's mass stays constant across targets. */
+.route-target-params-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  padding: 1.5rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+/* Filter pane: include/exclude inputs share one row (the single-column modal
+   is wide enough); below them only the matched-node count. */
+.edit-set-smart-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.edit-set-smart-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Selected chain's hops, as chips joined by arrows — the actual route the
+   set would take, pinned under the chain picker. */
+.edit-set-chain-hops {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
   font-size: 0.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
 }
 
-.edit-set-rule-preview ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.edit-set-chain-hops-flow {
   display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
 }
 
-.edit-set-rule-preview li {
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  min-width: 0;
-}
-
-.edit-set-rule-preview-type {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 0.68rem;
-}
-
-.edit-set-rule-preview-payload {
-  flex: 1;
-  min-width: 0;
+.edit-set-chain-hop-chip {
+  padding: 0.16rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  max-width: 9rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--mono);
+}
+
+.edit-set-chain-hop-arrow {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.edit-set-chain-hops-empty {
+  font-size: 0.72rem;
 }
 
 .field-grid {

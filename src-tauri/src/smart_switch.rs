@@ -12,7 +12,7 @@
 //! Lock rule: never hold `store` while acquiring `runtime` (see AppState).
 
 use crate::app_log;
-use crate::config::{outbound_tag, smart_pool_nodes};
+use crate::config::outbound_tag;
 use crate::domain::{ProxyNode, Rule, RuleSetStrategy, RuleTarget};
 use crate::services::latency::{probe_nodes, probe_nodes_ranked};
 use crate::state::AppState;
@@ -966,30 +966,70 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Enabled smart rules to maintain: per-rule keyword pools inside Mixed sets,
-/// plus one stand-in rule per Filter-strategy set (local or remote). The
-/// stand-in reuses the rule maintenance path — its id doubles as the
-/// whole-set selector tag (`smart-<set id prefix>`), which the config builder
-/// emits for every Filter set, so probing/switching lands on the same group.
-fn collect_enabled_smart_rules(state: &AppState) -> Vec<Rule> {
+/// One smart pool to maintain. `id` doubles as the selector-group tag source
+/// (`smart-<id prefix>`) — for per-rule pools it's the rule id, for whole-set
+/// pools the set id — so probing/switching lands on the exact group the
+/// config builder emits.
+struct SmartPool {
+    id: String,
+    /// Log label (rule payload / set name).
+    label: String,
+    source: SmartPoolSource,
+}
+
+enum SmartPoolSource {
+    Keywords {
+        include: Vec<String>,
+        exclude: Vec<String>,
+    },
+    /// Whole-set explicit node pool (`RuleSet::node_ids`).
+    Explicit { node_ids: Vec<String> },
+}
+
+impl SmartPool {
+    fn group(&self) -> String {
+        format!("smart-{}", &self.id[..self.id.len().min(16)])
+    }
+
+    fn member_nodes(&self, nodes: &[ProxyNode]) -> Vec<ProxyNode> {
+        match &self.source {
+            SmartPoolSource::Keywords { include, exclude } => nodes
+                .iter()
+                .filter(|n| crate::domain::name_matches_keywords(&n.name, include, exclude))
+                .cloned()
+                .collect(),
+            SmartPoolSource::Explicit { node_ids } => nodes
+                .iter()
+                .filter(|n| node_ids.iter().any(|id| id == &n.id))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// Enabled smart pools to maintain: per-rule keyword pools inside Mixed sets,
+/// one per Filter-strategy set (local or remote), and one per explicit
+/// node-pool set (strategy Node with 2+ hand-picked members).
+fn collect_enabled_smart_pools(state: &AppState) -> Vec<SmartPool> {
     state
         .with_store(|store| {
             let mut out = Vec::new();
             for set in store.rule_sets.iter().filter(|s| s.enabled) {
                 match set.strategy {
-                    RuleSetStrategy::Filter => out.push(Rule {
+                    RuleSetStrategy::Filter => out.push(SmartPool {
                         id: set.id.clone(),
-                        ord: 0,
-                        rule_type: crate::domain::RuleType::DomainSuffix,
-                        payload: "set".into(),
-                        target: RuleTarget::Smart,
-                        enabled: true,
-                        node_id: None,
-                        node_name: None,
-                        smart_include: set.smart_include.clone(),
-                        smart_exclude: set.smart_exclude.clone(),
-                        chain_id: None,
-                        chain_name: None,
+                        label: set.name.clone(),
+                        source: SmartPoolSource::Keywords {
+                            include: set.smart_include.clone(),
+                            exclude: set.smart_exclude.clone(),
+                        },
+                    }),
+                    RuleSetStrategy::Node if set.is_node_pool() => out.push(SmartPool {
+                        id: set.id.clone(),
+                        label: set.name.clone(),
+                        source: SmartPoolSource::Explicit {
+                            node_ids: set.node_ids.clone(),
+                        },
                     }),
                     RuleSetStrategy::Smart => {
                         for r in set
@@ -997,7 +1037,14 @@ fn collect_enabled_smart_rules(state: &AppState) -> Vec<Rule> {
                             .iter()
                             .filter(|r| r.enabled && matches!(r.target, RuleTarget::Smart))
                         {
-                            out.push(r.clone());
+                            out.push(SmartPool {
+                                id: r.id.clone(),
+                                label: r.payload.clone(),
+                                source: SmartPoolSource::Keywords {
+                                    include: r.smart_include.clone(),
+                                    exclude: r.smart_exclude.clone(),
+                                },
+                            });
                         }
                     }
                     _ => {}
@@ -1008,18 +1055,18 @@ fn collect_enabled_smart_rules(state: &AppState) -> Vec<Rule> {
         .unwrap_or_default()
 }
 
-/// Maintain keyword-filtered smart rule selectors (independent of global smart_switch toggle).
+/// Maintain smart-pool selectors (independent of global smart_switch toggle).
 async fn tick_smart_rules(state: &AppState) -> Result<(), String> {
     if !state.is_core_running() {
         return Ok(());
     }
-    let rules = collect_enabled_smart_rules(state);
-    let active_rule_ids: HashSet<_> = rules.iter().map(|rule| rule.id.as_str()).collect();
+    let pools = collect_enabled_smart_pools(state);
+    let active_ids: HashSet<_> = pools.iter().map(|pool| pool.id.as_str()).collect();
     RULE_STATE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .retain(|rule_id, _| active_rule_ids.contains(rule_id.as_str()));
-    if rules.is_empty() {
+        .retain(|rule_id, _| active_ids.contains(rule_id.as_str()));
+    if pools.is_empty() {
         return Ok(());
     }
 
@@ -1043,25 +1090,25 @@ async fn tick_smart_rules(state: &AppState) -> Result<(), String> {
         .filter(|n| core_kind.supports_node(n))
         .collect();
 
-    for rule in rules {
-        if let Err(e) = maintain_smart_rule(state, &rule, &nodes, &probe_url, api.clone()).await {
-            app_log::debug("smart_switch", format!("smart rule {}: {e}", rule.id));
+    for pool in pools {
+        if let Err(e) = maintain_smart_pool(state, &pool, &nodes, &probe_url, api.clone()).await {
+            app_log::debug("smart_switch", format!("smart pool {}: {e}", pool.label));
         }
     }
     Ok(())
 }
 
-async fn maintain_smart_rule(
+async fn maintain_smart_pool(
     state: &AppState,
-    rule: &Rule,
+    pool: &SmartPool,
     nodes: &[ProxyNode],
     probe_url: &str,
     api: crate::api::ClashApi,
 ) -> Result<(), String> {
-    let group = rule.smart_outbound_tag();
+    let group = pool.group();
     {
         let map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(st) = map.get(&rule.id) {
+        if let Some(st) = map.get(&pool.id) {
             let retry = rule_probe_interval(st.consecutive_probe_fails);
             let in_switch_cooldown = st
                 .last_switch
@@ -1074,16 +1121,16 @@ async fn maintain_smart_rule(
     }
 
     let ejected = ctrl().ejected_ids();
-    let mut pool = smart_pool_nodes(rule, nodes);
-    if pool.is_empty() {
+    let mut members = pool.member_nodes(nodes);
+    if members.is_empty() {
         return Ok(());
     }
-    pool.retain(|n| !ejected.iter().any(|e| e == &n.id));
-    sort_candidates_by_score(&mut pool, &ejected);
-    pool.truncate(BOOTSTRAP_MAX.min(TOP_K.max(8)));
+    members.retain(|n| !ejected.iter().any(|e| e == &n.id));
+    sort_candidates_by_score(&mut members, &ejected);
+    members.truncate(BOOTSTRAP_MAX.min(TOP_K.max(8)));
 
     let results = match probe_nodes_ranked(
-        &pool,
+        &members,
         PROBE_TIMEOUT_MS,
         BOOTSTRAP_CONCURRENCY,
         Some(api.clone()),
@@ -1093,7 +1140,7 @@ async fn maintain_smart_rule(
     {
         Ok(results) => results,
         Err(e) => {
-            record_rule_probe_failure(&rule.id);
+            record_rule_probe_failure(&pool.id);
             return Err(e.to_string());
         }
     };
@@ -1121,21 +1168,21 @@ async fn maintain_smart_rule(
             .then_with(|| a.2.cmp(&b.2))
     });
     let Some((best_id, best_name, best_ms, _)) = ranked.into_iter().next() else {
-        record_rule_probe_failure(&rule.id);
+        record_rule_probe_failure(&pool.id);
         return Ok(());
     };
 
     // Same hysteresis as global path when we know previous pick latency.
     let prev = {
         let map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
-        map.get(&rule.id).cloned()
+        map.get(&pool.id).cloned()
     };
     if let Some(st) = &prev {
         if st.last_node_id.as_ref() == Some(&best_id) {
             // Refresh latency bookkeeping only.
             let mut map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
             map.insert(
-                rule.id.clone(),
+                pool.id.clone(),
                 RuleState {
                     last_switch: st.last_switch,
                     last_probe: Instant::now(),
@@ -1149,7 +1196,7 @@ async fn maintain_smart_rule(
         if let Some(cur_ms) = st.last_latency_ms {
             if !should_prefer(best_ms, cur_ms) {
                 let mut map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(current) = map.get_mut(&rule.id) {
+                if let Some(current) = map.get_mut(&pool.id) {
                     current.last_probe = Instant::now();
                     current.consecutive_probe_fails = 0;
                     current.last_latency_ms = Some(cur_ms);
@@ -1157,8 +1204,8 @@ async fn maintain_smart_rule(
                 app_log::debug(
                     "smart_switch",
                     format!(
-                        "smart rule {} keep {} (cur={cur_ms} best={best_ms} tol={TOLERANCE_MS})",
-                        rule.payload,
+                        "smart pool {} keep {} (cur={cur_ms} best={best_ms} tol={TOLERANCE_MS})",
+                        pool.label,
                         st.last_node_id.as_deref().unwrap_or("?")
                     ),
                 );
@@ -1184,14 +1231,14 @@ async fn maintain_smart_rule(
         })
         .map_err(|e| e.to_string());
     if let Err(e) = selected {
-        record_rule_probe_failure(&rule.id);
+        record_rule_probe_failure(&pool.id);
         return Err(e);
     }
 
     {
         let mut map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
         map.insert(
-            rule.id.clone(),
+            pool.id.clone(),
             RuleState {
                 last_switch: Some(Instant::now()),
                 last_probe: Instant::now(),
@@ -1206,7 +1253,7 @@ async fn maintain_smart_rule(
         "smart_switch",
         format!(
             "smart rule {} → {} ({}ms, group={})",
-            rule.payload, best_name, best_ms, group
+            pool.label, best_name, best_ms, group
         ),
     );
     Ok(())
@@ -1279,6 +1326,14 @@ pub async fn refresh_smart_rule_now(state: &AppState, rule: &Rule) -> Result<(),
     if !matches!(rule.target, RuleTarget::Smart) || !rule.enabled {
         return Ok(());
     }
+    let pool = SmartPool {
+        id: rule.id.clone(),
+        label: rule.payload.clone(),
+        source: SmartPoolSource::Keywords {
+            include: rule.smart_include.clone(),
+            exclude: rule.smart_exclude.clone(),
+        },
+    };
     if !state.is_core_running() {
         return Ok(());
     }
@@ -1301,7 +1356,7 @@ pub async fn refresh_smart_rule_now(state: &AppState, rule: &Rule) -> Result<(),
     // Bypass dwell so new rules get a pick quickly.
     {
         let mut map = RULE_STATE.lock().unwrap_or_else(|p| p.into_inner());
-        map.remove(&rule.id);
+        map.remove(&pool.id);
     }
-    maintain_smart_rule(state, rule, &nodes, &probe_url, api).await
+    maintain_smart_pool(state, &pool, &nodes, &probe_url, api).await
 }

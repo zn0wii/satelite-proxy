@@ -19,33 +19,6 @@ const APP_GITHUB_LATEST: &str =
 const APP_RELEASES_PAGE: &str = "https://github.com/zn0wii/satelite-proxy/releases/latest";
 const MAX_CORE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 
-fn github_latest_url(kind: CoreKind) -> String {
-    format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        kind.repo()
-    )
-}
-
-fn github_tag_url(kind: CoreKind) -> String {
-    format!(
-        "https://api.github.com/repos/{}/releases/tags/",
-        kind.repo()
-    )
-}
-
-#[derive(Debug, Deserialize)]
-struct GhRelease {
-    tag_name: String,
-    assets: Vec<GhAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhAsset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CoreDownloadResult {
     pub kind: String,
@@ -89,25 +62,58 @@ pub async fn fetch_latest_release_with_proxy(
             proxy_url.unwrap_or("none")
         ),
     );
-    match fetch_release_json(&github_latest_url(kind), proxy_url).await {
-        Ok(release) => pick_asset(kind, release, platform),
-        Err(api_err) => {
-            // API blocked/unreachable → direct asset URL with pinned fallback version
+    // Latest tag via the `releases/latest` page redirect — same method as the
+    // app self-check: github.com 302s to `…/releases/tag/<tag>`. Draws on the
+    // website's budget instead of api.github.com's 60 req/h per IP for
+    // unauthenticated callers, which 403s easily behind shared NAT/proxy
+    // exits. The asset URL is then built deterministically from the tag (see
+    // `release_info_from_tag`), so the REST API is never touched.
+    match fetch_latest_core_tag_via_redirect(kind, proxy_url).await {
+        Ok(tag) => Ok(release_info_from_tag(kind, &tag, platform)),
+        Err(err) => {
+            // Page unreachable → direct asset URL with pinned fallback version
             crate::app_log::warn(
                 "core",
                 format!(
-                    "{}: github api unreachable ({api_err}); falling back to pinned {}",
+                    "{}: github releases page unreachable ({err}); falling back to pinned {}",
                     kind.display_name(),
                     kind.fallback_version()
                 ),
             );
-            Ok(synthetic_release_info(
+            Ok(release_info_from_tag(
                 kind,
                 kind.fallback_version(),
                 platform,
             ))
         }
     }
+}
+
+/// Latest release tag of a core repo via the `releases/latest` page redirect
+/// (no redirect follow — the 302 Location carries the tag).
+async fn fetch_latest_core_tag_via_redirect(
+    kind: CoreKind,
+    proxy_url: Option<&str>,
+) -> AppResult<String> {
+    let url = format!("https://github.com/{}/releases/latest", kind.repo());
+    let client = http_client_with_redirect(proxy_url, reqwest::redirect::Policy::none())?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| AppError::Core(format!("github releases page: {e}")))?;
+    if !resp.status().is_redirection() {
+        return Err(AppError::Core(format!(
+            "github releases page status {} (expected redirect) for {url}",
+            resp.status()
+        )));
+    }
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::Core("github releases redirect missing location".into()))?;
+    extract_tag_from_release_url(location)
 }
 
 async fn fetch_release_by_tag_with_proxy(
@@ -117,50 +123,17 @@ async fn fetch_release_by_tag_with_proxy(
 ) -> AppResult<LatestReleaseInfo> {
     let platform = detect_platform()?;
     let tag = normalize_version(tag);
-    let url = format!("{}{tag}", github_tag_url(kind));
     crate::app_log::info(
         "core",
         format!(
-            "{}: fetching release {tag} (proxy={})",
+            "{}: resolving release {tag} (proxy={})",
             kind.display_name(),
             proxy_url.unwrap_or("none")
         ),
     );
-    match fetch_release_json(&url, proxy_url).await {
-        Ok(release) => pick_asset(kind, release, platform),
-        Err(api_err) => {
-            crate::app_log::warn(
-                "core",
-                format!(
-                    "{}: github api unreachable ({api_err}); falling back to synthetic {tag}",
-                    kind.display_name()
-                ),
-            );
-            Ok(synthetic_release_info(kind, &tag, platform))
-        }
-    }
-}
-
-async fn fetch_release_json(url: &str, proxy_url: Option<&str>) -> AppResult<GhRelease> {
-    let client = http_client(proxy_url)?;
-    let resp = client
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| AppError::Core(format!("github api: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Core(format!(
-            "github api status {status} for {url}: {}",
-            body.chars().take(200).collect::<String>()
-        )));
-    }
-    resp.json::<GhRelease>()
-        .await
-        .map_err(|e| AppError::Core(format!("parse github release: {e}")))
+    // The tag already names the release and asset names are deterministic —
+    // no network needed to build the download URL.
+    Ok(release_info_from_tag(kind, &tag, platform))
 }
 
 /// Latest release tag of the app itself (zn0wii/satelite-proxy), used by the
@@ -232,8 +205,10 @@ fn extract_tag_from_release_url(url: &str) -> AppResult<String> {
     Ok(normalize_version(tag))
 }
 
-/// Fallback when GitHub API is blocked: build asset URL from known version tag.
-fn synthetic_release_info(kind: CoreKind, tag: &str, platform: CorePlatform) -> LatestReleaseInfo {
+/// Build the release info (asset name + download URL) from a version tag.
+/// Asset naming is deterministic per kind/platform (see `CoreKind::asset_name`),
+/// so no API round-trip is needed; `size` stays 0 (unknown until download).
+fn release_info_from_tag(kind: CoreKind, tag: &str, platform: CorePlatform) -> LatestReleaseInfo {
     let version = normalize_version(tag);
     let suffix = platform.asset_suffix_for(kind);
     let asset_name = kind.asset_name(&version, suffix, platform.is_windows);
@@ -249,73 +224,6 @@ fn synthetic_release_info(kind: CoreKind, tag: &str, platform: CorePlatform) -> 
         size: 0,
         platform: suffix.to_string(),
     }
-}
-
-fn pick_asset(
-    kind: CoreKind,
-    release: GhRelease,
-    platform: CorePlatform,
-) -> AppResult<LatestReleaseInfo> {
-    let version = normalize_version(&release.tag_name);
-    let suffix = platform.asset_suffix_for(kind);
-    let expected = kind.asset_name(&version, suffix, platform.is_windows);
-    // sing-box assets embed the version (`sing-box-1.13.15-darwin-arm64.tar.gz`);
-    // Xray assets don't (`Xray-macos-arm64-v8a.zip`); mihomo embeds it too
-    // (`mihomo-darwin-arm64-v1.19.30.gz`, amd64 with a `-compatible` infix —
-    // see `CoreKind::asset_name`).
-    let ext = match kind {
-        CoreKind::Mihomo => {
-            if platform.is_windows {
-                "zip"
-            } else {
-                "gz"
-            }
-        }
-        _ => {
-            if platform.is_windows {
-                "zip"
-            } else {
-                "tar.gz"
-            }
-        }
-    };
-    let prefix = match kind {
-        CoreKind::SingBox => format!("sing-box-{}", version.trim_start_matches('v')),
-        CoreKind::Xray => "Xray-".to_string(),
-        CoreKind::Mihomo => format!("mihomo-"),
-    };
-
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == expected)
-        .or_else(|| {
-            // fallback: kind prefix + platform suffix + correct extension.
-            // `go1*` excludes mihomo's old-Go-toolchain variants (go120/go122/
-            // go124 builds for legacy OSes) so the fallback stays on the
-            // current-toolchain asset.
-            release.assets.iter().find(|a| {
-                a.name.starts_with(&prefix)
-                    && a.name.contains(suffix)
-                    && a.name.ends_with(ext)
-                    && !a.name.contains("legacy")
-                    && !a.name.contains("go1")
-            })
-        })
-        .ok_or_else(|| {
-            AppError::Core(format!(
-                "no asset for platform {suffix} (expected {expected})"
-            ))
-        })?;
-
-    Ok(LatestReleaseInfo {
-        kind: kind.as_str().into(),
-        version,
-        asset_name: asset.name.clone(),
-        download_url: asset.browser_download_url.clone(),
-        size: asset.size,
-        platform: suffix.to_string(),
-    })
 }
 
 /// Public GitHub release-asset mirror. Used only as a last-resort fallback
@@ -901,7 +809,7 @@ mod tests {
     #[test]
     fn synthetic_xray_release_url_uses_xtls_repo() {
         let platform = detect_platform().unwrap();
-        let info = synthetic_release_info(CoreKind::Xray, "v26.3.27", platform);
+        let info = release_info_from_tag(CoreKind::Xray, "v26.3.27", platform);
         assert_eq!(info.version, "v26.3.27");
         assert_eq!(
             info.download_url,

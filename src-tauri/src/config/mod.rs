@@ -9,8 +9,8 @@ mod write;
 mod xray;
 
 pub use builder::{
-    build_singbox_config, chain_hop_outbound_tag, generate_api_secret, outbound_tag,
-    rule_set_is_empty_for_config, smart_pool_nodes, BuildOptions, SidecarPlan, DIAG_INBOUND_PORT,
+    build_singbox_config, chain_hop_outbound_tag, explicit_set_pool_tags, generate_api_secret,
+    outbound_tag, rule_set_is_empty_for_config, BuildOptions, SidecarPlan, DIAG_INBOUND_PORT,
     DIAG_SELECTOR_TAG,
 };
 pub use custom::inspect_singbox_config;

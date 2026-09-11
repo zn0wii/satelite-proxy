@@ -103,20 +103,25 @@ pub fn build_mihomo_config(
         groups.push(select_group(MAIN_GROUP, tags.clone(), Some(&selected_tag)));
     }
 
-    // Filter-strategy sets: whole set routes through a keyword-filtered
-    // url-test pool (same semantics as the Xray filter balancer).
+    // Filter-strategy sets and explicit node-pool sets: whole set routes
+    // through a multi-node pool group (same shape as sing-box's whole-set
+    // selectors; the Xray equivalent is a filter balancer).
     let effective_rules = effective_route_rules(&opts.rule_sets, &opts.rules);
     let mut filter_group_tags: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for set in opts
-        .rule_sets
-        .iter()
-        .filter(|s| s.enabled && s.remote.is_none() && s.strategy == RuleSetStrategy::Filter)
-    {
+    for set in opts.rule_sets.iter().filter(|s| {
+        s.enabled
+            && s.remote.is_none()
+            && (s.strategy == RuleSetStrategy::Filter || s.is_node_pool())
+    }) {
         if rule_set_is_empty_for_config(set) {
             continue;
         }
-        let pool = filter_pool_tags(&set.smart_include, &set.smart_exclude, &supported, &tags);
+        let pool = if set.is_node_pool() {
+            crate::config::explicit_set_pool_tags(set, &supported, &tags)
+        } else {
+            filter_pool_tags(&set.smart_include, &set.smart_exclude, &supported, &tags)
+        };
         if pool.is_empty() {
             continue;
         }
@@ -375,7 +380,8 @@ fn build_rules(
                     .cloned()
                     .collect();
                 sorted.sort_by_key(|r| r.ord);
-                let filter_group = if set.strategy == RuleSetStrategy::Filter {
+                let filter_group = if set.strategy == RuleSetStrategy::Filter || set.is_node_pool()
+                {
                     filter_group_tags.get(&set.id).map(String::as_str)
                 } else {
                     None

@@ -179,11 +179,6 @@ impl Rule {
         out
     }
 
-    /// Whether a node display name matches this rule's smart include/exclude filters.
-    pub fn smart_name_matches(&self, node_name: &str) -> bool {
-        name_matches_keywords(node_name, &self.smart_include, &self.smart_exclude)
-    }
-
     /// Selector outbound tag for a smart rule (stable, short).
     pub fn smart_outbound_tag(&self) -> String {
         format!("smart-{}", &self.id[..self.id.len().min(16)])
@@ -261,6 +256,12 @@ pub struct RuleSet {
     /// Snapshot of node display name at pin time (for stale-node UI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    /// When `strategy == Node` with 2+ picks: the whole set routes through an
+    /// explicit multi-node pool instead of the single pin above. `node_id`
+    /// stays populated with the first member for display/legacy paths; an
+    /// empty vec (or a single entry, never stored) means plain single-pin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_ids: Vec<String>,
     /// When `strategy == Filter`: whitelist — name must contain any keyword (OR). Empty = all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smart_include: Vec<String>,
@@ -461,6 +462,7 @@ impl RuleSet {
             strategy: RuleSetStrategy::Proxy,
             node_id: None,
             node_name: None,
+            node_ids: Vec::new(),
             smart_include: Vec::new(),
             smart_exclude: Vec::new(),
             chain_id: None,
@@ -497,9 +499,18 @@ impl RuleSet {
     /// Selector outbound tag for a whole-set (Filter) keyword pool. Same shape
     /// as `Rule::smart_outbound_tag` — set ids (`rs-*` / `system-*`) never
     /// collide with rule hash ids, and smart_switch probes sets through a
-    /// stand-in rule so both sides must agree on this tag.
+    /// stand-in rule so both sides must agree on this tag. Explicit
+    /// multi-node pools (`is_node_pool`) reuse the same tag: a set is exactly
+    /// one strategy, so the namespaces never overlap.
     pub fn smart_set_outbound_tag(&self) -> String {
         format!("smart-{}", &self.id[..self.id.len().min(16)])
+    }
+
+    /// Whole-set explicit node pool (`strategy == Node` with 2+ stored
+    /// picks). Generators route such sets through a `smart-<id>` pool group
+    /// exactly like a Filter set, only with hand-picked members.
+    pub fn is_node_pool(&self) -> bool {
+        self.strategy == RuleSetStrategy::Node && self.node_ids.len() >= 2
     }
 }
 
@@ -550,6 +561,9 @@ pub struct RuleSetSummary {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    /// Explicit multi-node pool members (strategy == Node with 2+ picks).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smart_include: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

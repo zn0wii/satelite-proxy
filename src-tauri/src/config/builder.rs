@@ -303,12 +303,8 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
     // DNS `final` is configured independently on the DNS page (local/domestic/
     // remote) and no longer follows the routing `final`.
     let mut built_dns = build_dns_section(&opts.dns, opts.tun_enabled, &effective_rules);
-    let (rule_set_defs, grouped_route_rules, grouped_dns_rules) = build_grouped_rule_sets(
-        &opts.rule_sets,
-        nodes,
-        &tags,
-        &chain_entry_tags,
-    );
+    let (rule_set_defs, grouped_route_rules, grouped_dns_rules) =
+        build_grouped_rule_sets(&opts.rule_sets, nodes, &tags, &chain_entry_tags);
     if let Some(dns_rules) = built_dns.dns.get_mut("rules").and_then(Value::as_array_mut) {
         for rule in grouped_dns_rules.into_iter().rev() {
             dns_rules.insert(0, rule);
@@ -530,10 +526,10 @@ pub(crate) fn effective_route_rules(sets: &[RuleSet], fallback: &[Rule]) -> Vec<
         .iter()
         .filter(|set| set.enabled && set.remote.is_none())
     {
-        // Filter sets route through one whole-set selector; letting their
-        // rules through here would spawn per-rule selectors that nothing
-        // references (dead outbounds).
-        if set.strategy == RuleSetStrategy::Filter {
+        // Filter sets and explicit node-pool sets route through one
+        // whole-set group; letting their rules through here would spawn
+        // per-rule selectors that nothing references (dead outbounds).
+        if set.strategy == RuleSetStrategy::Filter || set.is_node_pool() {
             continue;
         }
         let mut rules = set.rules.clone();
@@ -715,6 +711,14 @@ fn remote_set_route_rule(
     }
     let outbound = match set.strategy {
         RuleSetStrategy::Direct => "direct".to_string(),
+        RuleSetStrategy::Node if set.is_node_pool() => {
+            let pool = explicit_set_pool_tags(set, nodes, tags);
+            if pool.is_empty() {
+                "proxy".to_string()
+            } else {
+                set.smart_set_outbound_tag()
+            }
+        }
         RuleSetStrategy::Node => node_pin_outbound(set.node_id.as_deref(), nodes, tags),
         RuleSetStrategy::Filter => {
             let pool = filter_pool_tags(&set.smart_include, &set.smart_exclude, nodes, tags);
@@ -749,26 +753,52 @@ fn node_pin_outbound(node_id: Option<&str>, nodes: &[ProxyNode], tags: &[String]
     "proxy".into()
 }
 
-/// Whole-set selectors for Filter-strategy sets (local + remote): one
-/// keyword-filtered pool per set, tagged like a per-rule smart selector
-/// (`smart-<id prefix>` — set ids never collide with rule hash ids) so
-/// smart_switch can probe/switch it through a stand-in rule with the same id.
+/// Member outbound tags of a whole-set explicit node pool (`node_ids`),
+/// latency-sorted like keyword pools so the selector default is the
+/// best-known member. Stale ids (subscription changed / node removed) are
+/// dropped silently; an empty result makes callers fall back to `proxy`.
+pub fn explicit_set_pool_tags(set: &RuleSet, nodes: &[ProxyNode], tags: &[String]) -> Vec<String> {
+    let mut pool: Vec<(u32, String)> = set
+        .node_ids
+        .iter()
+        .filter_map(|id| nodes.iter().find(|n| &n.id == id))
+        .filter_map(|n| {
+            let tag = outbound_tag(n);
+            if tags.iter().any(|t| t == &tag) {
+                Some((n.latency_ms.unwrap_or(u32::MAX / 4), tag))
+            } else {
+                None
+            }
+        })
+        .collect();
+    pool.sort_by_key(|(lat, _)| *lat);
+    pool.into_iter().map(|(_, tag)| tag).collect()
+}
+
+/// Whole-set pool selectors for Filter-strategy sets and explicit
+/// node-pool sets (local + remote): one pool group per set, tagged like a
+/// per-rule smart selector (`smart-<id prefix>` — set ids never collide with
+/// rule hash ids) so smart_switch can probe/switch it through a stand-in rule
+/// with the same id.
 fn build_filter_set_selectors(
     sets: &[RuleSet],
     nodes: &[ProxyNode],
     tags: &[String],
 ) -> Vec<Value> {
     let mut out = Vec::new();
-    for set in sets
-        .iter()
-        .filter(|set| set.enabled && set.strategy == RuleSetStrategy::Filter)
-    {
+    for set in sets.iter().filter(|set| {
+        set.enabled && (set.strategy == RuleSetStrategy::Filter || set.is_node_pool())
+    }) {
         // Sets that contribute nothing to the config never reach a route
         // rule; a selector for them would be a dead outbound.
         if rule_set_is_empty_for_config(set) {
             continue;
         }
-        let pool = filter_pool_tags(&set.smart_include, &set.smart_exclude, nodes, tags);
+        let pool = if set.is_node_pool() {
+            explicit_set_pool_tags(set, nodes, tags)
+        } else {
+            filter_pool_tags(&set.smart_include, &set.smart_exclude, nodes, tags)
+        };
         if pool.is_empty() {
             continue;
         }
@@ -797,19 +827,24 @@ fn route_local_set_grouped(
     route_rules: &mut Vec<Value>,
 ) {
     // Filter sets route every smart-pool rule through one whole-set selector
-    // (falling back to `proxy` on an empty pool) instead of per-rule tags.
-    let filter_key = if set.strategy == RuleSetStrategy::Filter {
-        let pool = filter_pool_tags(&set.smart_include, &set.smart_exclude, nodes, tags);
-        format!(
+    // (falling back to `proxy` on an empty pool) instead of per-rule tags;
+    // explicit node-pool sets do the same with their hand-picked members.
+    let pool_key = if set.strategy == RuleSetStrategy::Filter || set.is_node_pool() {
+        let pool = if set.is_node_pool() {
+            explicit_set_pool_tags(set, nodes, tags)
+        } else {
+            filter_pool_tags(&set.smart_include, &set.smart_exclude, nodes, tags)
+        };
+        Some(format!(
             "route:{}",
             if pool.is_empty() {
                 "proxy".to_string()
             } else {
                 set.smart_set_outbound_tag()
             }
-        )
+        ))
     } else {
-        String::new()
+        None
     };
     let mut groups: Vec<(String, Vec<Rule>)> = Vec::new();
     let mut sorted: Vec<Rule> = set
@@ -823,8 +858,22 @@ fn route_local_set_grouped(
         clamp_rule_pin_to_set(set, &mut rule);
         let key = if rule.target == RuleTarget::Block {
             "reject".to_string()
-        } else if set.strategy == RuleSetStrategy::Filter && rule.target == RuleTarget::Smart {
-            filter_key.clone()
+        } else if let Some(key) = pool_key.as_ref() {
+            // Whole-set pool: Filter rules clamp to Smart, node-pool rules to
+            // Node — either way the set-level group wins over per-rule tags.
+            let matches_pool = if set.is_node_pool() {
+                rule.target == RuleTarget::Node
+            } else {
+                rule.target == RuleTarget::Smart
+            };
+            if matches_pool {
+                key.clone()
+            } else {
+                format!(
+                    "route:{}",
+                    resolve_rule_outbound(&rule, nodes, tags, chain_entry_tags)
+                )
+            }
         } else {
             format!(
                 "route:{}",
@@ -1329,14 +1378,6 @@ fn build_chain_outbounds(
 }
 
 /// Nodes matching smart filters (for probe / UI).
-pub fn smart_pool_nodes(r: &Rule, nodes: &[ProxyNode]) -> Vec<ProxyNode> {
-    nodes
-        .iter()
-        .filter(|n| r.smart_name_matches(&n.name))
-        .cloned()
-        .collect()
-}
-
 fn build_smart_rule_selectors(rules: &[Rule], nodes: &[ProxyNode], tags: &[String]) -> Vec<Value> {
     use crate::domain::RuleTarget;
     let mut out = Vec::new();
@@ -1989,6 +2030,29 @@ mod tests {
         }
     }
 
+    fn sample_ss_b() -> ProxyNode {
+        ProxyNode {
+            id: "1122334455667788".into(),
+            name: "SS-JP".into(),
+            protocol: Protocol::Shadowsocks,
+            server: "ss2.example.com".into(),
+            port: 8389,
+            tls: None,
+            transport: None,
+            udp: Some(true),
+            config: ProtocolConfig::Shadowsocks {
+                method: "aes-256-gcm".into(),
+                password: "secret2".into(),
+                plugin: None,
+                plugin_opts: None,
+                shadow_tls: None,
+            },
+            source: Some("ss2".into()),
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
     fn sample_wg(id: &str) -> ProxyNode {
         ProxyNode {
             id: id.into(),
@@ -2262,7 +2326,8 @@ mod tests {
 
     #[test]
     fn skips_dns_rule_for_ip_only_remote_set() {
-        let mut set = RuleSet::new_remote("GeoIP CN", "https://example.com/cn.srs", RuleTarget::Direct);
+        let mut set =
+            RuleSet::new_remote("GeoIP CN", "https://example.com/cn.srs", RuleTarget::Direct);
         let remote = set.remote.as_mut().unwrap();
         remote.local_path = Some(
             std::env::current_exe()
@@ -2398,7 +2463,11 @@ mod tests {
         set.strategy = RuleSetStrategy::Direct;
 
         let (_, routes, dns) = build_grouped_rule_sets(&[set], &[], &[], &Default::default());
-        assert_eq!(dns.len(), 0, "ip_cidr-only inline sets drop the DNS-side reference");
+        assert_eq!(
+            dns.len(),
+            0,
+            "ip_cidr-only inline sets drop the DNS-side reference"
+        );
         assert!(!routes.is_empty(), "route-side reference is unaffected");
     }
 
@@ -2700,6 +2769,50 @@ mod tests {
             build_grouped_rule_sets(&[empty.clone()], &nodes, &tags, &Default::default());
         assert_eq!(routes[0]["outbound"], "proxy");
         assert!(build_filter_set_selectors(&[empty], &nodes, &tags).is_empty());
+    }
+
+    #[test]
+    fn remote_node_pool_set_routes_whole_set_through_explicit_selector() {
+        let nodes = vec![sample_ss(), sample_ss_b()];
+        let tags = node_tags(&nodes);
+        let mut set = RuleSet::new_remote(
+            "多选池集",
+            "https://example.com/pool.json",
+            RuleTarget::Node,
+        );
+        set.node_ids = nodes.iter().map(|n| n.id.clone()).collect();
+        set.node_id = Some(nodes[0].id.clone());
+        set.node_name = Some(nodes[0].name.clone());
+        set.remote.as_mut().unwrap().local_path = Some(
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+        assert!(set.is_node_pool());
+
+        let group = set.smart_set_outbound_tag();
+        let tag = set.id.clone();
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[set.clone()], &nodes, &tags, &Default::default());
+        assert_eq!(
+            routes[0],
+            json!({ "rule_set": [tag], "action": "route", "outbound": group })
+        );
+
+        let selectors = build_filter_set_selectors(&[set.clone()], &nodes, &tags);
+        assert_eq!(selectors.len(), 1);
+        assert_eq!(selectors[0]["tag"], group);
+        assert_eq!(selectors[0]["outbounds"], json!(tags));
+
+        // Stale members (subscription swapped them out) → proxy fallback and
+        // no dead selector.
+        let mut stale = set;
+        stale.node_ids = vec!["gone-1".into(), "gone-2".into()];
+        let (_, routes, _) =
+            build_grouped_rule_sets(&[stale.clone()], &nodes, &tags, &Default::default());
+        assert_eq!(routes[0]["outbound"], "proxy");
+        assert!(build_filter_set_selectors(&[stale], &nodes, &tags).is_empty());
     }
 
     #[test]
@@ -4484,7 +4597,8 @@ mod tests {
         // a truncated/missing obfs-password param. sing-box fatals at
         // startup ("missing obfs password") if obfs.type is set without
         // obfs.password, so the whole obfs field must be omitted instead.
-        let (_, outbound, _) = node_to_outbound(&sample_hysteria2(Some("salamander"), None)).unwrap();
+        let (_, outbound, _) =
+            node_to_outbound(&sample_hysteria2(Some("salamander"), None)).unwrap();
         assert!(
             outbound.get("obfs").is_none(),
             "expected no obfs field, got: {outbound}"

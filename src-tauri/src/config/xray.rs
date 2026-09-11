@@ -90,23 +90,27 @@ pub fn build_xray_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<
         selected_tag.clone()
     };
 
-    // Filter-strategy sets route through a keyword-filtered node pool. Xray
-    // has no selector outbound, so each pool becomes a balancer over the
-    // exact tags of its member nodes (leastPing; the shared observatory
-    // probes the node- prefix so members have latency data). Empty pools
-    // fall back to the main target.
+    // Filter-strategy sets and explicit node-pool sets route through a
+    // multi-node pool. Xray has no selector outbound, so each pool becomes a
+    // balancer over the exact tags of its member nodes (leastPing; the shared
+    // observatory probes the node- prefix so members have latency data).
+    // Empty pools fall back to the main target.
     let mut filter_balancers = Vec::new();
     let mut filter_balancer_tags: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for set in opts
-        .rule_sets
-        .iter()
-        .filter(|s| s.enabled && s.remote.is_none() && s.strategy == RuleSetStrategy::Filter)
-    {
+    for set in opts.rule_sets.iter().filter(|s| {
+        s.enabled
+            && s.remote.is_none()
+            && (s.strategy == RuleSetStrategy::Filter || s.is_node_pool())
+    }) {
         if rule_set_is_empty_for_config(set) {
             continue;
         }
-        let pool = filter_pool_tags(&set.smart_include, &set.smart_exclude, &supported, &tags);
+        let pool = if set.is_node_pool() {
+            crate::config::explicit_set_pool_tags(set, &supported, &tags)
+        } else {
+            filter_pool_tags(&set.smart_include, &set.smart_exclude, &supported, &tags)
+        };
         if pool.is_empty() {
             continue;
         }
@@ -635,13 +639,14 @@ fn build_routing(
                             .cloned()
                             .collect();
                         rules.sort_by_key(|r| r.ord);
-                        // Filter sets with a keyword pool route the whole set
-                        // through its balancer.
-                        let set_balancer = if set.strategy == RuleSetStrategy::Filter {
-                            filter_balancer_tags.get(&set.id)
-                        } else {
-                            None
-                        };
+                        // Filter sets and explicit node-pool sets route the
+                        // whole set through their pool balancer.
+                        let set_balancer =
+                            if set.strategy == RuleSetStrategy::Filter || set.is_node_pool() {
+                                filter_balancer_tags.get(&set.id)
+                            } else {
+                                None
+                            };
                         for rule in rules {
                             let mut rule = rule;
                             if let Some(target) = set.strategy.route_target() {
@@ -780,9 +785,12 @@ fn build_dns(
         }
         for rule in set.rules.iter().filter(|r| r.enabled) {
             // Only rules that actually reach routing carry DNS meaning.
-            // Filter sets are excluded from effective_rules upstream (they
-            // route via their pool balancer here) but still classify DNS.
-            if set.strategy != RuleSetStrategy::Filter && !effective_ids.contains(rule.id.as_str())
+            // Filter sets and explicit node-pool sets are excluded from
+            // effective_rules upstream (they route via their pool balancer
+            // here) but still classify DNS.
+            if set.strategy != RuleSetStrategy::Filter
+                && !set.is_node_pool()
+                && !effective_ids.contains(rule.id.as_str())
             {
                 continue;
             }
@@ -1314,8 +1322,8 @@ fn stream_settings(node: &ProxyNode) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::domain::{
-        DnsSettings, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleType,
-        REMOTE_DNS_POOL, TlsConfig, Transport,
+        DnsSettings, OutboundMode, Protocol, ProtocolConfig, ProxyNode, Rule, RuleType, TlsConfig,
+        Transport, REMOTE_DNS_POOL,
     };
 
     fn vless_node(name: &str, flow: Option<&str>) -> ProxyNode {
@@ -1849,7 +1857,10 @@ mod tests {
         let built = build_xray_config(&nodes, &opts).expect("build");
         let servers = built.value["dns"]["servers"].as_array().unwrap();
         assert_eq!(servers[0]["address"], json!("https://9.9.9.9/dns-query"));
-        assert_eq!(servers[1]["address"], json!("https://94.140.14.14/dns-query"));
+        assert_eq!(
+            servers[1]["address"],
+            json!("https://94.140.14.14/dns-query")
+        );
         assert!(servers[1].get("skipFallback").is_none());
     }
 

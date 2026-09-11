@@ -33,10 +33,6 @@ pub struct CoreInfo {
     /// with the fetch-bundled-* scripts). Restore target for cores with no
     /// bundled copy: the card re-downloads this exact tag.
     pub factory_version: Option<String>,
-    /// Unix seconds, from the installed binary's mtime — "last installed"
-    /// on the core card. `None` when nothing is installed or mtime is
-    /// unreadable.
-    pub installed_at: Option<i64>,
 }
 
 /// Local core status only (no network). Prefer this for page load.
@@ -55,10 +51,6 @@ pub fn get_core_info(
     // Metadata-only inspection: do not stage/copy the bundled core during page load.
     let version = active_core_version(&state.app_data_dir, res, kind);
     let bundled_version = bundled_core_version(res, kind);
-    // "Last installed" = the binary's mtime — set whenever it's written
-    // (download, factory reset, or first-run staging of the bundled copy).
-    // No separate persisted timestamp needed.
-    let installed_at = path.as_deref().and_then(core_bin_mtime);
 
     Ok(CoreInfo {
         kind: kind.as_str().into(),
@@ -76,18 +68,7 @@ pub fn get_core_info(
         },
         bundled_version,
         factory_version: Some(kind.fallback_version().into()),
-        installed_at,
     })
-}
-
-/// Binary mtime as unix seconds — best-effort, `None` on any metadata error.
-fn core_bin_mtime(path: &std::path::Path) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let secs = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    i64::try_from(secs).ok()
 }
 
 /// Remote latest version only (network). Call after local info is shown.

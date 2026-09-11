@@ -788,11 +788,6 @@ export function SettingsPage() {
           <span className="mono">
             {t("settings.coreLatestShort")} {info?.latest_version ?? "—"}
           </span>
-          {info?.installed_at ? (
-            <span className="mono">
-              {t("settings.coreInstalledAt")} {formatCheckedAt(info.installed_at)}
-            </span>
-          ) : null}
           {info?.update_available ? (
             <span className="pill warn">{t("settings.coreUpdateAvail")}</span>
           ) : null}

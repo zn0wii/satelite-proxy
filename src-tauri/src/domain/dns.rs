@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 /// server tag per rule (no racing) so only the first entry is emitted.
 pub const REMOTE_DNS_POOL: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
 
+/// Cap for user-configured remote DNS entries (pathological-input guard;
+/// no core meaningfully races more than a handful of servers).
+pub const MAX_REMOTE_DNS_ENTRIES: usize = 8;
+
 /// Domestic pool: plaintext UDP, always direct (plus the bootstrap role in
 /// mihomo's `default-nameserver` / `proxy-server-nameserver`).
 pub const DOMESTIC_DNS_POOL: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
@@ -262,6 +266,13 @@ pub struct DnsSettings {
     /// no core ever silently falls back past `dns_final` anymore).
     #[serde(default = "default_dns_final")]
     pub dns_final: String,
+    /// User-configured remote encrypted DNS (DoH) pool. Empty = built-in
+    /// [`REMOTE_DNS_POOL`]. Entries must be `https://` URLs; every core
+    /// consumes the effective pool exactly like the built-in one (mihomo
+    /// races the whole pool, Xray ordered in-pool fallback, sing-box first
+    /// entry) and keeps egressing it through the proxy.
+    #[serde(default)]
+    pub remote_dns: Vec<String>,
 }
 
 impl Default for DnsSettings {
@@ -279,6 +290,7 @@ impl Default for DnsSettings {
             hijack: true,
             cache: true,
             dns_final: default_dns_final(),
+            remote_dns: Vec::new(),
         }
     }
 }
@@ -457,11 +469,59 @@ impl DnsSettings {
         }
     }
 
+    /// Trim `remote_dns` entries, drop empties and duplicates, cap at
+    /// [`MAX_REMOTE_DNS_ENTRIES`] (overflowing entries are dropped).
+    pub fn normalize_remote_dns(&mut self) {
+        let mut seen: Vec<String> = Vec::new();
+        for entry in self.remote_dns.iter() {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() || seen.iter().any(|s| s == trimmed) {
+                continue;
+            }
+            seen.push(trimmed.to_string());
+            if seen.len() == MAX_REMOTE_DNS_ENTRIES {
+                break;
+            }
+        }
+        self.remote_dns = seen;
+    }
+
+    /// The remote pool this run actually uses: user-configured entries when
+    /// any survive trimming, else the built-in [`REMOTE_DNS_POOL`]. All three
+    /// generators and the DNS path analyzer must read this — never the raw
+    /// field or the constant — so a custom pool applies everywhere at once.
+    pub fn effective_remote_pool(&self) -> Vec<String> {
+        let custom: Vec<String> = self
+            .remote_dns
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if custom.is_empty() {
+            REMOTE_DNS_POOL.iter().map(|s| s.to_string()).collect()
+        } else {
+            custom
+        }
+    }
+
     /// Built-in DNS rules loaded from `resources/dns/builtin-dns-rules.list`.
     /// Falls back to a hardcoded minimum if the file is missing.
     pub fn factory_rules_base() -> Vec<DnsRule> {
         default_rules()
     }
+}
+
+/// Reject non-DoH remote DNS entries — the pool's whole point is encrypted
+/// resolution, so plain-UDP/TCP addresses must not slip in silently.
+pub fn validate_remote_dns(entries: &[String]) -> Result<(), String> {
+    for entry in entries {
+        if !entry.starts_with("https://") {
+            return Err(format!(
+                "invalid remote DNS entry '{entry}': only https:// (DoH) URLs are supported"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn default_true() -> bool {
@@ -528,6 +588,52 @@ fn default_rules() -> Vec<DnsRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_remote_pool_falls_back_to_builtin() {
+        let mut s = DnsSettings::default();
+        s.remote_dns = vec!["  ".into(), String::new()];
+        assert_eq!(
+            s.effective_remote_pool(),
+            REMOTE_DNS_POOL.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+
+        s.remote_dns = vec!["  https://9.9.9.9/dns-query  ".into(), "https://94.140.14.14/dns-query".into()];
+        assert_eq!(
+            s.effective_remote_pool(),
+            vec!["https://9.9.9.9/dns-query", "https://94.140.14.14/dns-query"]
+        );
+    }
+
+    #[test]
+    fn normalize_remote_dns_trims_dedupes_and_caps() {
+        let mut s = DnsSettings::default();
+        s.remote_dns = vec![
+            " https://a/dns-query ".into(),
+            "https://a/dns-query".into(),
+            "".into(),
+            "https://b/dns-query".into(),
+        ];
+        s.normalize_remote_dns();
+        assert_eq!(
+            s.remote_dns,
+            vec!["https://a/dns-query", "https://b/dns-query"]
+        );
+
+        let many: Vec<String> = (0..20).map(|i| format!("https://n{i}/dns-query")).collect();
+        let mut s = DnsSettings::default();
+        s.remote_dns = many;
+        s.normalize_remote_dns();
+        assert_eq!(s.remote_dns.len(), MAX_REMOTE_DNS_ENTRIES);
+    }
+
+    #[test]
+    fn validate_remote_dns_rejects_non_doh_entries() {
+        assert!(validate_remote_dns(&[]).is_ok());
+        assert!(validate_remote_dns(&["https://9.9.9.9/dns-query".into()]).is_ok());
+        assert!(validate_remote_dns(&["223.5.5.5".into()]).is_err());
+        assert!(validate_remote_dns(&["tls://1.1.1.1:853".into()]).is_err());
+    }
 
     #[test]
     fn legacy_rules_mode_enables_legacy_rules_layer() {

@@ -1,6 +1,7 @@
 # Fetch and stage the bundled mihomo core for Windows (amd64).
-# Downloads mihomo.exe from the mihomo-windows-amd64-v{ver}.zip release
-# asset; geodata (Country.mmdb + GeoSite.dat) is copied from the
+# Downloads mihomo.exe from the mihomo-windows-amd64-compatible-v{ver}.zip
+# release asset (GOAMD64=v1 — the plain amd64 zip is v3/AVX2-only and fatals
+# on pre-Haswell PCs); geodata (Country.mmdb + GeoSite.dat) is copied from the
 # repo-committed snapshot in resources/geodata/mihomo/ (see
 # scripts/fetch-bundled-mihomo-geodata.sh) into
 # src-tauri/resources/bin/windows-amd64/mihomo-geodata/.
@@ -20,7 +21,7 @@ $DEST = Join-Path $ROOT "src-tauri\resources\bin\windows-amd64"
 $GEO  = Join-Path $DEST "mihomo-geodata"
 $TMP  = Join-Path $env:TEMP "satelite-mihomo-$Version"
 
-$Url = "https://github.com/MetaCubeX/mihomo/releases/download/v$Version/mihomo-windows-amd64-v$Version.zip"
+$Url = "https://github.com/MetaCubeX/mihomo/releases/download/v$Version/mihomo-windows-amd64-compatible-v$Version.zip"
 
 $webParams = @{ UseBasicParsing = $true }
 if ($Proxy) { $webParams.Proxy = $Proxy }
@@ -45,7 +46,8 @@ if (Test-Path (Join-Path $DEST "mihomo.exe")) {
 
   Write-Host "Extracting..."
   Expand-Archive -Path $Zip -DestinationPath $TMP -Force
-  # mihomo zips carry a versioned inner exe (mihomo-windows-amd64.exe).
+  # mihomo zips carry a platform-suffixed inner exe
+  # (mihomo-windows-amd64-compatible.exe) rather than a plain mihomo.exe.
   $Exe = Get-ChildItem -Path $TMP -Recurse -Filter "mihomo*.exe" | Select-Object -First 1
   if (-not $Exe) { throw "mihomo.exe not found in archive" }
   Copy-Item -Force $Exe.FullName (Join-Path $DEST "mihomo.exe")

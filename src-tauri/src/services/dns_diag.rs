@@ -28,7 +28,7 @@ use crate::core::CoreKind;
 use crate::domain::OutboundMode;
 use crate::domain::{
     DnsAction, DnsRule, DnsSettings, DomainMatcher, FakeIpConfig, HostsConfig, RuleSet,
-    RuleSetDnsStrategy, RuleSetStrategy, RuleType, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
+    RuleSetDnsStrategy, RuleSetStrategy, RuleType, DOMESTIC_DNS_POOL,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -325,6 +325,8 @@ pub struct DnsPathAnalyzer {
     fakeip_active: bool,
     outbound_direct: bool,
     dns_final: String,
+    /// Remote DoH pool in effect (user-configured; mirrors the generators).
+    remote_pool: Vec<String>,
     /// Names of sets whose membership is cache-derived (for report notes).
     approx_sets: Vec<String>,
 }
@@ -433,6 +435,7 @@ impl DnsPathAnalyzer {
             fakeip_active,
             outbound_direct: input.outbound_mode == OutboundMode::Direct,
             dns_final: input.dns.normalize_dns_final().to_string(),
+            remote_pool: input.dns.effective_remote_pool(),
             approx_sets,
         }
     }
@@ -463,7 +466,10 @@ impl DnsPathAnalyzer {
             CoreKind::SingBox => match pool {
                 RuleSetDnsStrategy::Remote => DnsDiagPath {
                     strategy: DnsPathStrategy::Remote,
-                    servers: vec![format!("{}（DoH · 经代理出口）", REMOTE_DNS_POOL[0])],
+                    servers: vec![format!(
+                        "{}（DoH · 经代理出口）",
+                        self.remote_pool.first().map(String::as_str).unwrap_or_default()
+                    )],
                     via_proxy: true,
                     matched_by,
                     approx,
@@ -491,7 +497,8 @@ impl DnsPathAnalyzer {
                 match pool {
                     RuleSetDnsStrategy::Remote => DnsDiagPath {
                         strategy: DnsPathStrategy::Remote,
-                        servers: REMOTE_DNS_POOL
+                        servers: self
+                            .remote_pool
                             .iter()
                             .map(|url| {
                                 let egress = if self.outbound_direct {
@@ -534,11 +541,18 @@ impl DnsPathAnalyzer {
                     // Second pool entry is pure in-pool redundancy; the other
                     // pools carry skipFallback and answer their own domains
                     // only (dns_final stays the sole fallback).
-                    servers: vec![format!("{}（DoH · 经主出站）", REMOTE_DNS_POOL[0])],
+                    servers: vec![format!(
+                        "{}（DoH · 经主出站）",
+                        self.remote_pool.first().map(String::as_str).unwrap_or_default()
+                    )],
                     via_proxy: true,
                     matched_by,
                     approx,
-                    note: Some("Xray 池内顺序回退（8.8.8.8 备援）".into()),
+                    note: Some(match self.remote_pool.get(1) {
+                        // Xray 池内顺序回退（备援）.
+                        Some(backup) => format!("Xray 池内顺序回退（{backup} 备援）"),
+                        None => "Xray 池内顺序回退（无备援）".into(),
+                    }),
                 },
                 RuleSetDnsStrategy::Domestic => DnsDiagPath {
                     strategy: DnsPathStrategy::Domestic,
@@ -963,7 +977,9 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DnsSettings, HostsConfig, HostsEntry, Rule, RuleSet, RuleTarget};
+    use crate::domain::{
+        DnsSettings, HostsConfig, HostsEntry, Rule, RuleSet, RuleTarget, REMOTE_DNS_POOL,
+    };
 
     fn input(core: &str, sets: Vec<RuleSet>, dns: DnsSettings) -> DnsDiagInput {
         DnsDiagInput {

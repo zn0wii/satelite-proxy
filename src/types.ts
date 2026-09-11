@@ -69,6 +69,8 @@ export interface DnsSettings {
   cache: boolean;
   /** Default resolver for domains unmatched by a rule set. */
   dns_final: DnsFinalStrategy;
+  /** User-configured remote DoH pool (proxy-egressed). Empty = built-in. */
+  remote_dns: string[];
 }
 
 /** Derived DNS query-path strategy for one domain (config replay). */
@@ -190,6 +192,129 @@ export interface ImportResult {
   skipped_count: number;
 }
 
+/** shadow-tls SIP003 plugin params carried alongside a shadowsocks node. */
+export interface ShadowTlsOpts {
+  host: string;
+  password: string;
+  version: number;
+  fingerprint?: string;
+}
+
+/** Protocol-specific parameters — tagged union mirroring Rust `ProtocolConfig`
+ * (serde tag "protocol", lowercase). Used by the node-detail modal only;
+ * consumers elsewhere treat it opaquely. */
+export type ProtocolConfig =
+  | {
+      protocol: "shadowsocks";
+      method: string;
+      password: string;
+      plugin?: string;
+      plugin_opts?: string;
+      shadow_tls?: ShadowTlsOpts;
+    }
+  | { protocol: "vmess"; uuid: string; alter_id: number; security: string }
+  | {
+      protocol: "vless";
+      uuid: string;
+      flow?: string;
+      packet_encoding: string;
+    }
+  | { protocol: "trojan"; password: string }
+  | {
+      protocol: "hysteria2";
+      password: string;
+      up_mbps?: number;
+      down_mbps?: number;
+      obfs?: string;
+      obfs_password?: string;
+    }
+  | {
+      protocol: "tuic";
+      uuid: string;
+      password: string;
+      congestion_control?: string;
+      udp_relay_mode?: string;
+      zero_rtt_handshake: boolean;
+    }
+  | { protocol: "socks5"; username?: string; password?: string }
+  | {
+      protocol: "http";
+      username?: string;
+      password?: string;
+      path?: string;
+    }
+  | {
+      protocol: "hysteria";
+      auth: string;
+      auth_base64: boolean;
+      up_mbps?: number;
+      down_mbps?: number;
+      obfs?: string;
+    }
+  | { protocol: "shadowtls"; version: number; password?: string }
+  | {
+      protocol: "ssh";
+      user: string;
+      password?: string;
+      private_key?: string;
+      private_key_passphrase?: string;
+      host_key: string[];
+    }
+  | { protocol: "naive"; username: string; password: string; quic: boolean }
+  | {
+      protocol: "tor";
+      executable_path: string;
+      extra_args: string[];
+      data_directory?: string;
+    }
+  | {
+      protocol: "wireguard";
+      local_address: string[];
+      private_key: string;
+      peer_public_key: string;
+      pre_shared_key?: string;
+      reserved: number[];
+      mtu?: number;
+    }
+  | { protocol: "anytls"; password: string }
+  | {
+      protocol: "snell";
+      psk: string;
+      version: number;
+      userkey?: string;
+      reuse?: boolean;
+      obfs_mode?: string;
+      obfs_host?: string;
+      mode?: string;
+    };
+
+/** TLS layer — mirrors Rust `TlsConfig`. REALITY fields only carry values on
+ * reality nodes; the section is hidden when TLS is fully off. */
+export interface TlsDetail {
+  enabled: boolean;
+  server_name?: string;
+  insecure?: boolean;
+  alpn?: string[];
+  utls_fingerprint?: string;
+  reality_public_key?: string;
+  reality_short_id?: string;
+}
+
+/** Transport layer — tagged union mirroring Rust `Transport` (tag "type",
+ * lowercase). Absent means plain TCP (the Rust default). */
+export type TransportDetail =
+  | { type: "tcp" }
+  | {
+      type: "ws";
+      path?: string;
+      headers?: Record<string, string>;
+      max_early_data?: number;
+    }
+  | { type: "grpc"; service_name?: string }
+  | { type: "http"; path?: string; host?: string[] }
+  | { type: "httpupgrade"; path?: string; host?: string }
+  | { type: "xhttp"; path?: string; host?: string; mode?: string };
+
 export interface ProxyNode {
   id: string;
   name: string;
@@ -204,6 +329,12 @@ export interface ProxyNode {
   subscription_name?: string;
   /** Present from list_all_nodes — true if the node id is in favorite_nodes. */
   favorite?: boolean;
+  /** Full protocol parameters (serde-flattened from Rust; always present on
+   * list_all_nodes payloads, optional so summary-shaped consumers still type). */
+  config?: ProtocolConfig;
+  tls?: TlsDetail;
+  transport?: TransportDetail;
+  udp?: boolean;
 }
 
 export type ViewMode = "list" | "grid";

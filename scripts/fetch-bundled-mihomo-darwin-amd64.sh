@@ -9,7 +9,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${1:-1.19.30}"
 PLAT="darwin-amd64"
 OUT_DIR="$ROOT/src-tauri/resources/bin/darwin-amd64"
-ASSET="mihomo-${PLAT}-v${VER}.gz"
+# -compatible = GOAMD64=v1. mihomo's plain amd64 assets are GOAMD64=v3
+# (AVX2/BMI2) and fatal on Rosetta 2 (Intel app on Apple Silicon) and
+# pre-Haswell Intel Macs; the crypto hot path is AES-NI (v1-level), so the
+# compatible variant costs nothing.
+ASSET="mihomo-${PLAT}-compatible-v${VER}.gz"
 URL="https://github.com/MetaCubeX/mihomo/releases/download/v${VER}/${ASSET}"
 
 mkdir -p "$OUT_DIR/mihomo-geodata"

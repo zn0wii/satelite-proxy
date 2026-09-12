@@ -3,7 +3,9 @@
 use crate::domain::{CaptureMode, TrayIconStyle};
 use crate::state::AppState;
 use crate::window_ctrl;
+#[cfg(not(target_os = "windows"))]
 use std::io::Write;
+#[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 use tauri::{
     image::Image,
@@ -37,6 +39,99 @@ mod tests {
     }
 }
 
+/// Round-trips text through the real clipboard to guard the unsafe
+/// `SetClipboardData` plumbing end to end.
+/// `#[ignore]` by default — it **replaces whatever the user has copied**.
+/// Run with `cargo test --lib tray::clipboard_tests -- --ignored`.
+#[cfg(all(test, target_os = "windows"))]
+mod clipboard_tests {
+    use super::set_clipboard_text;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    const CF_UNICODETEXT: u32 = 13;
+
+    #[test]
+    #[ignore = "overwrites the user's clipboard"]
+    fn clipboard_roundtrip_preserves_unicode() {
+        let sample = "all_proxy=http://127.0.0.1:2080 代理";
+        set_clipboard_text(sample).expect("set clipboard");
+
+        let readback = unsafe {
+            OpenClipboard(None).expect("open clipboard for readback");
+            let handle = GetClipboardData(CF_UNICODETEXT).expect("get clipboard data");
+            let global = HGLOBAL(handle.0);
+            let ptr = GlobalLock(global).cast::<u16>();
+            let len = GlobalSize(global) / 2;
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(global);
+            let _ = CloseClipboard();
+            text.trim_end_matches('\0').to_string()
+        };
+        assert_eq!(readback, sample);
+    }
+}
+
+/// Put text on the clipboard through the Win32 API instead of piping into
+/// `clip.exe`: a GUI-subsystem process spawning `cmd` flashes a console
+/// window, and `clip.exe` round-trips stdin through the console codepage,
+/// which can mangle non-ASCII text. CF_UNICODETEXT has neither problem.
+#[cfg(target_os = "windows")]
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+
+    // The clipboard is shared; a concurrent holder (clipboard manager,
+    // another app mid-write) makes OpenClipboard fail — retry briefly
+    // before reporting the copy as failed.
+    let mut opened = false;
+    for _ in 0..5 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !opened {
+        return Err("OpenClipboard stayed busy".into());
+    }
+    let placed = unsafe { place_text_while_open(text) };
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    placed
+}
+
+/// Caller must hold the open clipboard. On success the GlobalAlloc'd block
+/// becomes the system's — it is freed only on the failure paths.
+#[cfg(target_os = "windows")]
+unsafe fn place_text_while_open(text: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    // Standard clipboard format ids (the crate only types these in the Ole
+    // feature; pulling all of Ole for two constants isn't worth it).
+    const CF_UNICODETEXT: u32 = 13;
+
+    EmptyClipboard().map_err(|e| format!("EmptyClipboard: {e}"))?;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+    let handle = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| format!("GlobalAlloc: {e}"))?;
+    let dst = GlobalLock(handle);
+    if dst.is_null() {
+        let _ = GlobalFree(Some(handle));
+        return Err("GlobalLock failed".into());
+    }
+    std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), dst.cast::<u8>(), bytes);
+    let _ = GlobalUnlock(handle);
+    if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(handle.0))) {
+        let _ = GlobalFree(Some(handle));
+        return Err(format!("SetClipboardData: {e}"));
+    }
+    Ok(())
+}
+
 fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -58,22 +153,7 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut child = Command::new("cmd")
-            .args(["/C", "clip"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("clip: {e}"))?;
-        child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "clip stdin unavailable".to_string())?
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("clip write: {e}"))?;
-        let status = child.wait().map_err(|e| format!("clip wait: {e}"))?;
-        if !status.success() {
-            return Err("clip failed".into());
-        }
-        return Ok(());
+        return set_clipboard_text(text);
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

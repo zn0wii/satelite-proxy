@@ -595,13 +595,22 @@ mod tests {
         s.remote_dns = vec!["  ".into(), String::new()];
         assert_eq!(
             s.effective_remote_pool(),
-            REMOTE_DNS_POOL.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            REMOTE_DNS_POOL
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
 
-        s.remote_dns = vec!["  https://9.9.9.9/dns-query  ".into(), "https://94.140.14.14/dns-query".into()];
+        s.remote_dns = vec![
+            "  https://9.9.9.9/dns-query  ".into(),
+            "https://94.140.14.14/dns-query".into(),
+        ];
         assert_eq!(
             s.effective_remote_pool(),
-            vec!["https://9.9.9.9/dns-query", "https://94.140.14.14/dns-query"]
+            vec![
+                "https://9.9.9.9/dns-query",
+                "https://94.140.14.14/dns-query"
+            ]
         );
     }
 

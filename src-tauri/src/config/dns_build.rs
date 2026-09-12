@@ -72,7 +72,9 @@ fn doh_parts(url: &str) -> (&str, Option<u16>, Option<String>) {
     // `[ipv6]:port` keeps the bracketed host; `host:port` splits when the
     // tail is all digits.
     let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !h.ends_with(']') && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+        Some((h, p))
+            if !h.ends_with(']') && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) =>
+        {
             (h, p.parse().ok())
         }
         _ => (authority, None),
@@ -100,7 +102,8 @@ fn doh_parts(url: &str) -> (&str, Option<u16>, Option<String>) {
 /// (sing-box's implicit bootstrap for https servers without `domain_resolver`).
 fn builtin_servers(settings: &DnsSettings, fake_ip: &FakeIpConfig) -> Vec<Value> {
     let remote = settings.effective_remote_pool();
-    let (remote_host, remote_port, remote_path) = doh_parts(remote.first().map(String::as_str).unwrap_or(""));
+    let (remote_host, remote_port, remote_path) =
+        doh_parts(remote.first().map(String::as_str).unwrap_or(""));
     let mut dns_remote = json!({
         "type": "https",
         "tag": TAG_REMOTE,

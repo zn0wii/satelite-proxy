@@ -75,8 +75,16 @@ pub async fn probe_nodes(
     clash: Option<ClashApi>,
     probe_url: String,
 ) -> AppResult<Vec<LatencyResult>> {
-    probe_nodes_streaming(nodes, timeout_ms, concurrency, clash, probe_url, |_| {}, true)
-        .await
+    probe_nodes_streaming(
+        nodes,
+        timeout_ms,
+        concurrency,
+        clash,
+        probe_url,
+        |_| {},
+        true,
+    )
+    .await
 }
 
 /// Same as [`probe_nodes`], but invokes `on_result` the moment each probe
@@ -688,15 +696,11 @@ mod tests {
             let key = key.clone();
             let calls = Arc::clone(&calls);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(
-                    key,
-                    true,
-                    || async move {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                        result(Some(42))
-                    },
-                )
+                probe_coalesced(key, true, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    result(Some(42))
+                })
                 .await
             }));
         }
@@ -705,13 +709,9 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let cached = probe_coalesced(
-            key,
-            true,
-            || async {
-                panic!("fresh successful result must be reused");
-            },
-        )
+        let cached = probe_coalesced(key, true, || async {
+            panic!("fresh successful result must be reused");
+        })
         .await;
         assert_eq!(cached.latency_ms, Some(42));
     }
@@ -727,40 +727,28 @@ mod tests {
 
         // Prime the cache with Some(1).
         let c = Arc::clone(&calls);
-        let primed = probe_coalesced(
-            key.clone(),
-            true,
-            || async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                result(Some(1))
-            },
-        )
+        let primed = probe_coalesced(key.clone(), true, || async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            result(Some(1))
+        })
         .await;
         assert_eq!(primed.latency_ms, Some(1));
 
         // Bypass run: must really probe (Some(2)) despite the fresh hit.
         let c = Arc::clone(&calls);
-        let fresh = probe_coalesced(
-            key.clone(),
-            false,
-            || async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                result(Some(2))
-            },
-        )
+        let fresh = probe_coalesced(key.clone(), false, || async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            result(Some(2))
+        })
         .await;
         assert_eq!(fresh.latency_ms, Some(2));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         // The bypass run refreshed the cache: readers now get Some(2), and
         // no third probe ran.
-        let cached = probe_coalesced(
-            key,
-            true,
-            || async {
-                panic!("bypass result must have refreshed the cache");
-            },
-        )
+        let cached = probe_coalesced(key, true, || async {
+            panic!("bypass result must have refreshed the cache");
+        })
         .await;
         assert_eq!(cached.latency_ms, Some(2));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -775,17 +763,13 @@ mod tests {
             let active = Arc::clone(&active);
             let peak = Arc::clone(&peak);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(
-                    unique_key(&format!("global-{i}")),
-                    true,
-                    || async move {
-                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(now, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(15)).await;
-                        active.fetch_sub(1, Ordering::SeqCst);
-                        result(Some(10))
-                    },
-                )
+                probe_coalesced(unique_key(&format!("global-{i}")), true, || async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    result(Some(10))
+                })
                 .await
             }));
         }

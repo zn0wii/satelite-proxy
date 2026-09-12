@@ -107,7 +107,8 @@ fn parse_scutil_proxy(text: &str) -> Option<String> {
         let port = fields.get(port_key)?;
         Some(format!("http://{host}:{port}"))
     };
-    build("HTTPSEnable", "HTTPSProxy", "HTTPSPort").or_else(|| build("HTTPEnable", "HTTPProxy", "HTTPPort"))
+    build("HTTPSEnable", "HTTPSProxy", "HTTPSPort")
+        .or_else(|| build("HTTPEnable", "HTTPProxy", "HTTPPort"))
 }
 
 #[cfg(target_os = "macos")]
@@ -202,7 +203,8 @@ mod tests {
 
         #[test]
         fn returns_none_when_nothing_enabled() {
-            let sample = "<dictionary> {\n  HTTPEnable : 0\n  HTTPSEnable : 0\n  SOCKSEnable : 0\n}\n";
+            let sample =
+                "<dictionary> {\n  HTTPEnable : 0\n  HTTPSEnable : 0\n  SOCKSEnable : 0\n}\n";
             assert_eq!(parse_scutil_proxy(sample), None);
         }
     }

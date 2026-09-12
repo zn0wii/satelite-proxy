@@ -357,8 +357,7 @@ fn parse_ss_uri(line: &str) -> Result<ProxyNode, String> {
     let body = body.split('?').next().unwrap_or(body);
 
     // method:password@host:port
-    let (method, password, server, port) = if let Some((userinfo, hostport)) =
-        body.rsplit_once('@')
+    let (method, password, server, port) = if let Some((userinfo, hostport)) = body.rsplit_once('@')
     {
         // SIP002: ss://base64(method:password)@host:port, or legacy plaintext userinfo.
         let userinfo_plain = if userinfo.contains(':') {

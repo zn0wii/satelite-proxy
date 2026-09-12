@@ -78,6 +78,7 @@
 | macOS Intel     | ✅ 支持 |
 | Windows         | ✅ 支持 |
 | Linux           | 🚧 计划中 |
+| Android         | 🧪 早期 · [Interstellar](https://github.com/zn0wii/interstellar)（独立项目，见下） |
 
 > Satelite Proxy 仍在持续开发中，升级前请备份重要的配置文件。
 
@@ -88,6 +89,14 @@
 ```bash
 sudo xattr -d com.apple.quarantine /Applications/Satelite.app
 ```
+
+## 📱 Android 版：Interstellar
+
+卫星正在飞向移动端——**[Interstellar](https://github.com/zn0wii/interstellar)** 是 Satelite 的 Android 版本。
+
+需要说明的是：它虽定位为「移动版」，却不是桌面端的移植，而是一个**全新实现的独立项目**。Interstellar 复用了 Satelite 的部分设计理念，界面与架构均针对移动端从零重新设计。
+
+Interstellar 目前仍处于早期阶段，功能与体验都在快速迭代，欢迎[围观](https://github.com/zn0wii/interstellar)、试用与反馈。
 
 ## 🛠 技术栈
 

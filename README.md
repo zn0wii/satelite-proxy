@@ -10,6 +10,8 @@
   &nbsp;
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-111111?logo=apple&logoColor=white" alt="macOS" />
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows&logoColor=white" alt="Windows" />
+  &nbsp;
+  <img src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&logoColor=black" alt="Linux" />
   <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri" />
   <img src="https://img.shields.io/badge/Rust-%23000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License" />
@@ -33,7 +35,7 @@
 | 你真正在意的 | Satelite 怎么做 |
 | --- | --- |
 | **体积与内存** | Tauri 2 + Rust，不是 Chromium 全家桶。开着托盘就该被忘掉，而不是占掉半条内存。关到托盘还可选「低内存模式」，把界面卸掉。 |
-| **不想被一颗内核绑死** | sing-box（默认）、Xray、mihomo（Clash Meta）设置页一键切换，订阅、规则、DNS 全套配置跟着走。还能开「多核模式」：sing-box 主监听不动，按协议把指定节点委托给 Xray 副进程。 |
+| **不想被一颗内核绑死** | sing-box（默认）、Xray、mihomo（Clash Meta）设置页一键切换，订阅、规则、DNS 全套配置跟着走。还能开「多核模式」：sing-box 主监听不动，按协议把指定节点委托给 Xray / mihomo 副进程。 |
 | **节点会挂** | 三种选路：手动、内核 urltest、应用侧智能切换。智能模式靠连接日志被动感知 + 按需探测，自动避障，而不是一直狂扫全表。 |
 | **不想被配置淹没** | 「简洁模式」只留连接 / 节点 / 流量；「专业模式」打开规则、DNS、Hosts、日志。同一套内核，两套节奏。 |
 | **界面也是功能** | 玻璃拟态、浅色 / 深色、多种主题色（也支持自定义取色）、首页动效三选一（粒子 / 经典 / 笑脸）。打开窗口的那一秒，就该知道这不是 2018 年的后台面板。 |
@@ -46,7 +48,7 @@
 ## 它能做什么
 
 - **订阅与配置**：Clash 订阅、sing-box JSON、节点分享链接；链接 / 文件 / 浏览器深链导入；订阅可定时更新。也可以把一份完整 sing-box 配置直接当运行时。
-- **三内核自由切**：sing-box（默认）· Xray · mihomo（Clash Meta），设置页一键下载 / 更新 / 切换。再进一步，「多核模式」让 sing-box 主监听不动，按协议把节点委托给 Xray 副进程，两个内核同场干活。
+- **三内核自由切**：sing-box（默认）· Xray · mihomo（Clash Meta），设置页一键下载 / 更新 / 切换。再进一步，「多核模式」让 sing-box 主监听不动，按协议把节点委托给 Xray / mihomo 副进程，多颗内核同场干活。
 - **协议**：SS、VMess、VLESS、Trojan、Hysteria2、TUIC、AnyTLS、WireGuard、SOCKS5 等；不支持的协议会按当前内核自动过滤，不会生成连不上的配置。
 - **代理链**：节点池 + 多跳链式分流（入口 → 中转 → 落地），地铁线画布上拖拽编辑，一键逐跳诊断每段真实出口。
 - **智能选路**：手动 · 应用智能避障 · 内核 urltest，按场景选，不绑死一种策略。
@@ -77,7 +79,7 @@
 | macOS Apple 芯片 | ✅ 支持 |
 | macOS Intel     | ✅ 支持 |
 | Windows         | ✅ 支持 |
-| Linux           | 🚧 计划中 |
+| Linux           | ✅ 支持 |
 | Android         | 🧪 早期 · [Interstellar](https://github.com/zn0wii/interstellar)（独立项目，见下） |
 
 > Satelite Proxy 仍在持续开发中，升级前请备份重要的配置文件。
@@ -115,13 +117,21 @@ pnpm install
 pnpm tauri dev
 ```
 
-打包脚本默认只拉取对应平台的官方 sing-box 与三条内置远程规则集（`.srs`）；加 `--all-cores` / `-AllCores` 会把 Xray + mihomo（含 geodata）一并打包，缺失时自动下载。也可以先手动放进 `src-tauri/resources/`：
+打包脚本默认把三颗内核（sing-box / Xray / mihomo，含各自 geodata）与三条内置远程规则集（`.srs`）一并打进安装包，缺失时自动下载；`--singbox-only` / `-SingboxOnly` 可瘦身成只含 sing-box。也可以先手动放进 `src-tauri/resources/`：
 
 ```bash
 # macOS Apple Silicon / Intel
 ./scripts/fetch-bundled-core-darwin-arm64.sh    # 或 fetch-bundled-core-darwin-amd64.sh
 ./scripts/fetch-bundled-xray-darwin-arm64.sh    # Xray 内核 + geodata（另有 amd64 版）
 ./scripts/fetch-bundled-mihomo-darwin-arm64.sh  # mihomo 内核 + geodata（另有 amd64 版）
+./scripts/fetch-bundled-rule-sets.sh
+```
+
+```bash
+# Linux amd64
+./scripts/fetch-bundled-core-linux-amd64.sh
+./scripts/fetch-bundled-xray-linux-amd64.sh
+./scripts/fetch-bundled-mihomo-linux-amd64.sh
 ./scripts/fetch-bundled-rule-sets.sh
 ```
 
@@ -150,20 +160,36 @@ pwsh scripts/fetch-bundled-mihomo-windows-amd64.ps1
 ./scripts/build-dmg-intel.sh
 ```
 
-脚本会拉取对应架构的官方 sing-box 内核并打进安装包（加 `--all-cores` 额外打包 Xray + mihomo）。产物在：
+脚本默认会把三颗内核（sing-box / Xray / mihomo）一并拉取打进安装包（`--singbox-only` 可瘦身只留 sing-box）。产物在：
 
 `src-tauri/target/<aarch64|x86_64>-apple-darwin/release/bundle/dmg/`
 
 ### Windows 安装包
 
 ```powershell
-pwsh scripts/build-windows.ps1                    # NSIS 安装包（默认，仅 sing-box）
+pwsh scripts/build-windows.ps1                    # NSIS 安装包（默认，三内核）
 pwsh scripts/build-windows.ps1 -Bundle msi        # MSI
-pwsh scripts/build-windows.ps1 -AllCores          # 额外打包 Xray + mihomo
 pwsh scripts/build-windows.ps1 -Bundle portable   # 便携版：解压即用的 zip，数据存在 exe 旁
+pwsh scripts/build-windows.ps1 -SingboxOnly       # 瘦身：只打包 sing-box
 ```
 
 产物在 `src-tauri/target/release/bundle/nsis/` 或 `.../msi/`（便携版在 `.../portable/`）。未打包进安装包的内核，随时可在设置页在线下载。
+
+### Linux AppImage
+
+在 **Linux x64** 上执行。先装系统依赖（Ubuntu / Debian，其他发行版参见 [Tauri 前置要求](https://tauri.app/start/prerequisites/)）：
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+```
+
+再打包（三内核 fetch 脚本见上文，缺失时需先执行）：
+
+```bash
+pnpm tauri build --config src-tauri/tauri.linux.conf.json
+```
+
+产物在 `src-tauri/target/release/bundle/appimage/`（`*.AppImage`）。
 
 ---
 

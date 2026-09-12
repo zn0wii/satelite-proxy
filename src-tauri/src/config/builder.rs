@@ -99,35 +99,53 @@ impl BuildOptions {
     }
 }
 
-/// Nodes delegated to the Xray sidecar process (`settings.xray_sidecar_*`).
+/// Nodes delegated to a sidecar process (`settings.protocol_cores` pins).
 ///
 /// Each entry maps a node id to the loopback port of its dedicated sidecar
-/// inbound (`127.0.0.1:port`, one `mixed` inbound per node in the Xray
-/// config). Delegated nodes are emitted into the sing-box config as plain
-/// `socks` outbounds pointing at that port — the tag stays
-/// [`outbound_tag`], so selectors, rule pins, smart pools and the Clash API
-/// hot-switch keep working unchanged; only the egress path detours through
-/// the sidecar.
+/// inbound (`127.0.0.1:port`, one mixed inbound per node in the target
+/// sidecar's config) plus the sidecar core that owns it. Delegated nodes are
+/// emitted into the sing-box config as plain `socks` outbounds pointing at
+/// that port — the tag stays [`outbound_tag`], so selectors, rule pins,
+/// smart pools and the Clash API hot-switch keep working unchanged; only
+/// the egress path detours through the sidecar. The kind is informational
+/// for the sing-box emission (any loopback socks peer behaves the same);
+/// the runtime uses it to route entries to the right sidecar process.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SidecarPlan {
-    /// node id → sidecar loopback inbound port.
-    pub ports: Vec<(String, u16)>,
+    /// Delegated entries in delegation order.
+    pub ports: Vec<SidecarPort>,
+}
+
+/// One delegated node: which sidecar core carries it and on which port.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidecarPort {
+    pub node_id: String,
+    pub port: u16,
+    pub kind: crate::core::CoreKind,
 }
 
 impl SidecarPlan {
     pub fn port_for(&self, node_id: &str) -> Option<u16> {
         self.ports
             .iter()
-            .find(|(id, _)| id == node_id)
-            .map(|(_, port)| *port)
+            .find(|e| e.node_id == node_id)
+            .map(|e| e.port)
     }
 
-    /// All sidecar ports (deduplicated, source order).
-    pub fn port_list(&self) -> Vec<u16> {
-        let mut ports: Vec<u16> = self.ports.iter().map(|(_, p)| *p).collect();
-        ports.sort_unstable();
-        ports.dedup();
-        ports
+    /// Entries delegated to a specific sidecar core, in plan order.
+    pub fn entries_for(&self, kind: crate::core::CoreKind) -> Vec<&SidecarPort> {
+        self.ports.iter().filter(|e| e.kind == kind).collect()
+    }
+
+    /// Which sidecar cores the plan actually uses (stable order).
+    pub fn used_kinds(&self) -> Vec<crate::core::CoreKind> {
+        let mut kinds = Vec::new();
+        for e in &self.ports {
+            if !kinds.contains(&e.kind) {
+                kinds.push(e.kind);
+            }
+        }
+        kinds
     }
 }
 
@@ -1430,6 +1448,14 @@ fn node_to_outbound_tagged(
     if matches!(node.transport, Some(Transport::Xhttp { .. })) {
         return Err(AppError::Config(
             "xhttp 传输 sing-box 不支持：该节点已从本次生成的配置中过滤（开启多核模式并将该协议指向 Xray，或切换 Xray 内核即可使用）"
+                .into(),
+        ));
+    }
+    // Same model for MASQUE — sing-box has no masque outbound at all; the
+    // mihomo sidecar (or the mihomo main core) is the only egress path.
+    if matches!(node.protocol, Protocol::Masque) {
+        return Err(AppError::Config(
+            "masque 协议 sing-box 不支持：该节点已从本次生成的配置中过滤（开启多核模式并将该协议指向 mihomo，或切换 mihomo 内核即可使用）"
                 .into(),
         ));
     }
@@ -4485,7 +4511,11 @@ mod tests {
         let delegated = sample_node("n1", "HK-xray");
         let nodes = vec![native, delegated];
         let plan = SidecarPlan {
-            ports: vec![("n1".into(), 20890)],
+            ports: vec![crate::config::SidecarPort {
+                node_id: "n1".into(),
+                port: 20890,
+                kind: crate::core::CoreKind::Xray,
+            }],
         };
         let built = build_singbox_config(&nodes, &sidecar_opts(Some(plan))).unwrap();
         let tag = outbound_tag(&nodes[1]);
@@ -4545,6 +4575,64 @@ mod tests {
         });
         let err = build_singbox_config(&[n], &sidecar_opts(None)).unwrap_err();
         assert!(err.to_string().contains("xhttp"), "got: {err}");
+    }
+
+    fn sample_masque(id: &str) -> ProxyNode {
+        let mut n = sample_node(id, "MQ");
+        n.protocol = Protocol::Masque;
+        n.tls = Some(TlsConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        n.config = ProtocolConfig::Masque {
+            private_key: "priv".into(),
+            public_key: "pub".into(),
+            ip: None,
+            ipv6: None,
+            mtu: None,
+            network: None,
+            congestion_controller: None,
+        };
+        n
+    }
+
+    #[test]
+    fn masque_node_never_generates_a_native_singbox_outbound() {
+        // Same contract as xhttp: sing-box has no masque outbound at all —
+        // reject with the mihomo delegation hint, never a silent fallback.
+        let err = build_singbox_config(&[sample_masque("m1")], &sidecar_opts(None)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("masque"), "got: {msg}");
+        assert!(msg.contains("mihomo"), "delegation hint: {msg}");
+    }
+
+    #[test]
+    fn masque_node_delegates_to_mihomo_sidecar_port() {
+        // Pinned to the mihomo sidecar, the same node becomes a plain socks
+        // outbound at its delegated port — tag preserved, everything else
+        // (selectors, rule pins, hot-switch) keeps working.
+        let plan = SidecarPlan {
+            ports: vec![crate::config::SidecarPort {
+                node_id: "m1".into(),
+                port: 20890,
+                kind: crate::core::CoreKind::Mihomo,
+            }],
+        };
+        let built = build_singbox_config(
+            &[sample_node("n1", "A"), sample_masque("m1")],
+            &sidecar_opts(Some(plan)),
+        )
+        .unwrap();
+        let tag = "node-m1";
+        let out = built.value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == json!(tag))
+            .expect("delegated masque tag present");
+        assert_eq!(out["type"], "socks");
+        assert_eq!(out["server"], "127.0.0.1");
+        assert_eq!(out["server_port"], 20890);
     }
 
     fn sample_hysteria2(obfs: Option<&str>, obfs_password: Option<&str>) -> ProxyNode {

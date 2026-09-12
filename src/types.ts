@@ -289,6 +289,17 @@ export type ProtocolConfig =
       obfs_mode?: string;
       obfs_host?: string;
       mode?: string;
+    }
+  | {
+      /** MASQUE (RFC 9484) — mihomo-only, usque-generated ECDSA keys. */
+      protocol: "masque";
+      private_key: string;
+      public_key: string;
+      ip?: string;
+      ipv6?: string;
+      mtu?: number;
+      network?: string;
+      congestion_controller?: string;
     };
 
 /** TLS layer — mirrors Rust `TlsConfig`. REALITY fields only carry values on
@@ -429,6 +440,11 @@ export interface ManualNodeDraft {
   host?: string | null;
   serviceName?: string | null;
   udp?: boolean | null;
+  publicKey?: string | null;
+  /** MASQUE local IPv4 (CIDR). */
+  ip?: string | null;
+  /** MASQUE local IPv6 (CIDR). */
+  ipv6?: string | null;
 }
 
 /** Clash-style routing mode. */
@@ -529,7 +545,7 @@ export interface AppSettings {
 export interface ProtocolCoreItem {
   /** `Protocol::as_str` value, e.g. "vless". */
   protocol: string;
-  /** `CoreKind` the protocol is pinned to (v1: "xray"). */
+  /** Sidecar `CoreKind` the protocol is pinned to: "xray" | "mihomo". */
   core: string;
 }
 
@@ -650,8 +666,11 @@ export interface ProxyStatus {
   /** True when the running core has elevated privileges (macOS: setuid-root;
    *  Windows: UAC). */
   core_elevated?: boolean;
-  /** Companion Xray sidecar process is running (sing-box main mode). */
+  /** Companion sidecar process is running (sing-box main mode). Never true
+   * under other cores. */
   sidecar_running?: boolean;
+  /** Alive sidecar core kinds (e.g. ["xray","mihomo"]); empty when none. */
+  sidecar_kinds?: string[];
 }
 
 export type RuleType =

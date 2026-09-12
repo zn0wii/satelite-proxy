@@ -126,6 +126,7 @@ fn tls_wanted(protocol: Protocol) -> bool {
             | Protocol::ShadowTls
             | Protocol::Naive
             | Protocol::Socks5
+            | Protocol::Masque
     )
 }
 
@@ -140,6 +141,7 @@ fn tls_default_on(protocol: Protocol) -> bool {
             | Protocol::AnyTls
             | Protocol::ShadowTls
             | Protocol::Naive
+            | Protocol::Masque
     )
 }
 
@@ -398,6 +400,15 @@ fn build_config(draft: &ManualNodeDraft, protocol: Protocol) -> Result<ProtocolC
             obfs_host: opt_nonempty(&draft.host),
             mode: None,
         }),
+        Protocol::Masque => Ok(ProtocolConfig::Masque {
+            private_key: req(&draft.private_key, "private_key")?,
+            public_key: req(&draft.public_key, "public_key")?,
+            ip: opt_nonempty(&draft.ip),
+            ipv6: opt_nonempty(&draft.ipv6),
+            mtu: draft.mtu,
+            network: opt_nonempty(&draft.network),
+            congestion_controller: opt_nonempty(&draft.congestion_control),
+        }),
     }
 }
 
@@ -612,6 +623,23 @@ pub fn node_to_draft(node: &ProxyNode) -> ManualNodeDraft {
             if draft.host.is_none() {
                 draft.host = obfs_host.clone();
             }
+        }
+        ProtocolConfig::Masque {
+            private_key,
+            public_key,
+            ip,
+            ipv6,
+            mtu,
+            network,
+            congestion_controller,
+        } => {
+            draft.private_key = Some(private_key.clone());
+            draft.public_key = Some(public_key.clone());
+            draft.ip = ip.clone();
+            draft.ipv6 = ipv6.clone();
+            draft.mtu = *mtu;
+            draft.network = network.clone();
+            draft.congestion_control = congestion_controller.clone();
         }
     }
     draft

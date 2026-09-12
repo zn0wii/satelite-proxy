@@ -160,10 +160,10 @@ export function NodesPage() {
   // Node ids whose last test used method "unsupported" (UDP-only protocol,
   // core not running) — shown as "start core to test" instead of "timeout".
   const [unsupportedIds, setUnsupportedIds] = useState<Set<string>>(new Set());
-  // Protocols delegated to the companion Xray sidecar (from settings) —
+  // Protocols delegated to a sidecar core (from settings, protocol → core) —
   // surfaced as a small badge so the egress path is visible per node.
-  const [delegatedProtocols, setDelegatedProtocols] = useState<Set<string>>(
-    new Set(),
+  const [delegatedCores, setDelegatedCores] = useState<Map<string, string>>(
+    new Map(),
   );
   // Batch-test streaming: the rAF buffer between channel messages and state
   // (see latencyStream.ts); stopped on unmount so no flush lands post-dismount.
@@ -204,14 +204,15 @@ export function NodesPage() {
       setCustomRuntime(custom);
       setCurrentId(settings.current_node_id ?? null);
       setAutoSelect((settings.auto_select as AutoSelectMode) ?? "off");
-      setDelegatedProtocols(
+      setDelegatedCores(
         settings.multi_core_enabled
-          ? new Set(
-              (settings.protocol_cores ?? [])
-                .filter((e) => e.core === "xray")
-                .map((e) => e.protocol),
+          ? new Map(
+              (settings.protocol_cores ?? []).map((e) => [
+                e.protocol,
+                e.core,
+              ]),
             )
-          : new Set(),
+          : new Map(),
       );
       // Always load the full node set — grouping needs to see everything to
       // classify correctly, and pagination made "load more" ambiguous once
@@ -843,8 +844,12 @@ export function NodesPage() {
                           hover tooltip (protocol is already in the text). */}
                       <span className="node-proto-tags" title="">
                         <code>{n.protocol}</code>
-                        {delegatedProtocols.has(n.protocol) ? (
-                          <span className="sidecar-tag">Xray</span>
+                        {delegatedCores.get(n.protocol) ? (
+                          <span className="sidecar-tag">
+                            {delegatedCores.get(n.protocol) === "xray"
+                              ? "Xray"
+                              : "mihomo"}
+                          </span>
                         ) : null}
                       </span>
                     </span>
@@ -894,8 +899,12 @@ export function NodesPage() {
                           tooltip (protocol is already in the text). */}
                       <div className="node-proto-tags" title="">
                         <code>{n.protocol}</code>
-                        {delegatedProtocols.has(n.protocol) ? (
-                          <span className="sidecar-tag">Xray</span>
+                        {delegatedCores.get(n.protocol) ? (
+                          <span className="sidecar-tag">
+                            {delegatedCores.get(n.protocol) === "xray"
+                              ? "Xray"
+                              : "mihomo"}
+                          </span>
                         ) : null}
                       </div>
                     </div>

@@ -167,7 +167,10 @@ export function LogsPage() {
       const jobs: Promise<unknown>[] = [getProxyStatus().then((s) => {
         const next = new Set<string>();
         if (s.running && s.core_type) next.add(s.core_type);
-        if (s.sidecar_running) next.add("xray");
+        // Sidecars light their own core's tab (xray / mihomo sidecars
+        // under the sing-box main core).
+        for (const kind of s.sidecar_kinds ?? []) next.add(kind);
+        if (!s.sidecar_kinds && s.sidecar_running) next.add("xray");
         setRunningKinds(next);
       }).catch(() => setRunningKinds(new Set()))];
       if (tab === "app") jobs.push(loadIncremental());

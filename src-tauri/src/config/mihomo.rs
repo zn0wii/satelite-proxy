@@ -70,7 +70,7 @@ pub fn build_mihomo_config(
     }
     if supported.is_empty() {
         return Err(AppError::Config(
-            "no mihomo-compatible nodes (supports ss/vmess/vless(non-reality)/trojan/hysteria2/anytls/snell/socks5/http)"
+            "no mihomo-compatible nodes (supports ss/vmess/vless(non-reality)/trojan/hysteria2/anytls/snell/masque/socks5/http)"
                 .into(),
         ));
     }
@@ -231,6 +231,87 @@ pub fn build_mihomo_config(
         yaml,
         outbound_tags: tags,
         selected_tag,
+    })
+}
+
+/// Loopback listener name prefix for the sidecar config (mirrors the Xray
+/// sidecar's `in-sc` convention; local const to keep the generators
+/// independent).
+const SIDECAR_INBOUND_PREFIX: &str = "in-sc";
+
+/// Minimal companion config for the mihomo sidecar process (multi-core
+/// delegation under the sing-box main core). Each delegated node gets one
+/// loopback mixed listener pinned to its own proxy via the listener
+/// `proxy` field — the mihomo equivalent of the Xray sidecar's
+/// inboundTag→outboundTag 1:1 dispatch. Deliberately no
+/// external-controller / TUN / DNS / geodata: the sidecar never manages
+/// traffic on its own and must validate against an empty home dir (only
+/// the MATCH,DIRECT safety net rule exists, which loads no geodata).
+pub fn build_mihomo_sidecar_config(entries: &[(ProxyNode, u16)]) -> AppResult<BuiltMihomoConfig> {
+    if entries.is_empty() {
+        return Err(AppError::Config(
+            "mihomo sidecar plan is empty; nothing to delegate".into(),
+        ));
+    }
+    let mut proxies = Vec::new();
+    let mut listeners = Vec::new();
+    let mut tags = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for (node, port) in entries {
+        // The plan already checked supports_node, but a stale store or a
+        // hand-edited pin could still produce an unmappable node — skip it
+        // with a reason rather than poisoning the whole sidecar config.
+        if !CoreKind::Mihomo.supports_node(node) {
+            skipped.push(format!("{}: 协议组合 mihomo 不支持", node.name));
+            continue;
+        }
+        let tag = outbound_tag(node);
+        let mut listener = Mapping::new();
+        listener.insert(
+            str_yaml("name"),
+            str_yaml(&format!("{SIDECAR_INBOUND_PREFIX}-{port}")),
+        );
+        listener.insert(str_yaml("type"), str_yaml("mixed"));
+        listener.insert(str_yaml("listen"), str_yaml("127.0.0.1"));
+        listener.insert(str_yaml("port"), num_yaml((*port).into()));
+        listener.insert(str_yaml("udp"), Yaml::Bool(true));
+        // Per-listener egress pin: everything sing-box hands to this port
+        // egresses through exactly this node's proxy.
+        listener.insert(str_yaml("proxy"), str_yaml(&tag));
+        proxies.push(Yaml::Mapping(node_to_mihomo_proxy(node)));
+        listeners.push(Yaml::Mapping(listener));
+        tags.push(tag);
+    }
+    for reason in &skipped {
+        crate::app_log::warn("mihomo_sidecar", format!("skipped node: {reason}"));
+    }
+    if tags.is_empty() {
+        return Err(AppError::Config(format!(
+            "failed to map any delegated node to a mihomo proxy: {}",
+            skipped.join("; ")
+        )));
+    }
+
+    let mut root = Mapping::new();
+    root.insert(str_yaml("mode"), str_yaml("rule"));
+    root.insert(str_yaml("log-level"), str_yaml("warning"));
+    root.insert(str_yaml("proxies"), Yaml::Sequence(proxies));
+    root.insert(str_yaml("listeners"), Yaml::Sequence(listeners));
+    // Safety net for traffic that somehow misses a listener pin (listener
+    // routing precedes rules, so this should never fire).
+    root.insert(
+        str_yaml("rules"),
+        Yaml::Sequence(vec![str_yaml("MATCH,DIRECT")]),
+    );
+
+    let yaml = serde_yaml::to_string(&root)
+        .map_err(|e| AppError::Config(format!("serialize mihomo sidecar config: {e}")))?;
+    // No selector API on the sidecar — "selected" is informational only.
+    Ok(BuiltMihomoConfig {
+        yaml,
+        selected_tag: tags[0].clone(),
+        outbound_tags: tags,
     })
 }
 
@@ -747,6 +828,7 @@ fn node_to_mihomo_proxy(node: &ProxyNode) -> Mapping {
             Protocol::WireGuard => "wireguard",
             Protocol::Hysteria => "hysteria",
             Protocol::Ssh => "ssh",
+            Protocol::Masque => "masque",
             _ => unreachable!("filtered by CoreKind::Mihomo::supports upstream"),
         }),
     );
@@ -929,6 +1011,49 @@ fn node_to_mihomo_proxy(node: &ProxyNode) -> Mapping {
         }
         // Unsupported protocols were filtered before mapping; nothing to add.
         _ => {}
+    }
+
+    // MASQUE carries TLS inherently (HTTP/3): mihomo takes sni /
+    // skip-cert-verify but no `tls` flag, so bypass `apply_tls`.
+    if let ProtocolConfig::Masque {
+        private_key,
+        public_key,
+        ip,
+        ipv6,
+        mtu,
+        network,
+        congestion_controller,
+    } = &node.config
+    {
+        m.insert(str_yaml("private-key"), str_yaml(private_key));
+        m.insert(str_yaml("public-key"), str_yaml(public_key));
+        if let Some(ip) = ip.as_deref().filter(|s| !s.trim().is_empty()) {
+            m.insert(str_yaml("ip"), str_yaml(ip));
+        }
+        if let Some(ip6) = ipv6.as_deref().filter(|s| !s.trim().is_empty()) {
+            m.insert(str_yaml("ipv6"), str_yaml(ip6));
+        }
+        if let Some(mtu) = mtu {
+            m.insert(str_yaml("mtu"), num_yaml((*mtu).into()));
+        }
+        if let Some(net) = network.as_deref().filter(|s| !s.trim().is_empty()) {
+            m.insert(str_yaml("network"), str_yaml(net));
+        }
+        if let Some(cc) = congestion_controller
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            m.insert(str_yaml("congestion-controller"), str_yaml(cc));
+        }
+        if let Some(tls) = &node.tls {
+            if let Some(sn) = tls.server_name.as_deref().filter(|s| !s.is_empty()) {
+                m.insert(str_yaml("sni"), str_yaml(sn));
+            }
+            if tls.insecure == Some(true) {
+                m.insert(str_yaml("skip-cert-verify"), Yaml::Bool(true));
+            }
+        }
+        return m;
     }
 
     apply_tls(&mut m, node);
@@ -1472,6 +1597,111 @@ mod tests {
         assert_eq!(proxy["psk"].as_str(), Some("pskpw"));
         assert_eq!(proxy["version"].as_str(), Some("4"));
         assert_eq!(proxy["obfs-opts"]["mode"].as_str(), Some("http"));
+    }
+
+    /// Valid ECDSA P-256 key pair (DER, base64) so masque configs pass the
+    /// kernel's key parsing — same fixture discipline as the x25519 REALITY
+    /// key in xray.rs live tests.
+    const MASQUE_PRIV_KEY: &str =
+        "MHcCAQEEIDQTAfjtpvaKGV4eEhzMokz30lij548LnBZ4Z/i/CvPsoAoGCCqGSM49AwEHoUQDQgAEvn2VS66KQJHqDTjgurXhGVxo1yi+lhMWddXb0d7MQuLIwkULjD7hCYsnzQ/j9198Svt9jehyxRrcFFpHUYOgGg==";
+    const MASQUE_PUB_KEY: &str =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvn2VS66KQJHqDTjgurXhGVxo1yi+lhMWddXb0d7MQuLIwkULjD7hCYsnzQ/j9198Svt9jehyxRrcFFpHUYOgGg==";
+
+    fn masque_node(name: &str) -> ProxyNode {
+        let mut node = ss_node(name);
+        node.protocol = Protocol::Masque;
+        node.tls = Some(TlsConfig {
+            enabled: true,
+            server_name: Some("mq.example.com".into()),
+            insecure: Some(true),
+            ..Default::default()
+        });
+        node.config = ProtocolConfig::Masque {
+            private_key: MASQUE_PRIV_KEY.into(),
+            public_key: MASQUE_PUB_KEY.into(),
+            ip: Some("172.16.0.2/32".into()),
+            ipv6: None,
+            mtu: Some(1280),
+            network: Some("quic".into()),
+            congestion_controller: None,
+        };
+        node
+    }
+
+    #[test]
+    fn masque_shape() {
+        let node = masque_node("mq");
+        let built = build_mihomo_config(&[node], &default_opts()).expect("build");
+        let doc = parse(&built);
+        let proxy = &doc["proxies"][0];
+        assert_eq!(proxy["type"].as_str(), Some("masque"));
+        assert_eq!(proxy["private-key"].as_str(), Some(MASQUE_PRIV_KEY));
+        assert_eq!(proxy["public-key"].as_str(), Some(MASQUE_PUB_KEY));
+        assert_eq!(proxy["ip"].as_str(), Some("172.16.0.2/32"));
+        assert_eq!(proxy["mtu"].as_i64(), Some(1280));
+        assert_eq!(proxy["udp"].as_bool(), Some(true));
+        // TLS is inherent — sni / skip-cert-verify present, no `tls` flag.
+        assert_eq!(proxy["sni"].as_str(), Some("mq.example.com"));
+        assert_eq!(proxy["skip-cert-verify"].as_bool(), Some(true));
+        assert!(proxy["tls"].is_null());
+    }
+
+    #[test]
+    fn masque_sidecar_config_shape() {
+        let node = masque_node("mq");
+        let tag = node_tag_of(&node);
+        let built = build_mihomo_sidecar_config(&[(node, 20890u16)]).expect("sidecar build");
+        let doc = parse(&built);
+        // Lean skeleton: no api / tun / dns keys at all.
+        for absent in ["external-controller", "tun", "dns", "mixed-port"] {
+            assert!(doc[absent].is_null(), "sidecar must not carry {absent}");
+        }
+        assert_eq!(doc["mode"].as_str(), Some("rule"));
+        assert_eq!(doc["proxies"][0]["name"].as_str(), Some(tag.as_str()));
+        let listener = &doc["listeners"][0];
+        assert_eq!(listener["listen"].as_str(), Some("127.0.0.1"));
+        assert_eq!(listener["port"].as_i64(), Some(20890));
+        assert_eq!(listener["udp"].as_bool(), Some(true));
+        // The 1:1 dispatch: this port's traffic egresses via this node.
+        assert_eq!(listener["proxy"].as_str(), Some(tag.as_str()));
+        assert_eq!(
+            doc["rules"].as_sequence().map(|r| r.len()),
+            Some(1),
+            "only the MATCH,DIRECT safety net"
+        );
+    }
+
+    /// `cargo test --lib config::mihomo::tests::live_mihomo_sidecar_config_validates -- --ignored`
+    #[test]
+    #[ignore]
+    fn live_mihomo_sidecar_config_validates() {
+        let bin = crate::core::find_bundled_core(None, CoreKind::Mihomo)
+            .expect("bundled mihomo binary — run the fetch-bundled-mihomo script");
+        let node = masque_node("live");
+        let built = build_mihomo_sidecar_config(&[(node, 20890u16)]).expect("sidecar build");
+        let tmp = std::env::temp_dir().join(format!(
+            "satelite-mihomo-sidecar-live-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, &built.yaml).unwrap();
+        // -t validates without creating the tun adapter; no -d home needed —
+        // the sidecar config references no geodata.
+        let output = std::process::Command::new(&bin)
+            .args(["-t", "-f"])
+            .arg(&tmp)
+            .output()
+            .expect("spawn mihomo");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            output.status.success(),
+            "mihomo -t rejected the sidecar config:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]

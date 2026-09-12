@@ -111,6 +111,28 @@ pub fn write_xray_sidecar_config(app_data_dir: &Path, built: &BuiltConfig) -> Ap
     Ok(path)
 }
 
+/// Config path for the mihomo sidecar companion process (Clash YAML).
+/// Never touches `active.*` — same derived-subset policy as the Xray
+/// sidecar config. Lives in `config/` so `mihomo_home_args` derives the
+/// shared `<data>/mihomo` home dir for `-d` (the sidecar needs no geodata
+/// but sharing the home is harmless).
+pub fn mihomo_sidecar_config_path(app_data_dir: &Path) -> PathBuf {
+    config_dir(app_data_dir).join("mihomo-sidecar.yaml")
+}
+
+/// Write the mihomo sidecar config (tmp+rename, no backup — fully derived
+/// from the delegation plan on every start).
+pub fn write_mihomo_sidecar_config(app_data_dir: &Path, raw: &str) -> AppResult<PathBuf> {
+    let dir = config_dir(app_data_dir);
+    fs::create_dir_all(&dir)?;
+
+    let path = mihomo_sidecar_config_path(app_data_dir);
+    let tmp = dir.join("mihomo-sidecar.yaml.tmp");
+    fs::write(&tmp, raw)?;
+    fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// Write active.yaml and a timestamped backup (mirrors write_active_config).
 pub fn write_active_yaml_config(app_data_dir: &Path, raw: &str) -> AppResult<PathBuf> {
     let dir = config_dir(app_data_dir);

@@ -792,6 +792,13 @@ function coreDisplayName(kind: string | null | undefined): string {
 
   const running = proxy?.running ?? false;
   const stateLabel = proxy?.core_state ?? "stopped";
+  // Multi-core is "on" while the sidecar processes actually run — the same
+  // truth the status payload reports (a pin without matching nodes never
+  // starts a sidecar, see compute_sidecar_plan). The header then reads
+  // 多核模式 (singbox · xray · mihomo) — main core token + live sidecars.
+  const sidecarKinds = proxy?.sidecar_kinds ?? [];
+  const multiCoreCores = ["singbox", ...sidecarKinds].join(" · ");
+  const multiCoreActive = sidecarKinds.length > 0;
   const outboundMode = (proxy?.outbound_mode ?? "rule") as OutboundMode;
   // Smart bootstrap probe must not lock routing / sys proxy / TUN.
   // captureBusy must NOT freeze other controls (optimistic capture runs long).
@@ -1439,7 +1446,14 @@ function coreDisplayName(kind: string | null | undefined): string {
             {/* Label carries the active core's name (core_type falls back to
                 the setting while stopped, so this is correct either way). */}
             <span className="instrument-label">
-              {t("dashboard.cardCore")} · {coreDisplayName(proxy?.core_type)}
+              {t("dashboard.cardCore")} ·{" "}
+              {multiCoreActive ? (
+                <span className="instrument-label-multicore">
+                  {t("dashboard.multiCore", { n: multiCoreCores })}
+                </span>
+              ) : (
+                coreDisplayName(proxy?.core_type)
+              )}
             </span>
           </header>
           <div

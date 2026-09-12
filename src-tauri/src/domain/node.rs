@@ -23,6 +23,11 @@ pub enum Protocol {
     AnyTls,
     /// Snell (sing-box ≥ 1.14, versions 4 / 6).
     Snell,
+    /// MASQUE (RFC 9484, HTTP/3 CONNECT-UDP tunnel; mihomo-only — usque
+    /// style ECDSA keys). sing-box/Xray have no masque outbound: native
+    /// under the mihomo main core, delegated to the mihomo sidecar
+    /// (multi-core mode) under sing-box, filtered otherwise.
+    Masque,
 }
 
 impl Protocol {
@@ -44,6 +49,7 @@ impl Protocol {
             Self::WireGuard => "wireguard",
             Self::AnyTls => "anytls",
             Self::Snell => "snell",
+            Self::Masque => "masque",
         }
     }
 
@@ -65,6 +71,7 @@ impl Protocol {
             "wireguard" | "wg" => Some(Self::WireGuard),
             "anytls" => Some(Self::AnyTls),
             "snell" => Some(Self::Snell),
+            "masque" => Some(Self::Masque),
             _ => None,
         }
     }
@@ -77,7 +84,10 @@ impl Protocol {
     /// `server:port` (QUIC/UDP transport). Direct TCP latency probing
     /// against these always times out regardless of node health.
     pub fn is_udp_only(self) -> bool {
-        matches!(self, Self::Hysteria2 | Self::Hysteria | Self::Tuic)
+        matches!(
+            self,
+            Self::Hysteria2 | Self::Hysteria | Self::Tuic | Self::Masque
+        )
     }
 
     /// Whether the Xray core can serve this protocol as an outbound. Used to
@@ -105,9 +115,9 @@ impl Protocol {
     /// outbound. mihomo is the canonical Clash kernel — full coverage:
     /// SS(+plugins) / VMess / VLESS (incl. REALITY + Vision) / Trojan /
     /// Hysteria(1|2) / TUIC / WireGuard / AnyTLS / Snell / SOCKS5 / HTTP /
-    /// SSH. Only Naive and Tor (external-executable shapes) are missing,
-    /// plus a standalone ShadowTLS proxy type (ss+shadow-tls plugin would
-    /// need its own field mapping).
+    /// SSH / MASQUE. Only Naive and Tor (external-executable shapes) are
+    /// missing, plus a standalone ShadowTLS proxy type (ss+shadow-tls
+    /// plugin would need its own field mapping).
     pub fn mihomo_supported(self) -> bool {
         !matches!(self, Self::Naive | Self::Tor | Self::ShadowTls)
     }
@@ -329,6 +339,26 @@ pub enum ProtocolConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         mode: Option<String>,
     },
+    /// MASQUE tunnel credentials (usque-generated, base64 ECDSA keys —
+    /// mihomo only). Local tunnel addresses and QUIC knobs ride along;
+    /// sni / skip-cert-verify live in the shared `TlsConfig`.
+    Masque {
+        private_key: String,
+        public_key: String,
+        /// Local IPv4 in CIDR form (e.g. `172.16.0.2/32`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ip: Option<String>,
+        /// Local IPv6 in CIDR form (e.g. `fd00::2/128`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ipv6: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mtu: Option<u32>,
+        /// `quic` (default) / `h2` / `h3-l4proxy`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        network: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        congestion_controller: Option<String>,
+    },
 }
 
 fn default_vmess_security() -> String {
@@ -495,6 +525,11 @@ fn config_identity(config: &ProtocolConfig) -> String {
             ..
         } => format!("{private_key}|{peer_public_key}"),
         ProtocolConfig::Snell { psk, version, .. } => format!("{version}|{psk}"),
+        ProtocolConfig::Masque {
+            private_key,
+            public_key,
+            ..
+        } => format!("{private_key}|{public_key}"),
     }
 }
 
@@ -548,6 +583,10 @@ fn node_extra(node: &ProxyNode) -> Option<String> {
         ProtocolConfig::Vless { flow, .. } => flow.clone().filter(|s| !s.is_empty()),
         ProtocolConfig::Vmess { security, .. } => Some(security.clone()),
         ProtocolConfig::Snell { version, .. } => Some(format!("v{version}")),
+        ProtocolConfig::Masque { network, .. } => Some(match network.as_deref() {
+            Some(n) if n != "quic" => format!("masque/{n}"),
+            _ => "masque".into(),
+        }),
         _ => None,
     }
 }
@@ -669,6 +708,12 @@ pub struct ManualNodeDraft {
     pub service_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<String>,
 }
 
 #[cfg(test)]

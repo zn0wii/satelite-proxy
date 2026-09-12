@@ -354,6 +354,10 @@ pub fn update_settings(
                 // (first wins), keep only real delegations. Unknown values are
                 // harmless (never match a node) — the build-time plan
                 // re-checks each node against the sidecar core support anyway.
+                let sidecar_cores = [
+                    crate::core::CoreKind::Xray.as_str(),
+                    crate::core::CoreKind::Mihomo.as_str(),
+                ];
                 let mut seen = std::collections::HashSet::new();
                 let cleaned: Vec<crate::domain::ProtocolCoreItem> = list
                     .iter()
@@ -363,7 +367,7 @@ pub fn update_settings(
                     })
                     .filter(|e| {
                         !e.protocol.is_empty()
-                            && e.core == crate::core::CoreKind::Xray.as_str()
+                            && sidecar_cores.contains(&e.core.as_str())
                             && seen.insert(e.protocol.clone())
                     })
                     .collect();

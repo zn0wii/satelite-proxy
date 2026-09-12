@@ -131,6 +131,7 @@ const en = {
   "dashboard.disabled": "Disabled",
   "dashboard.advancedSettings": "Advanced settings",
   "dashboard.cardCore": "Core status",
+  "dashboard.multiCore": "Multi-core ({n})",
   "dashboard.cardTraffic": "Traffic",
   "dashboard.cardConns": "Connections",
   "dashboard.cardTrafficStats": "Traffic stats",
@@ -342,14 +343,15 @@ const en = {
   "settings.multiCoreRunning": "sidecar running",
   "settings.multiCoreIdle": "not running",
   "settings.multiCoreDesc":
-    "Runs a companion core beside sing-box: nodes of the protocols pinned below egress through that core via loopback socks. Hot switching, latency tests and the connections page keep working. Generated mode + sing-box core only; changes restart a running core.",
+    "Runs companion cores beside sing-box (Xray / mihomo): nodes of the protocols pinned below egress through that core via loopback socks. Hot switching, latency tests and the connections page keep working. Generated mode + sing-box core only; changes restart a running core.",
   "settings.multiCoreProtocolCol": "Protocol",
   "settings.multiCoreCoreCol": "Core",
   "settings.multiCoreFollowMain": "Follow main core",
+  "settings.multiCoreMasqueDisabled": "Disabled",
   "settings.multiCoreTableHint":
-    "Only Xray-capable protocols are listed; nodes whose transport combination Xray can't speak fall back to native sing-box outbounds automatically.",
+    "Pinned protocols egress through the chosen sidecar core (Xray or mihomo — e.g. Hysteria2 works on either). MASQUE is mihomo-only (sing-box and Xray have no masque outbound): unpinned it reads Disabled and its nodes are filtered from the config. Unsupported transport combinations fall back to native sing-box outbounds automatically.",
   "settings.multiCoreNoProtocols":
-    "No protocol is pinned to Xray yet — the sidecar process starts once you route at least one protocol below.",
+    "No protocol is pinned to a sidecar yet — the sidecar process starts once you route at least one protocol below.",
   "settings.multiCorePort": "Sidecar base port",
   "settings.multiCorePortHint":
     "Each delegated node occupies one consecutive 127.0.0.1 port from this base.",
@@ -1086,6 +1088,7 @@ const zh: Record<MessageKey, string> = {
   "dashboard.disabled": "已关闭",
   "dashboard.advancedSettings": "高级设置",
   "dashboard.cardCore": "核心状态",
+  "dashboard.multiCore": "多核模式 ({n})",
   "dashboard.cardTraffic": "流量",
   "dashboard.cardConns": "连接",
   "dashboard.cardTrafficStats": "流量统计",
@@ -1287,14 +1290,15 @@ const zh: Record<MessageKey, string> = {
   "settings.multiCoreRunning": "副进程运行中",
   "settings.multiCoreIdle": "未运行",
   "settings.multiCoreDesc":
-    "在 sing-box 主内核旁启动一个副内核：下表中指定协议的节点经本地回环 socks 交给该内核转发，热切换、测速、连接页均不受影响。仅生成配置 + sing-box 主内核模式生效，变更后自动重启。",
+    "在 sing-box 主内核旁启动副内核（Xray / mihomo）：下表中指定协议的节点经本地回环 socks 交给该内核转发，热切换、测速、连接页均不受影响。仅生成配置 + sing-box 主内核模式生效，变更后自动重启。",
   "settings.multiCoreProtocolCol": "协议",
   "settings.multiCoreCoreCol": "内核",
   "settings.multiCoreFollowMain": "跟随主内核",
+  "settings.multiCoreMasqueDisabled": "未启用",
   "settings.multiCoreTableHint":
-    "仅列出 Xray 支持的协议；节点传输组合 Xray 不支持时自动回退 sing-box 原生出站。",
+    "已钉选的协议经所选副内核转发（Xray 或 mihomo——如 Hysteria2 两者皆可）。MASQUE 仅 mihomo 支持（sing-box 与 Xray 均无 masque 出站），未钉选时显示未启用、其节点被过滤出配置；传输组合不被目标内核支持时自动回退 sing-box 原生出站。",
   "settings.multiCoreNoProtocols":
-    "尚未把任何协议钉到 Xray——至少在下方把一个协议选为 Xray 后，副进程才会启动。",
+    "尚未把任何协议钉到副内核——至少在下方把一个协议选为 Xray / mihomo 后，副进程才会启动。",
   "settings.multiCorePort": "副进程端口基址",
   "settings.multiCorePortHint":
     "每个委托节点从此基址起占用一个连续的 127.0.0.1 端口。",

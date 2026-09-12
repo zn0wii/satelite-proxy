@@ -112,6 +112,7 @@ fn parse_proxy_entry(value: &Value) -> Result<ProxyNode, String> {
         Protocol::WireGuard => parse_wireguard(map)?,
         Protocol::AnyTls => parse_anytls(map)?,
         Protocol::Snell => parse_snell(map)?,
+        Protocol::Masque => parse_masque(map)?,
     };
 
     Ok(ProxyNode {
@@ -463,6 +464,46 @@ fn parse_snell(
             obfs_mode,
             obfs_host,
             mode,
+        },
+    ))
+}
+
+/// Mihomo MASQUE (usque-generated configs): base64 ECDSA key pair +
+/// optional local addresses / QUIC knobs. TLS carries sni +
+/// skip-cert-verify only (no transport concept).
+fn parse_masque(
+    map: &serde_yaml::Mapping,
+) -> Result<(Option<TlsConfig>, Option<Transport>, ProtocolConfig), String> {
+    let private_key = get_str(map, &["private-key", "private_key"])
+        .ok_or_else(|| "masque: missing private-key".to_string())?;
+    let public_key = get_str(map, &["public-key", "public_key"])
+        .ok_or_else(|| "masque: missing public-key".to_string())?;
+
+    let network = get_str(map, &["network"]).filter(|n| {
+        matches!(
+            n.to_ascii_lowercase().as_str(),
+            "quic" | "h2" | "h3-l4proxy" | "h3_l4proxy"
+        )
+    });
+
+    let mut tls = TlsConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    tls.server_name = get_str(map, &["sni", "servername", "server-name"]);
+    tls.insecure = get_bool(map, &["skip-cert-verify", "skip_cert_verify", "insecure"]);
+
+    Ok((
+        Some(tls),
+        None,
+        ProtocolConfig::Masque {
+            private_key,
+            public_key,
+            ip: get_str(map, &["ip"]),
+            ipv6: get_str(map, &["ipv6"]),
+            mtu: get_u32(map, &["mtu"]),
+            network,
+            congestion_controller: get_str(map, &["congestion-controller", "congestion_control"]),
         },
     ))
 }
@@ -990,6 +1031,20 @@ proxies:
     port: 1080
     username: user
     password: pass
+  - name: "MQ"
+    type: masque
+    server: mq.example.com
+    port: 443
+    private-key: "privkeybase64"
+    public-key: "pubkeybase64"
+    ip: 172.16.0.2/32
+    ipv6: fd00::2/128
+    mtu: 1280
+    network: h2
+    congestion-controller: bbr
+    udp: true
+    sni: mq.example.com
+    skip-cert-verify: true
   - name: "SSR-skip"
     type: ssr
     server: x.com
@@ -1000,7 +1055,7 @@ proxies:
     fn parses_mixed_clash_proxies() {
         let result = parse_clash_yaml(SAMPLE).expect("parse ok");
         assert_eq!(result.format, SubscriptionFormat::ClashYaml);
-        assert_eq!(result.nodes.len(), 7);
+        assert_eq!(result.nodes.len(), 8);
         assert_eq!(result.skipped.len(), 1);
         assert!(result.skipped[0].reason.contains("unsupported type: ssr"));
         let ss = result.nodes.iter().find(|n| n.name == "SS-HK").expect("ss");
@@ -1048,6 +1103,42 @@ proxies:
         }
 
         assert!(result.nodes.iter().all(|n| !n.id.is_empty()));
+    }
+
+    #[test]
+    fn parses_masque_entry() {
+        let result = parse_clash_yaml(SAMPLE).expect("parse ok");
+        let mq = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "MQ")
+            .expect("masque");
+        assert_eq!(mq.protocol, Protocol::Masque);
+        assert_eq!(mq.udp, Some(true));
+        let tls = mq.tls.as_ref().expect("tls");
+        assert!(tls.enabled);
+        assert_eq!(tls.server_name.as_deref(), Some("mq.example.com"));
+        assert_eq!(tls.insecure, Some(true));
+        match &mq.config {
+            ProtocolConfig::Masque {
+                private_key,
+                public_key,
+                ip,
+                ipv6,
+                mtu,
+                network,
+                congestion_controller,
+            } => {
+                assert_eq!(private_key, "privkeybase64");
+                assert_eq!(public_key, "pubkeybase64");
+                assert_eq!(ip.as_deref(), Some("172.16.0.2/32"));
+                assert_eq!(ipv6.as_deref(), Some("fd00::2/128"));
+                assert_eq!(*mtu, Some(1280));
+                assert_eq!(network.as_deref(), Some("h2"));
+                assert_eq!(congestion_controller.as_deref(), Some("bbr"));
+            }
+            _ => panic!("expected masque config"),
+        }
     }
 
     #[test]

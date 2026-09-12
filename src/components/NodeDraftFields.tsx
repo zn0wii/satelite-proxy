@@ -13,6 +13,7 @@ export const NODE_PROTOCOLS = [
   { value: "http", label: "HTTP" },
   { value: "anytls", label: "AnyTLS" },
   { value: "snell", label: "Snell" },
+  { value: "masque", label: "MASQUE (仅 mihomo)" },
   { value: "hysteria", label: "Hysteria" },
   { value: "ssh", label: "SSH" },
   { value: "wireguard", label: "WireGuard" },
@@ -117,6 +118,10 @@ export function nodeDraftReady(draft: ManualNodeDraft): boolean {
       );
     case "snell":
       return !!(draft.psk ?? draft.password ?? "").trim();
+    case "masque":
+      return (
+        !!(draft.privateKey ?? "").trim() && !!(draft.publicKey ?? "").trim()
+      );
     default:
       return true;
   }
@@ -152,6 +157,7 @@ export function NodeDraftFields({ value, disabled, onChange }: Props) {
               "hysteria",
               "shadowtls",
               "naive",
+              "masque",
             ].includes(protocol);
             set({
               protocol,
@@ -456,6 +462,109 @@ export function NodeDraftFields({ value, disabled, onChange }: Props) {
                 disabled={disabled}
               />
             </label>
+          </div>
+        </>
+      )}
+
+      {p === "masque" && (
+        <>
+          <label className="field">
+            <span>私钥（base64）</span>
+            <textarea
+              className="config-paste"
+              value={value.privateKey ?? ""}
+              onChange={(e) => set({ privateKey: e.target.value })}
+              placeholder="usque 生成的 ECDSA 私钥"
+              disabled={disabled}
+              rows={3}
+            />
+          </label>
+          <label className="field">
+            <span>公钥（base64）</span>
+            <textarea
+              className="config-paste"
+              value={value.publicKey ?? ""}
+              onChange={(e) => set({ publicKey: e.target.value })}
+              placeholder="服务端 ECDSA 公钥（去掉 PEM 头尾）"
+              disabled={disabled}
+              rows={3}
+            />
+          </label>
+          <div className="field-grid">
+            <label className="field">
+              <span>本机 IPv4</span>
+              <input
+                value={value.ip ?? ""}
+                onChange={(e) => set({ ip: e.target.value })}
+                placeholder="172.16.0.2/32，可选"
+                disabled={disabled}
+              />
+            </label>
+            <label className="field">
+              <span>本机 IPv6</span>
+              <input
+                value={value.ipv6 ?? ""}
+                onChange={(e) => set({ ipv6: e.target.value })}
+                placeholder="fd00::2/128，可选"
+                disabled={disabled}
+              />
+            </label>
+          </div>
+          <div className="field-grid">
+            <label className="field">
+              <span>模式</span>
+              <SolidSelect
+                aria-label="MASQUE 模式"
+                value={value.network || "quic"}
+                disabled={disabled}
+                options={[
+                  { value: "quic", label: "QUIC (H3)" },
+                  { value: "h2", label: "H2" },
+                  { value: "h3-l4proxy", label: "H3 L4 Proxy" },
+                ]}
+                onChange={(network) => set({ network })}
+              />
+            </label>
+            <label className="field">
+              <span>MTU</span>
+              <input
+                type="number"
+                min={0}
+                value={value.mtu ?? ""}
+                onChange={(e) =>
+                  set({
+                    mtu: e.target.value
+                      ? Number.parseInt(e.target.value, 10)
+                      : null,
+                  })
+                }
+                placeholder="默认 1280"
+                disabled={disabled}
+              />
+            </label>
+          </div>
+          <label className="field">
+            <span>SNI</span>
+            <input
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              value={value.sni ?? ""}
+              onChange={(e) => set({ sni: e.target.value })}
+              placeholder="可留空"
+              disabled={disabled}
+            />
+          </label>
+          <div className="via-proxy-row">
+            <div>
+              <div className="sys-proxy-title">跳过证书验证</div>
+            </div>
+            <GlassSwitchControl
+              checked={!!value.insecure}
+              title="insecure"
+              disabled={disabled}
+              onChange={(insecure) => set({ insecure })}
+            />
           </div>
         </>
       )}

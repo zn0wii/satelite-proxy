@@ -42,6 +42,11 @@ export function SolidSelect({
   "aria-label": ariaLabel,
 }: Props) {
   const [open, setOpen] = useState(false);
+  /** Flip the popup upward: set at open time from the trigger's real
+   * position, because the space below can be clipped by a scroll
+   * container (`.table-wrap` etc.) or the viewport — a downward popup on
+   * the last table row would otherwise be cut off at the container edge. */
+  const [flipUp, setFlipUp] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   /** Ignore the synthetic re-click that &lt;label&gt; may fire on the trigger. */
   const ignoreToggleUntil = useRef(0);
@@ -82,7 +87,40 @@ export function SolidSelect({
   function toggleOpen() {
     if (disabled) return;
     if (Date.now() < ignoreToggleUntil.current) return;
+    if (!open) setFlipUp(shouldFlipUp());
     setOpen((o) => !o);
+  }
+
+  /** Decide the popup direction at open time: flip up when the room below
+   *  the trigger (bounded by the nearest clipping ancestor or the viewport)
+   *  can't fit the popup and there is more room above. Pure geometry on
+   *  getBoundingClientRect — safe under the root CSS zoom (both the trigger
+   *  and the ancestor rects live in the same coordinate space), which a
+   *  portal + position:fixed approach would not be. */
+  function shouldFlipUp(): boolean {
+    const el = rootRef.current;
+    if (!el) return false;
+    // ~2.1rem per option row + menu padding; the CSS caps height at 14rem.
+    const estHeight = Math.min(options.length * 34 + 12, 230);
+    let bottomLimit = window.innerHeight;
+    let topLimit = 0;
+    let node: HTMLElement | null = el.parentElement;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      const clips =
+        /(auto|scroll|hidden)/.test(style.overflow) ||
+        /(auto|scroll|hidden)/.test(style.overflowY);
+      if (clips) {
+        const rect = node.getBoundingClientRect();
+        bottomLimit = Math.min(bottomLimit, rect.bottom);
+        topLimit = Math.max(topLimit, rect.top);
+      }
+      node = node.parentElement;
+    }
+    const rect = el.getBoundingClientRect();
+    const roomBelow = bottomLimit - rect.bottom - 6;
+    const roomAbove = rect.top - topLimit - 6;
+    return roomBelow < estHeight && roomAbove > roomBelow;
   }
 
   function onTriggerKey(e: KeyboardEvent) {
@@ -157,7 +195,7 @@ export function SolidSelect({
       </button>
       {open && (
         <div
-          className="solid-select-pop"
+          className={`solid-select-pop${flipUp ? " up" : ""}`}
           role="listbox"
           id={listId}
           onMouseDown={(e) => e.stopPropagation()}

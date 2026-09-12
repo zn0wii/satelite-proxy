@@ -1160,6 +1160,7 @@ fn other_name(config: &ProtocolConfig) -> &'static str {
         ProtocolConfig::Tor { .. } => "tor",
         ProtocolConfig::AnyTls { .. } => "anytls",
         ProtocolConfig::Snell { .. } => "snell",
+        ProtocolConfig::Masque { .. } => "masque",
         _ => "unknown",
     }
 }

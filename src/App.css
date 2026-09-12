@@ -1751,20 +1751,31 @@ button {
   color: var(--warning);
 }
 
-/* Protocol→core table: protocol column + per-row core select. */
-.multicore-table td {
-  vertical-align: middle;
+/* Protocol→core pinning: two-column grid of rows (protocol + core select)
+   — replaces the old single-column table to halve the vertical footprint.
+   9 protocols land 5+4; row = label left, select right. */
+.multicore-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 1.2rem;
+  row-gap: 0.5rem;
+  align-items: center;
 }
 
-.multicore-table .sidecar-tag {
-  margin-left: 0.45rem;
-  font-size: 0.62rem;
-  padding: 0.05rem 0.4rem;
+.multicore-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  justify-content: space-between;
+  min-width: 0;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.multicore-table .solid-select {
-  width: 100%;
-  min-width: 9rem;
+.multicore-row .solid-select {
+  flex: 1;
+  min-width: 8.5rem;
+  max-width: 11rem;
 }
 
 /* Delegated-protocol badge on node rows (list + grid): same metrics as the
@@ -6505,6 +6516,12 @@ tr.dns-diag-tr:hover {
   color: var(--faint);
 }
 
+/* Multi-core indicator on the core-status card header: red so the
+   "traffic is detoured through sidecar cores" state reads at a glance. */
+.instrument-label-multicore {
+  color: var(--danger);
+}
+
 .instrument.accent-green .instrument-label {
   /* Carries the core name suffix ("核心状态 · sing-box") — keep it on one
      line, ellipsize rather than wrap into the readout below. */
@@ -7491,6 +7508,15 @@ select:not([size]),
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
+}
+
+/* Upward placement (decided at open time in SolidSelect): when the space
+   below the trigger is clipped by a scroll container (`.table-wrap`) or the
+   viewport — e.g. the last row of the multi-core table — the popup grows
+   upward from the trigger top instead, staying inside the container. */
+.solid-select-pop.up {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .solid-select-list {

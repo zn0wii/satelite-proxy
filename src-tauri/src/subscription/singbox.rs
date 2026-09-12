@@ -198,6 +198,9 @@ fn parse_outbound(value: &Value) -> Result<ParseOutbound, String> {
         Protocol::WireGuard => parse_wireguard(map)?,
         Protocol::AnyTls => parse_anytls(map)?,
         Protocol::Snell => parse_snell(map)?,
+        // sing-box has no masque outbound; a "masque" type here is foreign
+        // data — reject so the entry lands in `skipped` with a reason.
+        Protocol::Masque => return Err("sing-box config cannot carry masque outbounds".into()),
     };
 
     Ok(ParseOutbound::Node(ProxyNode {

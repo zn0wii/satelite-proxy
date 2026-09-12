@@ -177,6 +177,18 @@ function ProtoRows({ config }: { config: ProtocolConfig | undefined }) {
           <Row label="Mode" value={config.mode} />
         </>
       );
+    case "masque":
+      return (
+        <>
+          <Row label="Private Key" value={config.private_key} />
+          <Row label="Public Key" value={config.public_key} />
+          <Row label="IP" value={config.ip} />
+          <Row label="IPv6" value={config.ipv6} />
+          <Row label="MTU" value={config.mtu} />
+          <Row label="Network" value={config.network} />
+          <Row label="Congestion" value={config.congestion_controller} />
+        </>
+      );
     default:
       return null;
   }

@@ -879,23 +879,41 @@ export function SettingsPage() {
     }
   }
 
-  /** Protocols a sidecar core can carry (CoreKind=Xray support surface).
-   *  Nodes whose exact transport combo Xray rejects (e.g. REALITY+ws) fall
-   *  back to native sing-box outbounds at build time. */
-  const MULTICORE_PROTOCOLS: { value: string; label: string }[] = [
-    { value: "vmess", label: "VMess" },
-    { value: "vless", label: "VLESS" },
-    { value: "shadowsocks", label: "Shadowsocks" },
-    { value: "trojan", label: "Trojan" },
-    { value: "hysteria2", label: "Hysteria2" },
-    { value: "socks5", label: "SOCKS5" },
-    { value: "http", label: "HTTP" },
-    { value: "wireguard", label: "WireGuard" },
+  /** Protocols a sidecar core can carry, with per-row target cores from the
+   *  Rust support surface: every listed protocol is mihomo-capable (negative
+   *  list), and all but masque are also Xray-capable — so e.g. hysteria2 can
+   *  egress through either sidecar. masque is mihomo-only (sing-box/Xray
+   *  both lack a masque outbound): its "auto" state has no native fallback,
+   *  the nodes are simply filtered, so the option reads 未启用 instead of
+   *  follow-main. WireGuard stays Xray-labeled to match the existing plan
+   *  behavior (endpoint-shaped, excluded from delegation in
+   *  `compute_sidecar_plan`). Nodes whose exact transport combo the target
+   *  core rejects (e.g. REALITY+ws on Xray) fall back to native sing-box
+   *  outbounds at build time. */
+  const MULTICORE_PROTOCOLS: {
+    value: string;
+    label: string;
+    cores: string[];
+    autoDisabled?: boolean;
+  }[] = [
+    { value: "vmess", label: "VMess", cores: ["xray", "mihomo"] },
+    { value: "vless", label: "VLESS", cores: ["xray", "mihomo"] },
+    { value: "shadowsocks", label: "Shadowsocks", cores: ["xray", "mihomo"] },
+    { value: "trojan", label: "Trojan", cores: ["xray", "mihomo"] },
+    { value: "hysteria2", label: "Hysteria2", cores: ["xray", "mihomo"] },
+    { value: "socks5", label: "SOCKS5", cores: ["xray", "mihomo"] },
+    { value: "http", label: "HTTP", cores: ["xray", "mihomo"] },
+    { value: "wireguard", label: "WireGuard", cores: ["xray"] },
+    {
+      value: "masque",
+      label: "MASQUE",
+      cores: ["mihomo"],
+      autoDisabled: true,
+    },
   ];
-  const delegatedProtocols = new Set(
-    (settings?.protocol_cores ?? [])
-      .filter((e) => e.core === "xray")
-      .map((e) => e.protocol),
+  /** protocol → pinned sidecar core ("auto" = follow the main core). */
+  const pinnedCores = new Map(
+    (settings?.protocol_cores ?? []).map((e) => [e.protocol, e.core]),
   );
   /** Multi-core only exists under the sing-box main core; switching cores
    *  auto-disables it (backend mirrors this in set_core_type). */
@@ -1108,59 +1126,45 @@ export function SettingsPage() {
 
               {settings.multi_core_enabled && (
                 <div className="sidecar-body">
-                  <div className="table-wrap">
-                    <table className="multicore-table">
-                      <colgroup>
-                        <col />
-                        <col style={{ width: 170 }} />
-                      </colgroup>
-                      <thead>
-                        <tr>
-                          <th>{t("settings.multiCoreProtocolCol")}</th>
-                          <th>{t("settings.multiCoreCoreCol")}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {MULTICORE_PROTOCOLS.map((p) => (
-                          <tr key={p.value}>
-                            <td>
-                              <code>{p.label}</code>
-                              {delegatedProtocols.has(p.value) ? (
-                                <span className="pill sidecar-pill sidecar-tag">
-                                  Xray
-                                </span>
-                              ) : null}
-                            </td>
-                            <td>
-                              <SolidSelect
-                                value={
-                                  delegatedProtocols.has(p.value)
-                                    ? "xray"
-                                    : "auto"
-                                }
-                                aria-label={p.label}
-                                disabled={customRuntime}
-                                onChange={(v) =>
-                                  onProtocolCoreChange(p.value, v)
-                                }
-                                options={[
-                                  {
-                                    value: "auto",
-                                    label: t("settings.multiCoreFollowMain"),
-                                  },
-                                  { value: "xray", label: "Xray" },
-                                ]}
-                              />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="multicore-grid">
+                    {MULTICORE_PROTOCOLS.map((p) => {
+                      const pinned = pinnedCores.get(p.value);
+                      const pinInTargets =
+                        pinned !== undefined && p.cores.includes(pinned);
+                      const currentValue =
+                        pinInTargets && pinned ? pinned : "auto";
+                      return (
+                        <div className="multicore-row" key={p.value}>
+                          <code>{p.label}</code>
+                          <SolidSelect
+                            value={currentValue}
+                            aria-label={p.label}
+                            disabled={customRuntime}
+                            onChange={(v) =>
+                              onProtocolCoreChange(p.value, v)
+                            }
+                            options={[
+                              {
+                                value: "auto",
+                                label: p.autoDisabled
+                                  ? t("settings.multiCoreMasqueDisabled")
+                                  : t("settings.multiCoreFollowMain"),
+                              },
+                              ...p.cores.map((c) =>
+                                c === "xray"
+                                  ? { value: c, label: "Xray" }
+                                  : { value: c, label: "mihomo" },
+                              ),
+                            ]}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
                   <div className="field-hint muted">
                     {t("settings.multiCoreTableHint")}
                   </div>
-                  {delegatedProtocols.size === 0 && (
+                  {pinnedCores.size === 0 && (
                     <div className="field-hint sidecar-warn">
                       {t("settings.multiCoreNoProtocols")}
                     </div>

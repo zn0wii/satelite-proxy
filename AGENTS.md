@@ -138,7 +138,7 @@ scripts/memory-profile/                           # WebView2 内存剖析（CDP 
 
 - 这些二进制**不入 git**（`.gitignore` 排除 `resources/bin/**/sing-box*`、`xray*`、`mihomo*`、`*.dat`、`wintun.dll`、`mihomo-geodata/`、`libcronet.*`、`resources/rule-sets/*.srs`），本地缺失属正常；
   唯独 `src-tauri/resources/geodata/mihomo/`（country.mmdb + geosite.dat 快照）**入 git**，不在排除列表内
-- 图标再生成：`python scripts/generate-icons.py`（依赖 Pillow，产出应用图标 + 8 种托盘图标）
+- 图标再生成：`python scripts/generate-icons.py`（依赖 Pillow，产出应用图标 + 8 种托盘图标；应用图标不再程序绘制，而是重采样源图 `assets/icon/ic_launcher-web.png`（512px 笑脸砖；该目录其余文件为 Interstellar 安卓素材、.gitignore 排除），icns 为纯 Python 写入、无需 macOS iconutil，Windows 上也能全量再生成）
 
 ## 2. 项目是什么
 
@@ -147,7 +147,7 @@ scripts/memory-profile/                           # WebView2 内存剖析（CDP 
 - **内核**：sing-box（默认）、Xray 与 mihomo（`settings.core_type` 全局切换），均作为 bundled resource 随应用分发（**不是** Tauri sidecar；由应用代码解压/下载/拉起）。Xray 另需 geosite.dat/geoip.dat（v2ray 格式），Windows TUN 需 wintun.dll；mihomo（标准 Clash Meta）自带 Clash REST API，另需 `<data>/mihomo/` 下的 Country.mmdb + GeoSite.dat（MetaCubeX mrs 格式，**与 Xray 的同名 dat 不通用、注意 GeoSite.dat 大小写**）；Windows TUN 用 `bin/wintun.dll`（与 Xray 共用）
 - **后端**：Rust（`src-tauri/`），负责订阅解析、三内核配置生成、内核生命周期、系统代理、托盘、规则/DNS/连接数据
 - **前端**：React 19 + TS + Vite（`src/`），玻璃拟态 UI，无路由库、无状态管理库、无 CSS 框架
-- **平台**：macOS (arm64/amd64) + Windows x64；Linux 计划中
+- **平台**：macOS (arm64/amd64) + Windows x64 + Linux (amd64, AppImage)
 - **包管理**：pnpm；前端端口 1420（strictPort）
 - 语言：UI 中英双语（zh 默认）；代码注释中英混合
 

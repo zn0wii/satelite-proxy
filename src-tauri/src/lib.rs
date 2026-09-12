@@ -184,6 +184,11 @@ pub fn run() {
             app.manage(app_state);
             app_log::info("app", "Satelite started");
 
+            // Born at the persisted window size before the WebView paints —
+            // resizing after paint reads as a grow animation (same file as
+            // the tray-recreate path, see window_ctrl::show_main).
+            window_ctrl::restore_main_window_size(app.handle());
+
             // Pin the title bar to the stored theme before the window paints —
             // otherwise it starts on the OS light/dark mode and can mismatch
             // the app's own theme setting (see window_ctrl::apply_window_theme).

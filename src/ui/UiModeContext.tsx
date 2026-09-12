@@ -10,7 +10,7 @@ import {
 import {
   applyWindowSizeForUiMode,
   persistUiModePref,
-  watchSimpleWindowSize,
+  watchWindowSize,
 } from "./windowLayout";
 
 export type UiMode = "pro" | "simple";
@@ -57,11 +57,8 @@ export function UiModeProvider({ children }: { children: ReactNode }) {
     void applyWindowSizeForUiMode(initial);
   }, []);
 
-  // Remember the user-resized simple-mode window size while it is active.
-  useEffect(() => {
-    if (mode !== "simple") return;
-    return watchSimpleWindowSize();
-  }, [mode]);
+  // Remember the user-resized window size per mode while it is active.
+  useEffect(() => watchWindowSize(mode), [mode]);
 
   const setMode = useCallback((next: UiMode) => {
     try {

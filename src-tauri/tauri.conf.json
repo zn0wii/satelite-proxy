@@ -15,7 +15,9 @@
         "title": "Satelite",
         "width": 960,
         "height": 720,
-        "resizable": false,
+        "minWidth": 960,
+        "minHeight": 720,
+        "resizable": true,
         "center": true
       }
     ],

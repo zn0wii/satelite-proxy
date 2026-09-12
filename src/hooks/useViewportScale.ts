@@ -5,10 +5,11 @@ import { markZoomChanged } from "./viewportScale";
 
 /**
  * Magnify the whole UI when the OS window grows past the design size
- * (Windows maximize etc.). Sets CSS `zoom` on the root element, so the
- * app renders at design proportions scaled up — instead of a small UI
- * floating in a maximized window. Sets `data-ui-scaled` on <html> for
- * companion CSS (centering the simple strip).
+ * (drag-resize enlargement, Windows maximize etc.). Sets CSS `zoom` on the
+ * root element, so the app renders at design proportions scaled up —
+ * instead of a small UI floating in a big window. Sets `data-ui-scaled`
+ * on <html> for companion CSS (centering the simple strip) whenever any
+ * dimension exceeds the design, even when the zoom itself stays 1.
  *
  * Scale = min(width / designWidth, height / designHeight) — the full
  * design area stays visible; the extra width is used by the fluid layout.
@@ -33,16 +34,38 @@ export function useViewportScale(mode: UiMode): void {
       // Scale up only: windowed sizes stay pixel-exact (no zoom).
       // Quantize to 1% so drag-resize writes a stable style value.
       const scale = fit > 1.02 ? Math.round(fit * 100) / 100 : 1;
+      // `data-ui-scaled` marks ANY dimension past the design (>2%), even
+      // when only one axis grew and the min-ratio zoom stays 1 — companion
+      // CSS pins the simple strip to its design width instead of letting
+      // the fixed-width design stretch.
+      const oversized =
+        logicalWidth > design.width * 1.02 ||
+        logicalHeight > design.height * 1.02;
       const root = document.documentElement;
       const nextZoom = scale === 1 ? "" : String(scale);
       // Skip no-op rewrites so repeated resize events don't retrigger the
       // transition / settle dispatch.
-      if (root.style.zoom === nextZoom) return;
+      if (
+        root.style.zoom === nextZoom &&
+        root.hasAttribute("data-ui-scaled") === oversized
+      ) {
+        return;
+      }
+      // Fresh webview load (cold start / tray recreate at the persisted
+      // size): jump straight to the scale — animating right after the
+      // window appears reads as a magnify-in animation.
+      const jump = root.style.zoom === "" && nextZoom !== "";
+      if (jump) root.style.transition = "none";
       root.style.zoom = nextZoom;
-      if (scale === 1) {
-        root.removeAttribute("data-ui-scaled");
-      } else {
+      if (oversized) {
         root.setAttribute("data-ui-scaled", "1");
+      } else {
+        root.removeAttribute("data-ui-scaled");
+      }
+      if (jump) {
+        // Commit the zoom while the transition is off, then restore it.
+        void root.offsetWidth;
+        root.style.transition = "";
       }
       // Measurement-driven code skips while the transition animates and
       // refits on the at-rest resize this schedules (see viewportScale.ts).
@@ -66,9 +89,9 @@ export function useViewportScale(mode: UiMode): void {
       }
     };
 
-    // Scale changes only on one-shot transitions (maximize / restore /
-    // mode switch) — the pro window is not user-resizable and simple mode
-    // is capped at its design size — so no debounce is needed.
+    // Scale changes on one-shot transitions (maximize / restore / mode
+    // switch) and continuously during drag-resize — the 1% quantization and
+    // no-op rewrite skip keep live drag cheap, so no debounce is needed.
     void measure();
     void import("@tauri-apps/api/window")
       .then(({ getCurrentWindow }) =>

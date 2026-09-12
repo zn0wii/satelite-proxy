@@ -208,7 +208,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 - **三内核**：`settings.core_type`（`singbox` 默认 | `xray` | `mihomo`）决定配置生成器与二进制；三套生成器共享 domain 模型、互不依赖（v2rayN 同款模式）。Xray 模式下切节点/切规则 = 重写配置重启进程、连接三页面无数据（前端显示占位提示）；mihomo 模式因 Clash API 兼容而**全功能**（热切节点、连接监控、delay 测速、智能切换均与 sing-box 同款）。
 - **前端不直连 Clash API**。`src/` 里零 fetch/WebSocket，全部经 Rust command 中转；实时数据靠 `useVisibleInterval` 轮询 invoke + 5 个 Tauri 事件。
-- **单窗口应用**。专业/简洁模式复用同一窗口，尺寸切换（960×720 ↔ 420×720）见 `src/ui/windowLayout.ts` 与 `src-tauri/src/window_ctrl.rs`；两模式均可自由放大（2026-09：pro 下限=设计尺寸 960×720、simple 下限 320×480，均无上限），放大后经 `useViewportScale` CSS zoom 等比放大 UI（简洁模式钉 420 居中，`data-ui-scaled` 任一维超设计即置位），窗口尺寸按模式持久化 localStorage（最大化状态不持久化）。
+- **单窗口应用**。专业/简洁模式复用同一窗口，尺寸切换（960×720 ↔ 420×720）见 `src/ui/windowLayout.ts` 与 `src-tauri/src/window_ctrl.rs`；两模式均可自由放大（2026-09：pro 下限=设计尺寸 960×720、simple 下限 320×480，均无上限），放大后经 `useViewportScale` CSS zoom 等比放大 UI（简洁模式钉 420 居中，`data-ui-scaled` 任一维超设计即置位），窗口尺寸按模式持久化（localStorage + Rust 侧 `data/window_size_<mode>`，最大化状态不持久化；窗口出生即目标尺寸，见 §9.6）。
 - **无路由**。导航是 `App.tsx` 里 `useState<NavKey>` + `TopNav`；次级页面 `React.lazy`（WebView 低内存重建）。
 - **关窗进托盘**：`CloseRequested` 被拦截（`lib.rs:322-347`），可销毁 WebView 省内存但保活 Rust/tray/内核；`exit_allowed` 标志控制真正退出。
 
@@ -392,7 +392,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 3. **`BUILTIN_REMOTE_RULE_SETS`（`domain/rule.rs`）与 `scripts/fetch-bundled-rule-sets.sh` 必须同步**；内置 3 条的 Xray geosite 映射在 `config/xray.rs`（`builtin_remote_xray_rule` + DNS 分类处）、mihomo 映射在 `config/mihomo.rs`（`builtin_remote_mihomo_rule` + DNS 分类处），改 id 时多处联动。
 4. **i18n 双语强约束** — `messages.ts` 中 `zh` 的类型是 `Record<MessageKey, string>`，漏键编译失败。
 5. **前端↔后端类型手工同步** — `src/types.ts` 与 `domain/*` 无代码生成；改 Rust 序列化结构记得同步 TS（部分 invoke 同时发 camelCase+snake_case 参数以兼容，见 `api.ts`）。
-6. **单窗口** — 无多窗口 API 用法；窗口可调性（2026-09）：pro 可缩放但下限=设计尺寸 960×720（zoom 只放大不缩小），simple 下限 320×480；两者均可自由放大、无上限，UI 经 `useViewportScale` 等比缩放（拖拽实时生效）；尺寸按模式持久化（`windowLayout.ts::watchWindowSize` 读 Tauri `innerSize` 而非 `innerWidth`——zoom 会扭曲 DOM 测量值）。
+6. **单窗口** — 无多窗口 API 用法；窗口可调性（2026-09）：pro 可缩放但下限=设计尺寸 960×720（zoom 只放大不缩小），simple 下限 320×480；两者均可自由放大、无上限，UI 经 `useViewportScale` 等比缩放（拖拽实时生效，首次应用不播过渡动画）。尺寸持久化**双轨**：前端 localStorage（模式切换恢复，`watchWindowSize` 读 Tauri `innerSize` 而非 `innerWidth`——zoom 会扭曲 DOM 测量值）+ Rust 侧 `data/window_size_<mode>`（隐藏进托盘/退出时捕获、最大化跳过；托盘重建 `show_main` 与冷启动 `restore_main_window_size` 据此让窗口**出生即目标尺寸**，避免唤醒/启动后再拉大的动画）。
 7. **平台差异** — 系统代理 `proxy/windows.rs|macos.rs`（Linux 用 stub）、TUN 提权 `core/elevate.rs`（Win）与 `core/macos_auth.rs`、进程绑定 `core/job.rs`（仅 Win）。改平台行为时注意 cfg 分支。
 8. **HTML5 拖拽在 Tauri WebView 不可靠** — 排序一律用 `useRulesetDragSort` 模式（指针事件手写）。
 9. **页面切换 = 重挂载**（`key={nav}`）— 页面自身状态不跨切换保留；跨页面共享靠 `api.ts` 模块级快照（peek/keep）。

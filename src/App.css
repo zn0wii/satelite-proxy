@@ -371,11 +371,7 @@ button {
       color-mix(in srgb, var(--nav-bg) 92%, #000000 4%) 100%
     );
   border: 1px solid rgba(255, 255, 255, 0.075);
-  box-shadow:
-    0 18px 52px rgba(0, 0, 0, 0.3),
-    0 4px 14px rgba(0, 0, 0, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.018);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24);
   /* No backdrop-filter here and no overflow: hidden — the ⋯ menu popup must
      drop below the capsule unclipped, and a backdrop-filter on an
      overflow-visible rounded element bleeds its SQUARE bounds over the page

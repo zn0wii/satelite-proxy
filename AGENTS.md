@@ -20,6 +20,33 @@
 
 小改动（文案、bugfix、样式微调）不强制更新；文中行数标注允许过时，以「文件存在性与职责描述」为准，发现明显过时顺手修正并更新文首「最后核对」日期。
 
+### 更新说明输出模板（用户要求的固定格式）
+
+用户让「生成更新说明 / 改动摘要」时，**必须按以下模板输出**（更新说明 4–5 条精炼要点 + 固定的下载指南与 macOS 隔离提示）：
+
+````markdown
+### 更新说明
+
+- **<要点>**：<一句话说明>
+- …（4–5 条，重要功能加粗开头）
+
+### 下载指南
+
+* **macOS Apple Silicon（M 系列）** → `aarch64.dmg`
+* **macOS Intel** → `x64.dmg`
+* **Windows 64 位** → `x64-setup.exe`
+* **Linux 64 位** → `amd64.AppImage`
+
+根据你的系统和 CPU 架构选择对应安装包即可。
+
+
+**macOS 如果提示「Satelite 已损坏，无法打开」**，可在终端执行：
+
+```bash
+sudo xattr -d com.apple.quarantine /Applications/Satelite.app
+```
+````
+
 ## 1. 快速上手：环境 · 编译 · 测试 · 打包
 
 ### 环境要求
@@ -72,7 +99,7 @@ pwsh scripts/build-windows.ps1 -SingboxOnly           # 瘦身：只打 sing-box
 pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19），三内核
 pwsh scripts/build-windows.ps1 -Bundle portable -SingboxOnly  # 单内核便携版
 
-CI（`.github/workflows/release.yml`）只打三内核版（sing-box + Xray + mihomo，含各自 geodata），
+CI（`.github/workflows/release.yml`）只打三内核版（sing-box + Xray + mihomo，含各自 geodata；`tauri.conf.json` 的 bundle targets 已收窄为 app/dmg/nsis/appimage——不再产 MSI/deb/rpm，本地脚本传 `--bundles` 仍可覆盖），
 四平台一致，产物名/应用名/安装路径均为原版 `Satelite`（**无 -fullcores 等变体后缀，不要再给
 productName 加变体名**——它同时决定 Windows 安装目录与 WebView2 数据目录位置）；
 `tauri.<平台>.conf.json`（macOS arm64 走基础 `tauri.conf.json`，intel 走

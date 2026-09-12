@@ -307,7 +307,7 @@ button {
      variation to refract instead of a flat fill. */
   background:
     radial-gradient(
-      ellipse 105% 68% at 50% 18%,
+      ellipse 105% 68% at 50% 28%,
       rgba(var(--glow-deep-rgb), 0.32) 0%,
       rgba(var(--glow-deep-rgb), 0.2) 34%,
       rgba(var(--glow-deep-rgb), 0.08) 58%,
@@ -328,7 +328,7 @@ button {
 [data-theme="day"] .app-shell {
   background:
     radial-gradient(
-      ellipse 105% 68% at 50% 18%,
+      ellipse 105% 68% at 50% 28%,
       rgba(var(--glow-deep-rgb), 0.26) 0%,
       rgba(var(--glow-deep-rgb), 0.16) 36%,
       rgba(var(--glow-deep-rgb), 0.07) 60%,

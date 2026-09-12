@@ -342,7 +342,6 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
             <SettingRow title={t("dns.hijack")} desc={t("dns.hijackDesc")}>
               <GlassSwitchControl
                 checked={dns.hijack}
-                title={t("dns.hijack")}
                 disabled={busy}
                 onChange={(checked) => patch({ hijack: checked })}
               />
@@ -392,7 +391,6 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
             <SettingRow title={t("dns.cache")} desc={t("dns.cacheDesc")}>
               <GlassSwitchControl
                 checked={dns.cache}
-                title={t("dns.cache")}
                 disabled={busy}
                 onChange={(checked) => patch({ cache: checked })}
               />
@@ -653,7 +651,6 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                 >
                   <GlassSwitchControl
                     checked={fiIpv6}
-                    title={t("dns.ipv6Fakeip")}
                     onChange={setFiIpv6}
                   />
                 </SettingRow>

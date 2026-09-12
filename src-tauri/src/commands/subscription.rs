@@ -19,6 +19,9 @@ pub struct ImportResult {
     pub subscription: SubscriptionView,
     pub node_count: u32,
     pub skipped_count: u32,
+    /// Skipped-node details (name + reason) for the UI report dialog.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<crate::domain::SkippedProxy>,
 }
 
 #[derive(Debug, Serialize)]
@@ -666,6 +669,7 @@ fn persist_import_replacing(
     let node_count = outcome.subscription.node_count;
     let skipped_count = outcome.subscription.skipped_count;
     let sub_id = outcome.subscription.id.clone();
+    let skipped_detail = outcome.skipped.clone();
     let (view, node_set_changed) = state
         .with_store_mut(|store| {
             let mut outcome = outcome;
@@ -711,6 +715,7 @@ fn persist_import_replacing(
         subscription: view,
         node_count,
         skipped_count,
+        skipped: skipped_detail,
     })
 }
 

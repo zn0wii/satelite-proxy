@@ -190,6 +190,9 @@ export interface ImportResult {
   subscription: SubscriptionView;
   node_count: number;
   skipped_count: number;
+  /** Skipped-node details (name + reason), present when any node was
+   *  dropped during import/refresh. */
+  skipped?: { name?: string | null; reason: string }[];
 }
 
 /** shadow-tls SIP003 plugin params carried alongside a shadowsocks node. */

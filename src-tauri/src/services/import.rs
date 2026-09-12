@@ -35,6 +35,9 @@ pub(crate) fn canonical_subscription_url(input: &str) -> Option<String> {
 pub struct ImportOutcome {
     pub subscription: Subscription,
     pub nodes: Vec<ProxyNode>,
+    /// Nodes the parser could not import, with reasons — surfaced to the UI
+    /// so the user can report unsupported protocols/transports to the dev.
+    pub skipped: Vec<crate::domain::SkippedProxy>,
 }
 
 /// `via_proxy`: fetch through local mixed HTTP proxy (127.0.0.1:mixed_port).
@@ -1208,6 +1211,7 @@ fn build_outcome(
     ImportOutcome {
         subscription,
         nodes,
+        skipped: parsed.skipped,
     }
 }
 

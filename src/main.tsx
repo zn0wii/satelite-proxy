@@ -2,6 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { logFrontendEvent } from "./api";
+import { installFastTitleTooltips } from "./fastTooltip";
+
+// Native title tooltips fire after an OS-controlled (~0.5s+) delay; swap
+// every [title] hover for a short-delay styled bubble app-wide.
+installFastTitleTooltips();
 
 // Disable the webview's default right-click context menu (Windows & macOS)
 document.addEventListener(

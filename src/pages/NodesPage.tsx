@@ -17,6 +17,7 @@ import { GlassSwitch } from "../components/GlassSwitch";
 import { ErrorModal } from "../components/ErrorModal";
 import { NodeDetailModal } from "../components/NodeDetailModal";
 import { useI18n } from "../i18n";
+import { nodeTip } from "../nodeTooltip";
 import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
 import { waitForCoreRestart } from "../coreBusy";
@@ -810,6 +811,7 @@ export function NodesPage() {
                       gridTemplateColumns: NODE_LIST_COLS,
                       cursor: customRuntime ? "default" : "pointer",
                     }}
+                    {...nodeTip(n, t)}
                     onClick={customRuntime ? undefined : () => void onSelect(n.id)}
                   >
                     <span className="node-list-lead">
@@ -831,13 +833,15 @@ export function NodesPage() {
                     <span>
                       <div className="node-list-name">{n.name}</div>
                       {n.subscription_name ? (
-                        <div className="node-sub-label" title={n.subscription_name}>
+                        <div className="node-sub-label" title="">
                           {n.subscription_name}
                         </div>
                       ) : null}
                     </span>
                     <span>
-                      <span className="node-proto-tags">
+                      {/* Empty title on this cell opts it out of the row's
+                          hover tooltip (protocol is already in the text). */}
+                      <span className="node-proto-tags" title="">
                         <code>{n.protocol}</code>
                         {delegatedProtocols.has(n.protocol) ? (
                           <span className="sidecar-tag">Xray</span>
@@ -870,6 +874,7 @@ export function NodesPage() {
                   tabIndex={disabled ? -1 : 0}
                   aria-disabled={disabled}
                   className={`node-card ${active ? "active" : ""}${disabled ? " disabled" : ""}`}
+                  {...nodeTip(n, t)}
                   onClick={disabled ? undefined : () => void onSelect(n.id)}
                   onKeyDown={
                     disabled
@@ -885,7 +890,9 @@ export function NodesPage() {
                   <div className="node-card-top">
                     <span className="node-dot">{active ? "●" : "○"}</span>
                     <div className="node-card-meta">
-                      <div className="node-proto-tags">
+                      {/* Empty title opts this label out of the card's hover
+                          tooltip (protocol is already in the text). */}
+                      <div className="node-proto-tags" title="">
                         <code>{n.protocol}</code>
                         {delegatedProtocols.has(n.protocol) ? (
                           <span className="sidecar-tag">Xray</span>
@@ -910,11 +917,11 @@ export function NodesPage() {
                       </div>
                     )}
                   </div>
-                  <div className="node-card-name" title={n.name}>
+                  <div className="node-card-name" {...nodeTip(n, t)}>
                     {n.name}
                   </div>
                   <div className="node-card-footer">
-                    <span className="node-sub-label" title={n.subscription_name ?? ""}>
+                    <span className="node-sub-label" title="">
                       {n.subscription_name}
                     </span>
                     <span className="node-card-latency">

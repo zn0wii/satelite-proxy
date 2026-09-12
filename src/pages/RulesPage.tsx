@@ -30,6 +30,7 @@ import {
   resetBuiltinRuleSet,
   saveRule,
   setRuleEnabled,
+  setRuleSetDnsStrategy,
   setRuleSetEnabled,
   setRuleSetStrategy,
   refreshGeodata,
@@ -37,6 +38,7 @@ import {
   type GeodataInfo,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
+import { nodeTip } from "../nodeTooltip";
 import { SolidSelect } from "../components/SolidSelect";
 import { GlassSeg } from "../components/GlassSeg";
 import { GlassSwitchControl } from "../components/GlassSwitchControl";
@@ -57,6 +59,11 @@ import type {
 } from "../types";
 
 type RouteFinal = "proxy" | "direct" | "block";
+
+/** Top N rule rows open their ⋮ menu downward: the table card clips
+ *  overflow (clean rounded corners), so an upward menu from the first rows
+ *  would be cut off at the card's top edge. */
+const RULE_MENU_FLIP_ROWS = 4;
 
 /**
  * If `payload` is a pasted http(s) URL, suggest what it would actually
@@ -519,25 +526,6 @@ export function RulesPage({ embedded = false }: Props) {
     const top = all.filter((n) => picked.includes(n.id));
     const rest = filtered.filter((n) => !picked.includes(n.id));
     return [...top, ...rest];
-  }
-
-  /** Hover tooltip for a picker row — one fact per line: name, endpoint,
-   *  transport & TLS markers (own line, only when present), UDP support. */
-  function nodeHoverTitle(n: ProxyNode): string {
-    const markers: string[] = [];
-    if (n.transport && n.transport.type !== "tcp") {
-      markers.push(n.transport.type);
-    }
-    if (n.tls?.enabled) {
-      markers.push("TLS");
-      if (n.tls.reality_public_key) markers.push("REALITY");
-      if (n.tls.server_name) markers.push(`SNI ${n.tls.server_name}`);
-      if (n.tls.insecure) markers.push(t("rules.nodeTipInsecure"));
-    }
-    const lines = [n.name, `${n.protocol} · ${n.server}:${n.port}`];
-    if (markers.length) lines.push(markers.join(" · "));
-    lines.push(n.udp === false ? t("rules.nodeTipUdpNo") : t("rules.nodeTipUdp"));
-    return lines.join("\n");
   }
 
   /** A set's current node picks as one selection list: explicit pool members
@@ -1323,6 +1311,46 @@ export function RulesPage({ embedded = false }: Props) {
     }
   }
 
+  /** ⋮ menu quick action: switch the set's DNS resolver policy. */
+  async function onQuickDns(s: RuleSetSummary, strategy: RuleSetDnsStrategy) {
+    if (s.dns_strategy === strategy) return;
+    try {
+      await setRuleSetDnsStrategy(s.id, strategy);
+      await reloadSets();
+    } catch (err) {
+      setError(typeof err === "string" ? err : String(err));
+    }
+  }
+
+  /** ⋮ menu quick action: plain route flip or chain pick. Re-applies (and
+   *  restarts) only when the choice actually differs from the current route. */
+  async function onQuickRoute(
+    s: RuleSetSummary,
+    target: "proxy" | "direct" | "block" | "chain",
+    chainId?: string,
+  ) {
+    if (target === "chain") {
+      if (!chainId || (s.strategy === "chain" && s.chain_id === chainId)) return;
+    } else if (s.strategy === target) {
+      return;
+    }
+    try {
+      await batchSetRuleTargets(
+        s.id,
+        target,
+        null,
+        null,
+        null,
+        null,
+        target === "chain" ? chainId : null,
+      );
+      await reloadSets();
+      if (viewSetId === s.id) await reloadRules(s.id);
+    } catch (err) {
+      setError(typeof err === "string" ? err : String(err));
+    }
+  }
+
   async function onDeleteSet(target: RuleSetSummary | null | undefined = viewSet) {
     if (!target || busy) return;
     if (!confirm(t("rules.deleteSetConfirm", { name: target.name }))) return;
@@ -1544,6 +1572,8 @@ export function RulesPage({ embedded = false }: Props) {
                   e.stopPropagation();
                   setMenuRuleId(null);
                   setMenuSetId((id) => (id === s.id ? null : s.id));
+                  // Chain flyout in the route submenu needs the chain list.
+                  void ensureChainsLoaded();
                 }}
               >
                 ⋮
@@ -1555,6 +1585,115 @@ export function RulesPage({ embedded = false }: Props) {
                   }`}
                   role="menu"
                 >
+                  {s.strategy !== "block" && (
+                    <div className="rule-menu-subhost" role="none">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        aria-haspopup="menu"
+                        className="rule-menu-item rule-menu-sub-trigger"
+                      >
+                        {t("rules.setMenuDnsTitle")}
+                        <span className="rule-menu-caret" aria-hidden>›</span>
+                      </button>
+                      <div className="rule-menu-sub" role="menu">
+                        {(["local", "domestic", "remote"] as RuleSetDnsStrategy[]).map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            role="menuitem"
+                            className="rule-menu-item"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setMenuSetId(null);
+                              void onQuickDns(s, v);
+                            }}
+                          >
+                            <span className={`menu-dot${s.dns_strategy === v ? " on" : ""}`} aria-hidden />
+                            {dnsStrategyLabel(v)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="rule-menu-subhost" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-haspopup="menu"
+                      className="rule-menu-item rule-menu-sub-trigger"
+                    >
+                      {t("rules.menuRouteLabel")}
+                      <span className="rule-menu-caret" aria-hidden>›</span>
+                    </button>
+                    <div className="rule-menu-sub" role="menu">
+                      {(["proxy", "direct", "block"] as const).map((target) => (
+                        <button
+                          key={target}
+                          type="button"
+                          role="menuitem"
+                          className="rule-menu-item"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMenuSetId(null);
+                            void onQuickRoute(s, target);
+                          }}
+                        >
+                          <span className={`menu-dot${s.strategy === target ? " on" : ""}`} aria-hidden />
+                          {strategyLabel(target)}
+                        </button>
+                      ))}
+                      <div className="rule-menu-subhost" role="none">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-haspopup="menu"
+                          className="rule-menu-item rule-menu-sub-trigger"
+                        >
+                          <span className={`menu-dot${s.strategy === "chain" ? " on" : ""}`} aria-hidden />
+                          {t("rules.targetChainShort")}
+                          <span className="rule-menu-caret" aria-hidden>›</span>
+                        </button>
+                        <div className="rule-menu-sub" role="menu">
+                          {chains.length === 0 ? (
+                            <span className="rule-menu-empty">{t("rules.noChains")}</span>
+                          ) : (
+                            chains.map((c) => (
+                              <button
+                                key={c.id}
+                                type="button"
+                                role="menuitem"
+                                className="rule-menu-item"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMenuSetId(null);
+                                  void onQuickRoute(s, "chain", c.id);
+                                }}
+                              >
+                                <span
+                                  className={`menu-dot${s.strategy === "chain" && s.chain_id === c.id ? " on" : ""}`}
+                                  aria-hidden
+                                />
+                                {c.name}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="rule-menu-item"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMenuSetId(null);
+                          openEditSet(s);
+                        }}
+                      >
+                        {t("rules.menuMore")}
+                      </button>
+                    </div>
+                  </div>
                   <button
                     type="button"
                     role="menuitem"
@@ -1926,7 +2065,7 @@ export function RulesPage({ embedded = false }: Props) {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((r) => (
+                  {filtered.map((r, rowIndex) => (
                     <tr
                       key={r.id}
                       className={r.enabled ? "rule-row" : "rule-row row-disabled"}
@@ -1993,7 +2132,12 @@ export function RulesPage({ embedded = false }: Props) {
                             ⋮
                           </button>
                           {menuRuleId === r.id && (
-                            <div className="rule-menu-pop" role="menu">
+                            <div
+                              className={`rule-menu-pop${
+                                rowIndex < RULE_MENU_FLIP_ROWS ? " open-down" : ""
+                              }`}
+                              role="menu"
+                            >
                               <button
                                 type="button"
                                 role="menuitem"
@@ -2390,7 +2534,7 @@ export function RulesPage({ embedded = false }: Props) {
                               role="option"
                               aria-selected={picked}
                               className={`solid-select-option node-multi-option${picked ? " active" : ""}`}
-                              title={nodeHoverTitle(n)}
+                              {...nodeTip(n, t)}
                               onClick={() =>
                                 setNewSetNodeIds(toggleInList(newSetNodeIds, n.id))
                               }
@@ -2749,7 +2893,7 @@ export function RulesPage({ embedded = false }: Props) {
                                 role="option"
                                 aria-selected={picked}
                                 className={`solid-select-option node-multi-option${picked ? " active" : ""}`}
-                                title={nodeHoverTitle(n)}
+                                {...nodeTip(n, t)}
                                 onClick={() =>
                                   setEditSetNodeIds(toggleInList(editSetNodeIds, n.id))
                                 }

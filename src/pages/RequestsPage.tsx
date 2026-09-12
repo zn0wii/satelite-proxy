@@ -149,19 +149,10 @@ export function RequestsPage({ embedded = false }: Props) {
           onChange={(v) => setScope(v as TrafficScope)}
           options={scopeOpts}
         />
-        <GlassButton
-          icon="↻"
-          onClick={() => void reload()}
-          title={t("common.refresh")}
-        >
+        <GlassButton icon="↻" onClick={() => void reload()}>
           {t("common.refresh")}
         </GlassButton>
-        <GlassButton
-          variant="danger"
-          icon="⌫"
-          onClick={() => void onClear()}
-          title={t("common.clear")}
-        >
+        <GlassButton variant="danger" icon="⌫" onClick={() => void onClear()}>
           {t("common.clear")}
         </GlassButton>
       </div>

@@ -267,21 +267,18 @@ export function LogsPage() {
             checked={autoScroll}
             onChange={setAutoScroll}
             label={t("logs.autoScroll")}
-            title={t("logs.autoScroll")}
             capsule
             size="sm"
           />
           <GlassButton
             icon="↻"
             onClick={() => void (tab === "app" ? reload() : coreReload())}
-            title={t("common.refresh")}
           >
             {t("common.refresh")}
           </GlassButton>
           <GlassButton
             icon="⌫"
             onClick={() => void onClear()}
-            title={t("common.clear")}
           >
             {t("common.clear")}
           </GlassButton>
@@ -300,9 +297,6 @@ export function LogsPage() {
             value={minLevel}
             ariaLabel={t("logs.level")}
             onChange={(v) => setMinLevel(v as AppLogLevel)}
-            titles={Object.fromEntries(
-              LEVELS.map((lv) => [lv, `${t("logs.minLevel")}: ${lv}`]),
-            )}
             options={LEVELS.map((lv) => ({ value: lv, label: lv }))}
           />
         ) : (
@@ -310,9 +304,6 @@ export function LogsPage() {
             value={coreMinLevel}
             ariaLabel={t("logs.level")}
             onChange={(v) => setCoreMinLevel(v as CoreLogLevel)}
-            titles={Object.fromEntries(
-              CORE_LEVELS.map((lv) => [lv, `${t("logs.minLevel")}: ${lv}`]),
-            )}
             options={CORE_LEVELS.map((lv) => ({ value: lv, label: lv }))}
           />
         )}

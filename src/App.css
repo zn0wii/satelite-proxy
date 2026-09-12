@@ -3417,7 +3417,40 @@ tr.rule-row:hover {
 /* Fixed layout so 匹配 truncates and ⋮ always stays visible.
    Must not clip the ⋮ dropdown (especially with only 1 row). */
 .rules-table-wrap.table-wrap {
-  overflow: visible;
+  /* Clip to the rounded card: overflow visible + backdrop-filter makes the
+     frost layer paint SQUARE corners (WebView2 compositing bug) — with the
+     clip, all four corners render clean. Row ⋮ menus escape no longer; the
+     first rows flip their menu downward instead (RULE_MENU_FLIP_ROWS). */
+  overflow: hidden;
+}
+
+.rule-menu-pop.open-down {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
+/* The wrap must stay overflow-visible so row ⋮ menus can escape the card —
+   which leaves the sticky th band (and the last row's separators) painting
+   SQUARE corners over the card's rounded ones. Round the paint layers
+   themselves instead (all four corners of the table surface). */
+.rules-table thead th:first-child,
+.remote-rules-table thead th:first-child {
+  border-top-left-radius: calc(var(--radius) - 1px);
+}
+
+.rules-table thead th:last-child,
+.remote-rules-table thead th:last-child {
+  border-top-right-radius: calc(var(--radius) - 1px);
+}
+
+.rules-table tbody tr:last-child td:first-child,
+.remote-rules-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: calc(var(--radius) - 1px);
+}
+
+.rules-table tbody tr:last-child td:last-child,
+.remote-rules-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: calc(var(--radius) - 1px);
 }
 
 /* Row ⋮ popovers open UPWARD: for the first rows they escape the table card
@@ -10195,3 +10228,145 @@ li.virt-pad {
 }
 
 
+
+/* —— Skipped-nodes report dialog (subscription import / manual refresh) —— */
+.skipped-nodes-modal {
+  width: min(620px, 100%);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+
+.skipped-nodes-modal .modal-body {
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.skipped-report-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+}
+
+.skipped-report-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.skipped-report-source {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skipped-report-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.skipped-report-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.skipped-item-name {
+  flex: 0 0 auto;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skipped-item-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— Rule-set ⋮ menu flyout submenus (DNS / route quick switch) —— */
+.rule-menu-subhost {
+  position: relative;
+}
+
+.rule-menu-item.rule-menu-sub-trigger {
+  display: flex;
+  align-items: center;
+  /* No extra gap: the leading dot's own margin-right keeps dotted rows
+     (e.g. 链路 in the route submenu) left-aligned with plain dotted rows. */
+  gap: 0;
+}
+
+.rule-menu-caret {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.menu-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-right: 8px;
+  background: var(--muted);
+  opacity: 0.45;
+}
+
+.menu-dot.on {
+  background: var(--success);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--success);
+}
+
+/* Flyout: hidden until the host row is hovered/focused. Mirrors the
+   .rule-menu-pop panel material; opens to the right of the parent row. */
+.rule-menu-sub {
+  display: none;
+  position: absolute;
+  left: calc(100% - 4px);
+  top: -0.3rem;
+  min-width: 8.5rem;
+  padding: 0.25rem;
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-elevated);
+  flex-direction: column;
+  gap: 0.1rem;
+  z-index: 51;
+}
+
+.rule-menu-subhost:hover > .rule-menu-sub,
+.rule-menu-subhost:focus-within > .rule-menu-sub {
+  display: flex;
+}
+
+.rule-menu-empty {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}

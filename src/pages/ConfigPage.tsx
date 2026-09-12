@@ -24,15 +24,35 @@ import { EditLocalNodesModal } from "../components/EditLocalNodesModal";
 import { GlassButton } from "../components/GlassButton";
 import { GlassSwitch } from "../components/GlassSwitch";
 import { useImportIntent } from "../ImportIntentContext";
+import { getVersion } from "@tauri-apps/api/app";
 import { useI18n } from "../i18n";
 import { ErrorModal } from "../components/ErrorModal";
 import type {
+  ImportResult,
   SubscriptionTraffic,
   SubscriptionUrlEntry,
   SubscriptionView,
 } from "../types";
 
+
 const REFRESH_ALL_CONCURRENCY = 4;
+
+/** One subscription's skipped-node report entry (import / manual refresh). */
+interface SkippedReport {
+  name: string;
+  source: string;
+  format: string | null;
+  skipped: { name?: string | null; reason: string }[];
+}
+
+function skippedEntry(result: ImportResult): SkippedReport {
+  return {
+    name: result.subscription.name,
+    source: result.subscription.source_display,
+    format: result.subscription.format ?? null,
+    skipped: result.skipped ?? [],
+  };
+}
 
 async function settleWithConcurrency<T, R>(
   values: readonly T[],
@@ -188,7 +208,6 @@ function TrafficBlock({ traffic }: { traffic?: SubscriptionTraffic | null }) {
           aria-valuenow={pct}
           aria-valuemin={0}
           aria-valuemax={100}
-          title={`${fmtBytes(tr.used)} / ${fmtBytes(tr.total)} · ${pct}%`}
         >
           <div
             className={`traffic-bar-fill ${level}`}
@@ -201,7 +220,7 @@ function TrafficBlock({ traffic }: { traffic?: SubscriptionTraffic | null }) {
           </span>
           {expireLabel && <span className="dot-sep">·</span>}
           {expireLabel && (
-            <span className="traffic-expire" title={expireLabel}>
+            <span className="traffic-expire">
               {expireLabel}
             </span>
           )}
@@ -222,7 +241,7 @@ function TrafficBlock({ traffic }: { traffic?: SubscriptionTraffic | null }) {
             <span className="dot-sep">·</span>
           )}
           {expireLabel && (
-            <span className="traffic-expire" title={expireLabel}>
+            <span className="traffic-expire">
               {expireLabel}
             </span>
           )}
@@ -263,6 +282,8 @@ export function ConfigPage() {
   const [items, setItems] = useState<SubscriptionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+  const [skippedReport, setSkippedReport] = useState<SkippedReport[] | null>(null);
+  const [skippedCopied, setSkippedCopied] = useState(false);
   // Seed from the cross-mount settings snapshot (see api.ts) so the header
   // mix switch paints its persisted position on re-mount without sliding.
   const [mixMode, setMixModeState] = useState(
@@ -430,12 +451,13 @@ export function ConfigPage() {
   async function handleSubmit(payload: ConfigFormValues) {
     setImporting(true);
     setImportError(null);
+    let importResult: ImportResult | null = null;
     try {
       const name = payload.name || null;
       const autoUpdate = !!payload.autoUpdate;
       const autoUpdateIntervalMin = payload.autoUpdateIntervalMin ?? 1440;
       if (editId) {
-        await updateSubscription({
+        importResult = await updateSubscription({
           id: editId,
           name,
           kind: payload.kind,
@@ -450,7 +472,7 @@ export function ConfigPage() {
           userAgent: payload.userAgent ?? null,
         });
       } else if (payload.kind === "url") {
-        await addSubscriptionUrl(
+        importResult = await addSubscriptionUrl(
           name,
           payload.url ?? "",
           !!payload.viaProxy,
@@ -459,18 +481,18 @@ export function ConfigPage() {
           payload.userAgent ?? null,
         );
       } else if (payload.kind === "file") {
-        await addSubscriptionFile(
+        importResult = await addSubscriptionFile(
           name,
           payload.path ?? "",
           autoUpdate,
           autoUpdateIntervalMin,
         );
       } else if (payload.kind === "text") {
-        await addSubscriptionText(name, payload.content ?? "");
+        importResult = await addSubscriptionText(name, payload.content ?? "");
       } else if (payload.kind === "singbox") {
-        await addSubscriptionSingbox(name, payload.content ?? "", null);
+        importResult = await addSubscriptionSingbox(name, payload.content ?? "", null);
       } else {
-        await addSubscriptionNode(
+        importResult = await addSubscriptionNode(
           name,
           payload.uri ?? null,
           payload.node ?? null,
@@ -481,6 +503,7 @@ export function ConfigPage() {
       setEditInitial(null);
       dismiss();
       await reload();
+      maybeReportSkipped(importResult);
     } catch (e) {
       setImportError(typeof e === "string" ? e : String(e));
     } finally {
@@ -488,12 +511,54 @@ export function ConfigPage() {
     }
   }
 
+  /** Import/refresh produced skipped nodes → surface the report dialog. */
+  function maybeReportSkipped(result: ImportResult | null) {
+    if (result?.skipped?.length) setSkippedReport([skippedEntry(result)]);
+  }
+
+  async function copySkippedReport() {
+    if (!skippedReport) return;
+    let version = "";
+    try {
+      version = await getVersion();
+    } catch {
+      version = "?";
+    }
+    const total = skippedReport.reduce((n, r) => n + r.skipped.length, 0);
+    const lines = [
+      `Satelite 跳过节点报告（v${version}）`,
+      `共 ${total} 个节点未能导入：`,
+    ];
+    for (const r of skippedReport) {
+      lines.push(``, `订阅：${r.name}${r.format ? `（${r.format}）` : ""}`, `来源：${r.source}`);
+      r.skipped.forEach((item, i) => {
+        lines.push(`  ${i + 1}. ${item.name || "(未命名)"} — ${item.reason}`);
+      });
+    }
+    const text = lines.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setSkippedCopied(true);
+      window.setTimeout(() => setSkippedCopied(false), 1500);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setSkippedCopied(true);
+      window.setTimeout(() => setSkippedCopied(false), 1500);
+    }
+  }
+
   async function onRefresh(id: string) {
     setActionId(id);
     setListError(null);
     try {
-      await refreshSubscription(id);
+      const result = await refreshSubscription(id);
       await reload();
+      maybeReportSkipped(result);
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
     } finally {
@@ -514,6 +579,7 @@ export function ConfigPage() {
         (item) => refreshSubscription(item.id),
       );
       const failed: string[] = [];
+      const skippedReports: SkippedReport[] = [];
       results.forEach((r, i) => {
         if (r.status === "rejected") {
           const name = remotes[i]?.name ?? remotes[i]?.id ?? "?";
@@ -524,9 +590,12 @@ export function ConfigPage() {
                 ? String(r.reason)
                 : "unknown";
           failed.push(`${name}: ${reason}`);
+        } else if (r.value?.skipped?.length) {
+          skippedReports.push(skippedEntry(r.value));
         }
       });
       await reload();
+      if (skippedReports.length > 0) setSkippedReport(skippedReports);
       if (failed.length > 0) {
         setListError(failed.slice(0, 5).join("；"));
       }
@@ -567,19 +636,6 @@ export function ConfigPage() {
         }`}
         role={clickable ? "button" : "article"}
         tabIndex={clickable ? 0 : undefined}
-        title={
-          generated
-            ? clickable
-              ? mixMode
-                ? item.enabled
-                  ? t("config.clickDisable")
-                  : t("config.clickEnable")
-                : item.enabled
-                  ? t("config.using")
-                  : t("config.clickUse")
-              : t("config.customDisabled")
-            : t("config.singboxReadonly")
-        }
         onClick={clickable ? () => void onActivate(item.id) : undefined}
         onKeyDown={
           clickable
@@ -597,7 +653,6 @@ export function ConfigPage() {
             {generated ? (
               <span
                 className="node-dot"
-                title={item.enabled ? t("common.enabled") : t("common.disabled")}
                 aria-label={
                   item.enabled ? t("common.enabled") : t("common.disabled")
                 }
@@ -605,12 +660,9 @@ export function ConfigPage() {
                 {item.enabled ? "●" : "○"}
               </span>
             ) : null}
-            <h3 title={item.name}>{item.name}</h3>
+            <h3>{item.name}</h3>
             <div className="sub-card-top-right">
-              <span
-                className="sub-card-updated muted"
-                title={formatTime(item.last_update)}
-              >
+              <span className="sub-card-updated muted">
                 {formatRelative(item.last_update, t)}
               </span>
               <div
@@ -735,16 +787,10 @@ export function ConfigPage() {
             icon="↻"
             disabled={busy || items.every((item) => item.source_kind !== "url")}
             onClick={() => void onRefreshAll()}
-            title={t("config.refreshAll")}
           >
             {refreshingAll ? t("config.refreshing") : t("config.refreshAll")}
           </GlassButton>
-          <GlassButton
-            icon="+"
-            disabled={busy}
-            onClick={openAdd}
-            title={t("config.add")}
-          >
+          <GlassButton icon="+" disabled={busy} onClick={openAdd}>
             {t("config.add")}
           </GlassButton>
         </div>
@@ -755,6 +801,57 @@ export function ConfigPage() {
           message={listError}
           onClose={() => setListError(null)}
         />
+      )}
+
+      {skippedReport && (
+        <div className="modal-backdrop">
+          <div className="modal skipped-nodes-modal">
+            <header className="modal-header">
+              <h2>
+                {t("config.skippedTitle", {
+                  n: skippedReport.reduce((sum, r) => sum + r.skipped.length, 0),
+                })}
+              </h2>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setSkippedReport(null)}
+              >
+                ×
+              </button>
+            </header>
+            <div className="modal-body">
+              <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                {t("config.skippedHint")}
+              </p>
+              {skippedReport.map((r) => (
+                <div key={r.name + r.source} className="skipped-report-block">
+                  <div className="skipped-report-sub">
+                    <strong>{r.name}</strong>
+                    {r.format ? <span className="muted mono">{r.format}</span> : null}
+                    <span className="muted skipped-report-source">{r.source}</span>
+                  </div>
+                  <ul className="skipped-report-list">
+                    {r.skipped.map((item, i) => (
+                      <li key={i} title={`${item.reason}`}>
+                        <span className="skipped-item-name">{item.name || t("config.skippedUnnamed")}</span>
+                        <span className="muted skipped-item-reason">{item.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <footer className="modal-footer">
+              <GlassButton onClick={() => setSkippedReport(null)}>
+                {t("common.close")}
+              </GlassButton>
+              <GlassButton variant="primary" onClick={() => void copySkippedReport()}>
+                {skippedCopied ? t("common.copied") : t("config.skippedCopy")}
+              </GlassButton>
+            </footer>
+          </div>
+        </div>
       )}
 
       {loading ? (

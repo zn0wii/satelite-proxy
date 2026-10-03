@@ -181,6 +181,7 @@ fn sidecar_process_names(kind: crate::core::CoreKind) -> &'static [&'static str]
         crate::core::CoreKind::Xray => &["xray", "xray.exe"],
         crate::core::CoreKind::Mihomo => &["mihomo", "mihomo.exe"],
         crate::core::CoreKind::SingBox => &["sing-box", "sing-box.exe"],
+        crate::core::CoreKind::Aether => &["aether", "aether.exe"],
     }
 }
 
@@ -1568,6 +1569,25 @@ fn node_to_outbound_tagged(
         return Err(AppError::Config(
             "masque 协议 sing-box 不支持：该节点已从本次生成的配置中过滤（开启多核模式并将该协议指向 mihomo，或切换 mihomo 内核即可使用）"
                 .into(),
+        ));
+    }
+    // Builtin WARP node: no core has a native WARP outbound — egress is a
+    // plain loopback socks outbound to the aether sidecar listener. The
+    // sidecar plan maps it to the same fixed port, so this arm is correct
+    // with or without a plan in play.
+    if matches!(node.protocol, Protocol::Warp) {
+        let tag = tag_override
+            .map(str::to_string)
+            .unwrap_or_else(|| outbound_tag(node));
+        return Ok((
+            tag.clone(),
+            json!({
+                "type": "socks",
+                "tag": tag,
+                "server": "127.0.0.1",
+                "server_port": crate::core::kind::AETHER_SIDECAR_PORT,
+            }),
+            Vec::new(),
         ));
     }
     let tag = tag_override

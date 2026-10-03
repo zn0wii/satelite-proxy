@@ -403,6 +403,8 @@ export interface SettingsUpdatePayload {
   tlsFragmentSingbox?: boolean | null;
   /** TLS ClientHello fragmentation, Xray core (freedom fragment). */
   tlsFragmentXray?: boolean | null;
+  /** Builtin Cloudflare WARP companion (aether sidecar) master switch. */
+  warpEnabled?: boolean | null;
   /** Per-protocol core routing rows (delegations only). */
   protocolCores?: import("./types").ProtocolCoreItem[] | null;
   /** Base loopback port for the sidecar's per-node inbounds. */
@@ -460,6 +462,7 @@ function scheduleSettingsWrite() {
       multiCoreEnabled: payload.multiCoreEnabled ?? null,
       tlsFragmentSingbox: payload.tlsFragmentSingbox ?? null,
       tlsFragmentXray: payload.tlsFragmentXray ?? null,
+      warpEnabled: payload.warpEnabled ?? null,
       protocolCores: payload.protocolCores ?? null,
       sidecarPort: payload.sidecarPort ?? null,
     })

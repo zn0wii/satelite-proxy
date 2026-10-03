@@ -372,7 +372,7 @@ impl DnsPathAnalyzer {
                             }
                         }
                     }
-                    CoreKind::Xray | CoreKind::Mihomo => {
+                    CoreKind::Xray | CoreKind::Mihomo | CoreKind::Aether => {
                         // Only the two builtin geosite sets map onto geodata;
                         // user-built .srs sets are skipped by both generators.
                         if !builtin_geosite {
@@ -424,6 +424,8 @@ impl DnsPathAnalyzer {
             CoreKind::Mihomo => input.tun_enabled || input.dns.fake_ip.enabled,
             // Xray: `tun_enabled && fake_ip.enabled` (xray.rs build_dns).
             CoreKind::Xray => input.tun_enabled && input.dns.fake_ip.enabled,
+            // Unreachable: aether never runs as the main core.
+            CoreKind::Aether => input.dns.fake_ip.enabled,
         };
 
         Self {
@@ -538,7 +540,7 @@ impl DnsPathAnalyzer {
                     },
                 }
             }
-            CoreKind::Xray => match pool {
+            CoreKind::Xray | CoreKind::Aether => match pool {
                 RuleSetDnsStrategy::Remote => DnsDiagPath {
                     strategy: DnsPathStrategy::Remote,
                     // Second pool entry is pure in-pool redundancy; the other
@@ -755,7 +757,7 @@ impl DnsPathAnalyzer {
                         );
                     }
                 }
-                CoreKind::Xray => {}
+                CoreKind::Xray | CoreKind::Aether => {}
             }
         }
 

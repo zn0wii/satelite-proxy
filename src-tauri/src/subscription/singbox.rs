@@ -183,6 +183,7 @@ fn parse_outbound(value: &Value) -> Result<ParseOutbound, String> {
     let udp = get_bool(map, &["udp"]);
     let (tls, transport, config) = match protocol {
         Protocol::Unknown => unreachable!("sing-box json never yields Unknown"),
+        Protocol::Warp => return Err("builtin warp protocol is not parseable".into()),
         Protocol::Shadowsocks => parse_ss(map)?,
         Protocol::Vmess => parse_vmess(map)?,
         Protocol::Vless => parse_vless(map)?,

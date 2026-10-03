@@ -48,6 +48,11 @@ src-tauri/resources/bin/**/mihomo.exe
 src-tauri/resources/bin/**/mihomo-version.txt
 src-tauri/resources/bin/**/mihomo-geodata/
 
+# Bundled aether core (download via scripts/fetch-bundled-aether-*.sh)
+src-tauri/resources/bin/**/aether
+src-tauri/resources/bin/**/aether.exe
+src-tauri/resources/bin/**/aether-version.txt
+
 # Bundled built-in rule sets (download via scripts/fetch-bundled-rule-sets.sh)
 src-tauri/resources/rule-sets/*.srs
 nul

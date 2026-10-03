@@ -331,7 +331,10 @@ export type ProtocolConfig =
   /** Raw-passthrough node (mihomo-native type the app doesn't model, e.g.
    *  ssr / mieru) — no modeled fields; emitted verbatim from `raw` in
    *  mihomo generation. */
-  | { protocol: "unknown" };
+  | { protocol: "unknown" }
+  /** Builtin Cloudflare WARP node (aether sidecar) — no modeled fields;
+   *  every generator emits a loopback socks outbound to the sidecar. */
+  | { protocol: "warp" };
 
 /** TLS layer — mirrors Rust `TlsConfig`. REALITY fields only carry values on
  * reality nodes; the section is hidden when TLS is fully off. */
@@ -588,6 +591,8 @@ export interface AppSettings {
   /** TLS ClientHello fragmentation on the sing-box generator (`tls.fragment`
    *  on TLS-bearing node outbounds). Effective only under the sing-box core. */
   tls_fragment_singbox?: boolean;
+  /** Builtin Cloudflare WARP companion (aether sidecar) master switch. */
+  warp_enabled?: boolean;
   /** Same for the Xray generator (freedom `fragment` outbound +
    * `sockopt.dialerProxy`). Effective only under the Xray core. */
   tls_fragment_xray?: boolean;

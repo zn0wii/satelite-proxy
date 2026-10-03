@@ -44,6 +44,8 @@
       "resources/bin/darwin-arm64/geoip.dat",
       "resources/bin/darwin-arm64/mihomo",
       "resources/bin/darwin-arm64/mihomo-version.txt",
+      "resources/bin/darwin-arm64/aether",
+      "resources/bin/darwin-arm64/aether-version.txt",
       "resources/bin/darwin-arm64/mihomo-geodata/Country.mmdb",
       "resources/bin/darwin-arm64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",

@@ -339,6 +339,13 @@ pub struct AppSettings {
     /// Only takes effect while running under the sing-box core.
     #[serde(default)]
     pub tls_fragment_singbox: bool,
+    /// Builtin Cloudflare WARP companion (aether sidecar) master switch
+    /// (Settings → 内核设置). Off (default): the builtin WARP node is hidden
+    /// from listings/config and no aether process ever starts — the feature
+    /// is invisible unless opted in. On: `Protocol::Warp` delegates to the
+    /// aether sidecar in every main-core mode.
+    #[serde(default)]
+    pub warp_enabled: bool,
     /// Same feature for the Xray generator: a dedicated freedom `fragment`
     /// outbound (tlshello) plus `sockopt.dialerProxy` on TLS-bearing nodes.
     /// Only takes effect while running under the Xray core. mihomo's kernel
@@ -501,6 +508,7 @@ impl Default for AppSettings {
             core_type: default_core_type(),
             multi_core_enabled: false,
             protocol_cores: Vec::new(),
+            warp_enabled: false,
             sidecar_port: default_sidecar_port(),
             tls_fragment_singbox: false,
             tls_fragment_xray: false,

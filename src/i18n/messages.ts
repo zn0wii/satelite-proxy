@@ -349,6 +349,11 @@ const en = {
   "settings.tlsFragmentXray": "Enable under Xray core",
   "settings.tlsFragmentHint":
     "Each switch only takes effect while running under its core; toggling restarts a running core. mihomo's kernel has no TLS-fragmentation support.",
+  "settings.warpToggle": "Cloudflare WARP (built-in, exclusive)",
+  "settings.warpToggleDesc":
+    "Runs the bundled aether companion: a subscription-free Cloudflare WARP tunnel (MASQUE over HTTP/3). While enabled ALL traffic egresses through WARP — subscription nodes are parked and the node list shows only the WARP node.",
+  "settings.warpToggleHint":
+    "Off by default; toggling restarts a running core. First connection registers the device (10–30s), reconnects after that are fast. Works under all three cores; turn it off to go back to your subscription nodes.",
   "settings.multiCore": "Multi-core mode",
   "settings.multiCoreRunning": "sidecar running",
   "settings.multiCoreIdle": "not running",
@@ -1487,6 +1492,11 @@ const zh: Record<MessageKey, string> = {
   "settings.tlsFragmentXray": "Xray 内核下启用",
   "settings.tlsFragmentHint":
     "开关仅在对应内核模式下生效，切换会重启运行中的内核；mihomo 内核不支持 TLS 分片。",
+  "settings.warpToggle": "Cloudflare WARP（内置·独占）",
+  "settings.warpToggleDesc":
+    "运行内置 aether 边车：一条免订阅的 Cloudflare WARP 隧道（MASQUE / HTTP-3）。开启后**全部流量走 WARP**——订阅节点暂停使用，节点列表只显示 WARP 节点，不存在混合。",
+  "settings.warpToggleHint":
+    "默认关闭；切换会重启运行中的内核。首次连接需注册设备（10–30 秒），之后重连很快。三种内核模式下均可用；关闭即恢复订阅节点。",
   "settings.multiCore": "多核模式",
   "settings.multiCoreRunning": "副进程运行中",
   "settings.multiCoreIdle": "未运行",

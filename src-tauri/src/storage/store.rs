@@ -74,6 +74,16 @@ pub struct AppStore {
     retained_chains: Vec<Value>,
 }
 
+/// Subscription-id placeholder owning the provisioned builtin Cloudflare
+/// WARP node. No `Subscription` entry exists under this id — the node is
+/// seeded directly into `AppStore.nodes` and survives subscription deletes
+/// (those only `retain` rows matching a removed subscription id).
+pub const BUILTIN_WARP_SUB_ID: &str = "builtin-warp";
+/// Fixed node id of the builtin WARP node. Deliberately NOT a content hash:
+/// nothing ever rebuilds this node, so identity must not depend on mutable
+/// fields. `ProtocolConfig::Warp` carries no credentials to hash anyway.
+pub const BUILTIN_WARP_NODE_ID: &str = "warp-builtin";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredNode {
     pub subscription_id: String,
@@ -118,6 +128,7 @@ impl AppStore {
                 format!("检测到 {renamed_ids} 个重复节点 id，已自动改写以避免 tag 冲突"),
             );
         }
+        store.ensure_builtin_warp_node();
         if schema_before < 5 && source_raw.is_some() {
             let backup = path.with_file_name("store.pre-v5.backup.json");
             if !backup.exists() {
@@ -901,18 +912,88 @@ impl AppStore {
         }
     }
 
-    pub fn enabled_nodes(&self) -> Vec<ProxyNode> {
-        let enabled: std::collections::HashSet<_> = self
-            .subscriptions
+    /// Provision the builtin Cloudflare WARP node (idempotent). Called from
+    /// [`Self::load`] after every migration: absent on fresh stores until the
+    /// first load, and re-created if a future code path ever drops it.
+    pub fn ensure_builtin_warp_node(&mut self) {
+        if self
+            .nodes
             .iter()
-            .filter(|s| s.enabled && s.source.contributes_nodes())
-            .map(|s| s.id.as_str())
-            .collect();
+            .any(|n| n.node.id == BUILTIN_WARP_NODE_ID)
+        {
+            return;
+        }
+        self.nodes.push(StoredNode {
+            subscription_id: BUILTIN_WARP_SUB_ID.to_string(),
+            node: ProxyNode {
+                id: BUILTIN_WARP_NODE_ID.to_string(),
+                name: "Cloudflare WARP".to_string(),
+                protocol: crate::domain::Protocol::Warp,
+                // The API-assigned MASQUE edge (prober.rs measures this range
+                // as reachable fleet-wide). Display/ping target only — the
+                // dial path always goes through the aether sidecar's socks
+                // listener, never to this address directly.
+                server: "162.159.198.2".to_string(),
+                port: 443,
+                tls: None,
+                transport: None,
+                // aether's SOCKS5 server implements UDP ASSOCIATE and relays
+                // datagrams through the MASQUE netstack (CONNECT-IP carries
+                // IP packets, so UDP/QUIC work end to end).
+                udp: Some(true),
+                config: crate::domain::ProtocolConfig::Warp,
+                source: Some("builtin".to_string()),
+                raw: None,
+                latency_ms: None,
+                latency_at: None,
+            },
+            latency_method: None,
+        });
+        crate::app_log::info("storage", "已播种内置 Cloudflare WARP 节点");
+    }
+
+    pub fn enabled_nodes(&self) -> Vec<ProxyNode> {
         self.nodes
             .iter()
-            .filter(|n| enabled.contains(n.subscription_id.as_str()))
+            .filter(|n| self.subscription_feeds_nodes(&n.subscription_id))
             .map(|n| n.node.clone())
             .collect()
+    }
+
+    /// Whether nodes owned by `sub_id` reach the generated config: any
+    /// enabled node-contributing subscription, or the builtin WARP node
+    /// (which has no `Subscription` row behind it).
+    pub fn subscription_feeds_nodes(&self, sub_id: &str) -> bool {
+        if sub_id == BUILTIN_WARP_SUB_ID {
+            // Opt-in: with the WARP toggle off the builtin node stays seeded
+            // but is invisible to listings and the generated config.
+            return self.settings.warp_enabled;
+        }
+        // WARP is EXCLUSIVE, not additive: while enabled, subscription nodes
+        // are parked entirely — the node list shows only WARP and every
+        // generated config routes through it, so enabling the toggle can
+        // never silently mix the two egress paths.
+        if self.settings.warp_enabled {
+            return false;
+        }
+        self
+                .subscriptions
+                .iter()
+                .any(|s| s.id == sub_id && s.enabled && s.source.contributes_nodes())
+    }
+
+    /// Subscription display name with the builtin fallback: the WARP node's
+    /// owner id has no `Subscription` row, so listings would otherwise show
+    /// an empty group label.
+    pub fn subscription_display_name(&self, sub_id: &str) -> String {
+        if sub_id == BUILTIN_WARP_SUB_ID {
+            return "Cloudflare WARP".to_string();
+        }
+        self.subscriptions
+            .iter()
+            .find(|s| s.id == sub_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
     }
 
     /// Sorted ids of the nodes the generated config would include (same filter
@@ -921,16 +1002,10 @@ impl AppStore {
     /// are content hashes, so a renamed or rotated node silently changes the
     /// id set the running core was built from.
     pub fn enabled_node_ids_sorted(&self) -> Vec<String> {
-        let enabled: std::collections::HashSet<_> = self
-            .subscriptions
-            .iter()
-            .filter(|s| s.enabled && s.source.contributes_nodes())
-            .map(|s| s.id.as_str())
-            .collect();
         let mut ids: Vec<String> = self
             .nodes
             .iter()
-            .filter(|n| enabled.contains(n.subscription_id.as_str()))
+            .filter(|n| self.subscription_feeds_nodes(&n.subscription_id))
             .map(|n| n.node.id.clone())
             .collect();
         ids.sort();
@@ -2404,7 +2479,15 @@ mod tests {
         store.save(&path).unwrap();
 
         let loaded = AppStore::load(&path, None).unwrap();
-        assert_eq!(loaded.nodes.len(), 2);
+        // 2 imported nodes + the provisioned builtin WARP node (seeded on
+        // every load; a duplicate-id rewrite must not touch it).
+        assert_eq!(loaded.nodes.len(), 3);
+        assert!(loaded
+            .nodes
+            .iter()
+            .any(|n| n.node.id == BUILTIN_WARP_NODE_ID
+                && n.subscription_id == BUILTIN_WARP_SUB_ID
+                && n.node.protocol == crate::domain::Protocol::Warp));
         assert_ne!(loaded.nodes[0].node.id, loaded.nodes[1].node.id);
         assert_ne!(loaded.nodes[0].node.id[..16], loaded.nodes[1].node.id[..16]);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();

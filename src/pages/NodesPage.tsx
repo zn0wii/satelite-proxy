@@ -744,7 +744,7 @@ export function NodesPage() {
             >
               {t("nodes.ctxDetails")}
             </button>
-            {!customRuntime && n.protocol !== "unknown" && (
+            {!customRuntime && n.protocol !== "unknown" && n.protocol !== "warp" && (
               <button
                 type="button"
                 role="menuitem"

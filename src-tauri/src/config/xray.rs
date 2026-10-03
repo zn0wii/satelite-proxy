@@ -1009,6 +1009,22 @@ fn build_dns(
 
 fn node_to_xray_outbound(node: &ProxyNode) -> AppResult<Value> {
     let tag = outbound_tag(node);
+    // Builtin WARP node: loopback socks outbound to the aether sidecar —
+    // Xray never dials Cloudflare itself. (socks outbound UDP: Xray's socks
+    // settings have no udp flag; datagram support rides on the server side.)
+    if matches!(node.protocol, crate::domain::Protocol::Warp) {
+        return Ok(json!({
+            "protocol": "socks",
+            "tag": tag,
+            "settings": {
+                "servers": [{
+                    "address": "127.0.0.1",
+                    "port": crate::core::kind::AETHER_SIDECAR_PORT,
+                }]
+            },
+            "streamSettings": { "network": "tcp" },
+        }));
+    }
     // REALITY supports raw (tcp) / grpc / xhttp transports only — fail the
     // node here with a clear reason instead of letting `xray run -test`
     // reject the whole config at startup.

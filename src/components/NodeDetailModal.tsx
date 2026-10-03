@@ -190,6 +190,13 @@ function ProtoRows({ config }: { config: ProtocolConfig | undefined }) {
           <Row label="Congestion" value={config.congestion_controller} />
         </>
       );
+    case "warp":
+      return (
+        <>
+          <Row label="Transport" value="MASQUE · Cloudflare WARP" />
+          <Row label="Egress" value="aether sidecar · socks5 127.0.0.1:18191" />
+        </>
+      );
     default:
       return null;
   }

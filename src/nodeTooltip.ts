@@ -13,6 +13,9 @@ export function subLabel(
 ): string | undefined {
   if (!name && !id) return undefined;
   if (!name) return id;
+  // Builtin WARP owner: no subscription row exists behind the id, and the
+  // suffix would read as a fake hash — render the clean name alone.
+  if (id === "builtin-warp") return name;
   const tail = (id ?? "").slice(-4).toLowerCase();
   return tail ? `${name}(id:${tail})` : name;
 }

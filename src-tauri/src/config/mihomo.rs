@@ -890,7 +890,27 @@ fn mihomo_proxy_mapping(node: &ProxyNode) -> AppResult<Mapping> {
             node.name
         )));
     }
+    if matches!(node.protocol, Protocol::Warp) {
+        return Ok(warp_to_mihomo_proxy(node));
+    }
     Ok(node_to_mihomo_proxy(node))
+}
+
+/// Builtin WARP node: mihomo natively speaks socks5, so the proxy entry
+/// dials the aether sidecar's loopback listener (which relays through the
+/// MASQUE tunnel). `udp: true` rides the node flag — aether's SOCKS5
+/// implements UDP ASSOCIATE over the CONNECT-IP netstack.
+fn warp_to_mihomo_proxy(node: &ProxyNode) -> Mapping {
+    let mut m = Mapping::new();
+    m.insert(str_yaml("name"), str_yaml(&outbound_tag(node)));
+    m.insert(str_yaml("type"), str_yaml("socks5"));
+    m.insert(str_yaml("server"), str_yaml("127.0.0.1"));
+    m.insert(
+        str_yaml("port"),
+        num_yaml(crate::core::kind::AETHER_SIDECAR_PORT as u64),
+    );
+    m.insert(str_yaml("udp"), Yaml::Bool(true));
+    m
 }
 
 fn node_to_mihomo_proxy(node: &ProxyNode) -> Mapping {

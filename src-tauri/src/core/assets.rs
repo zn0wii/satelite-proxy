@@ -389,6 +389,7 @@ pub fn prefetch_runtime_assets(
                 warnings.push(format!("xray geodata prefetch failed: {error}"));
             }
         }
+        crate::core::CoreKind::Aether => {}
         crate::core::CoreKind::Mihomo => {
             if let Err(error) = download_missing_mihomo_geodata(app_data_dir, proxy_url, false) {
                 warnings.push(format!("mihomo geodata prefetch failed: {error}"));

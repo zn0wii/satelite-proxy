@@ -71,6 +71,7 @@ pub fn get_core_log_tail(
         Some("singbox") => runtime.core_log_tail_for(CoreKind::SingBox, limit),
         Some("xray") => runtime.core_log_tail_for(CoreKind::Xray, limit),
         Some("mihomo") => runtime.core_log_tail_for(CoreKind::Mihomo, limit),
+        Some("aether") => runtime.core_log_tail_for(CoreKind::Aether, limit),
         // Legacy / default: whatever the main manager last ran.
         _ => runtime.core.core_log_tail(limit),
     };
@@ -96,6 +97,7 @@ pub fn clear_core_log(state: State<'_, AppState>, kind: String) -> Result<(), St
         "singbox" => CoreKind::SingBox,
         "xray" => CoreKind::Xray,
         "mihomo" => CoreKind::Mihomo,
+        "aether" => CoreKind::Aether,
         _ => return Err(format!("unknown core kind: {kind}")),
     };
     state

@@ -21,6 +21,7 @@ jobs:
             fetch-core: scripts/fetch-bundled-core-darwin-arm64.sh
             fetch-xray: scripts/fetch-bundled-xray-darwin-arm64.sh
             fetch-mihomo: scripts/fetch-bundled-mihomo-darwin-arm64.sh
+            fetch-aether: scripts/fetch-bundled-aether-darwin-arm64.sh
             tauri-config: src-tauri/tauri.conf.json
           # macOS intel
           - platform: macos-latest
@@ -29,6 +30,7 @@ jobs:
             fetch-core: scripts/fetch-bundled-core-darwin-amd64.sh
             fetch-xray: scripts/fetch-bundled-xray-darwin-amd64.sh
             fetch-mihomo: scripts/fetch-bundled-mihomo-darwin-amd64.sh
+            fetch-aether: scripts/fetch-bundled-aether-darwin-amd64.sh
             tauri-config: src-tauri/tauri.macos-intel.conf.json
           # Windows amd64
           - platform: windows-latest
@@ -37,6 +39,7 @@ jobs:
             fetch-core: scripts/fetch-bundled-core-windows-amd64.ps1
             fetch-xray: scripts/fetch-bundled-xray-windows-amd64.ps1
             fetch-mihomo: scripts/fetch-bundled-mihomo-windows-amd64.ps1
+            fetch-aether: scripts/fetch-bundled-aether-windows-amd64.ps1
             tauri-config: src-tauri/tauri.windows.conf.json
           # Linux amd64
           - platform: ubuntu-latest
@@ -45,6 +48,7 @@ jobs:
             fetch-core: scripts/fetch-bundled-core-linux-amd64.sh
             fetch-xray: scripts/fetch-bundled-xray-linux-amd64.sh
             fetch-mihomo: scripts/fetch-bundled-mihomo-linux-amd64.sh
+            fetch-aether: scripts/fetch-bundled-aether-linux-amd64.sh
             tauri-config: src-tauri/tauri.linux.conf.json
 
     runs-on: ${{ matrix.platform }}
@@ -91,7 +95,7 @@ jobs:
           path: |
             src-tauri/resources/bin/${{ matrix.core-dir }}
             src-tauri/resources/rule-sets
-          key: bundled-cores-${{ matrix.core-dir }}-${{ hashFiles(matrix.fetch-core, matrix.fetch-xray, matrix.fetch-mihomo, 'scripts/fetch-bundled-rule-sets.sh') }}
+          key: bundled-cores-${{ matrix.core-dir }}-${{ hashFiles(matrix.fetch-core, matrix.fetch-xray, matrix.fetch-mihomo, matrix.fetch-aether, 'scripts/fetch-bundled-rule-sets.sh') }}
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -106,7 +110,7 @@ jobs:
         shell: bash
         run: >
           bash scripts/ci-fetch-with-retry.sh
-          ${{ matrix.fetch-core }} ${{ matrix.fetch-xray }} ${{ matrix.fetch-mihomo }}
+          ${{ matrix.fetch-core }} ${{ matrix.fetch-xray }} ${{ matrix.fetch-mihomo }} ${{ matrix.fetch-aether }}
           scripts/fetch-bundled-rule-sets.sh
 
       - name: Install frontend dependencies
@@ -146,7 +150,7 @@ jobs:
           path: |
             src-tauri/resources/bin/windows-amd64
             src-tauri/resources/rule-sets
-          key: bundled-cores-windows-amd64-${{ hashFiles('scripts/fetch-bundled-core-windows-amd64.ps1', 'scripts/fetch-bundled-xray-windows-amd64.ps1', 'scripts/fetch-bundled-mihomo-windows-amd64.ps1', 'scripts/fetch-bundled-rule-sets.sh') }}
+          key: bundled-cores-windows-amd64-${{ hashFiles('scripts/fetch-bundled-core-windows-amd64.ps1', 'scripts/fetch-bundled-xray-windows-amd64.ps1', 'scripts/fetch-bundled-mihomo-windows-amd64.ps1', 'scripts/fetch-bundled-aether-windows-amd64.ps1', 'scripts/fetch-bundled-rule-sets.sh') }}
 
       # build-windows.ps1 fetches missing cores without any retry; prefetch
       # here so the downloads get the same retry treatment as the release job.
@@ -157,6 +161,7 @@ jobs:
           scripts/fetch-bundled-core-windows-amd64.ps1
           scripts/fetch-bundled-xray-windows-amd64.ps1
           scripts/fetch-bundled-mihomo-windows-amd64.ps1
+          scripts/fetch-bundled-aether-windows-amd64.ps1
           scripts/fetch-bundled-rule-sets.sh
 
       - name: Setup Node

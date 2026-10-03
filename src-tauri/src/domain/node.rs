@@ -35,6 +35,15 @@ pub enum Protocol {
     /// serves it at protocol level — only `CoreKind::supports_node` admits
     /// it for mihomo when a raw body exists.
     Unknown,
+    /// Cloudflare WARP pseudo-node served by the bundled `aether` sidecar
+    /// (MASQUE CONNECT-IP over HTTP/3, registration-free of any user
+    /// subscription). No main core has a native outbound: every generator
+    /// emits a plain loopback socks outbound pointing at the sidecar's
+    /// listener, so selectors / rule pins / Clash hot-switch treat it like
+    /// any other node. The `server`/`port` fields are the probed Cloudflare
+    /// edge (TCP-ping target), NOT the dial address — egress always goes
+    /// through the sidecar.
+    Warp,
 }
 
 impl Protocol {
@@ -58,6 +67,7 @@ impl Protocol {
             Self::Snell => "snell",
             Self::Masque => "masque",
             Self::Unknown => "unknown",
+            Self::Warp => "warp",
         }
     }
 
@@ -116,6 +126,7 @@ impl Protocol {
                 | Self::Socks5
                 | Self::Http
                 | Self::WireGuard
+                | Self::Warp
         )
     }
 
@@ -222,6 +233,9 @@ pub enum ProtocolConfig {
     /// Placeholder for `Protocol::Unknown` raw-passthrough nodes — no
     /// modeled fields; the mihomo generator emits the raw entry verbatim.
     Unknown,
+    /// Placeholder for `Protocol::Warp` — no modeled fields; every generator
+    /// emits a loopback socks outbound to the aether sidecar listener.
+    Warp,
     Shadowsocks {
         method: String,
         password: String,
@@ -567,7 +581,7 @@ fn tag_prefix(id: &str) -> String {
 
 fn config_identity(config: &ProtocolConfig) -> String {
     match config {
-        ProtocolConfig::Unknown => String::new(),
+        ProtocolConfig::Unknown | ProtocolConfig::Warp => String::new(),
         ProtocolConfig::Shadowsocks {
             password, method, ..
         } => {

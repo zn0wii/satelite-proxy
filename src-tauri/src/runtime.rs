@@ -1169,6 +1169,10 @@ impl Runtime {
                     enable_system_proxy,
                 )
             }
+            CoreKind::Aether => {
+                // Never a main core (`CoreKind::parse` cannot produce it);
+                // fall through to the sing-box default path.
+            }
             CoreKind::Mihomo => {
                 return self.start_mihomo_proxy(
                     app_data_dir,
@@ -1204,7 +1208,8 @@ impl Runtime {
         // at plan time; anything else on a sidecar port is cleared by the
         // standard `ensure_ports_free` inside `start_with_ports`, and a real
         // bind conflict surfaces as the sidecar's own FATAL → full rollback.
-        let sidecar_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        let mut sidecar_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        prune_unavailable_sidecars(&mut sidecar_plan, app_data_dir, resource_dir);
         if let Some(plan) = &sidecar_plan {
             for kind in plan.used_kinds() {
                 let (bin, _) = resolve_core_bin(app_data_dir, resource_dir, kind);
@@ -1396,6 +1401,15 @@ impl Runtime {
                     "sing-box cannot run as a sidecar of itself".into(),
                 ));
             }
+            CoreKind::Aether => {
+                // No config file: the identity toml is created on first run
+                // and reused forever after. cwd is anchored to its directory
+                // by the manager spawn, so lastconn / endpoint caches land
+                // beside it.
+                let dir = app_data_dir.join("aether");
+                std::fs::create_dir_all(&dir)?;
+                dir.join("aether.toml")
+            }
         };
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, kind);
         let bin = bin.ok_or_else(|| {
@@ -1446,6 +1460,35 @@ impl Runtime {
             )));
         }
         sc.ports = ports;
+        if kind == CoreKind::Aether {
+            // aether binds its socks listener only after identity load and
+            // gateway selection — the very first run includes WARP device
+            // registration (10-30s). This function runs under BOTH the
+            // runtime and store locks: an in-lock wait here froze every
+            // store-reading command (all pages stuck "loading") for the
+            // whole window. Detach instead — start returns immediately, the
+            // watchdog handles process death, and a lock-free probe thread
+            // only logs readiness. Until the bind lands, the WARP node
+            // simply dials-fails like any not-yet-up node.
+            let port = crate::core::kind::AETHER_SIDECAR_PORT;
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    if crate::core::manager::port_has_listener(port) {
+                        crate::app_log::info("sidecar", "aether 隧道已就绪（socks 端口已监听）");
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        crate::app_log::warn(
+                            "sidecar",
+                            "aether 60s 内未就绪（首次注册较慢或网关不可达），详见 WARP 日志 tab",
+                        );
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            });
+        }
         crate::app_log::info(
             "sidecar",
             format!(
@@ -1681,6 +1724,26 @@ impl Runtime {
         self.xray_metrics = Some(metrics);
         self.core_started_at = Some(now_unix_secs());
 
+        // Companion sidecars: under Xray the plan can only carry builtin
+        // WARP entries (per-protocol delegation is sing-box-only). Failure
+        // rolls the whole start back — the config already references the
+        // aether port, same invariant as the sing-box path.
+        let mut warp_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        prune_unavailable_sidecars(&mut warp_plan, app_data_dir, resource_dir);
+        if let Some(plan) = &warp_plan {
+            for kind in plan.used_kinds() {
+                if let Err(e) =
+                    self.start_sidecar(kind, app_data_dir, resource_dir, &nodes, plan, false)
+                {
+                    self.stop_all_sidecars();
+                    let _ = self.core.stop();
+                    self.core_started_at = None;
+                    self.xray_metrics = None;
+                    return Err(e);
+                }
+            }
+        }
+
         if enable_system_proxy {
             let _ = self.set_system_proxy(store, true);
         }
@@ -1863,6 +1926,23 @@ impl Runtime {
         self.api = Some(api);
         self.xray_metrics = None;
         self.core_started_at = Some(now_unix_secs());
+
+        // Companion sidecars: builtin WARP via aether (see the Xray path).
+        let mut warp_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        prune_unavailable_sidecars(&mut warp_plan, app_data_dir, resource_dir);
+        if let Some(plan) = &warp_plan {
+            for kind in plan.used_kinds() {
+                if let Err(e) =
+                    self.start_sidecar(kind, app_data_dir, resource_dir, &nodes, plan, false)
+                {
+                    self.stop_all_sidecars();
+                    let _ = self.core.stop();
+                    self.core_started_at = None;
+                    self.api = None;
+                    return Err(e);
+                }
+            }
+        }
 
         if enable_system_proxy {
             let _ = self.set_system_proxy(store, true);
@@ -2429,7 +2509,17 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         tun_stack: store.settings.tun_stack.clone(),
         dns: store.dns.clone(),
         outbound_mode: store.settings.outbound_mode,
-        route_final: store.settings.route_final.clone(),
+        // WARP exclusive mode: unmatched traffic must egress through the
+        // WARP tunnel, never fall back to a direct final — a direct final
+        // here would silently park every domain no rule names (incl. the
+        // exit-IP probe sources) on the physical connection while WARP is
+        // supposed to be the only egress. User-authored direct rules
+        // (CN sets etc.) still win — only the fallback is overridden.
+        route_final: if store.settings.warp_enabled {
+            "proxy".to_string()
+        } else {
+            store.settings.route_final.clone()
+        },
         auto_select: store.settings.auto_select,
         probe_url: store.settings.probe_url.clone(),
         find_process: store.settings.find_process,
@@ -2466,19 +2556,80 @@ const SIDECAR_MAX_NODES: usize = 1024;
 /// Ports share one continuous index space (`sidecar_port + i` over all
 /// candidates regardless of target core), so the two sidecar processes can
 /// never claim the same port.
+/// Drop sidecar entries whose binary is missing — but only for optional
+/// companions. Xray/mihomo sidecars back user-pinned delegation and the
+/// caller hard-fails on those; the aether sidecar backs the builtin WARP
+/// node, which every store carries, so a missing binary must degrade to
+/// "WARP node unavailable (dials a dead port)" instead of blocking every
+/// start for users who never touch it.
+pub(crate) fn prune_unavailable_sidecars(
+    plan: &mut Option<SidecarPlan>,
+    app_data_dir: &Path,
+    resource_dir: Option<&Path>,
+) {
+    let Some(p) = plan else { return };
+    p.ports.retain(|e| {
+        if e.kind != CoreKind::Aether {
+            return true;
+        }
+        let present = resolve_core_bin(app_data_dir, resource_dir, e.kind).0.is_some();
+        if !present {
+            crate::app_log::warn(
+                "sidecar",
+                "未找到 aether 内核（数据目录 bin/aether），WARP 节点本次启动不可用；其余节点不受影响",
+            );
+        }
+        present
+    });
+    if p.ports.is_empty() {
+        *plan = None;
+    }
+}
+
 pub(crate) fn compute_sidecar_plan(
     settings: &crate::domain::AppSettings,
     chains: &[crate::domain::ProxyChain],
     nodes: &[ProxyNode],
 ) -> Option<SidecarPlan> {
-    if !settings.multi_core_enabled {
+    // Custom runtime sources serve a stored config body — the node store
+    // plays no part, so nothing delegates.
+    if settings.runtime_source().is_custom() {
         return None;
     }
-    if CoreKind::parse(&settings.core_type) != CoreKind::SingBox
-        || settings.runtime_source().is_custom()
-    {
-        return None;
+
+    // Builtin WARP nodes ALWAYS delegate to the aether sidecar — no main
+    // core has a native WARP outbound. Independent of the multi-core
+    // toggle: aether is a companion tunnel, not a per-protocol-pinnable
+    // core. Chain hops keep native semantics (same rule as delegated
+    // nodes): a WARP hop inside a chain is not expressible, so skip it.
+    let warp_ports: Vec<crate::config::SidecarPort> = if settings.warp_enabled {
+        nodes
+            .iter()
+            .filter(|n| n.protocol == Protocol::Warp)
+            .filter(|n| {
+                !chains
+                    .iter()
+                    .flat_map(|c| c.hops.iter())
+                    .any(|h| matches!(h, crate::domain::ChainHop::Node { node_id } if *node_id == n.id))
+            })
+            .map(|n| crate::config::SidecarPort {
+                node_id: n.id.clone(),
+                port: crate::core::kind::AETHER_SIDECAR_PORT,
+                kind: CoreKind::Aether,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if !settings.multi_core_enabled || CoreKind::parse(&settings.core_type) != CoreKind::SingBox {
+        return if warp_ports.is_empty() {
+            None
+        } else {
+            Some(SidecarPlan { ports: warp_ports })
+        };
     }
+
     // Only entries pinned to a sidecar core delegate — one companion
     // process per target kind (Xray, mihomo). Unknown core values parse
     // back to SingBox and are skipped.
@@ -2491,7 +2642,11 @@ pub(crate) fn compute_sidecar_plan(
         wanted.entry(e.protocol.as_str()).or_insert(kind);
     }
     if wanted.is_empty() {
-        return None;
+        return if warp_ports.is_empty() {
+            None
+        } else {
+            Some(SidecarPlan { ports: warp_ports })
+        };
     }
     // Chain hop pins keep native semantics (v1): a detour chain that routed
     // through a loopback socks hop would technically work, but the hop dial
@@ -2576,10 +2731,16 @@ pub(crate) fn compute_sidecar_plan(
             break;
         }
     }
-    if ports.is_empty() {
-        None
+    if warp_ports.is_empty() {
+        if ports.is_empty() {
+            None
+        } else {
+            Some(SidecarPlan { ports })
+        }
     } else {
-        Some(SidecarPlan { ports })
+        let mut all = warp_ports;
+        all.extend(ports);
+        Some(SidecarPlan { ports: all })
     }
 }
 

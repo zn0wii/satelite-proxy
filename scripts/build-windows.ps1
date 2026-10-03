@@ -60,6 +60,7 @@ if (-not $SingboxOnly) {
   Write-Host "Bundling Xray + mihomo alongside sing-box (pass -SingboxOnly to drop them)."
   & (Join-Path $PSScriptRoot "fetch-bundled-xray-windows-amd64.ps1") -Proxy $Proxy
   & (Join-Path $PSScriptRoot "fetch-bundled-mihomo-windows-amd64.ps1") -Proxy $Proxy
+  & (Join-Path $PSScriptRoot "fetch-bundled-aether-windows-amd64.ps1") -Proxy $Proxy
 } else {
   # The base config lists the Xray/mihomo resources too — a missing file
   # fails the bundler, so switch to the sing-box-only overlay instead.

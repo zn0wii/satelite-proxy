@@ -11,6 +11,8 @@
       "resources/bin/linux-amd64/geoip.dat",
       "resources/bin/linux-amd64/mihomo",
       "resources/bin/linux-amd64/mihomo-version.txt",
+      "resources/bin/linux-amd64/aether",
+      "resources/bin/linux-amd64/aether-version.txt",
       "resources/bin/linux-amd64/mihomo-geodata/Country.mmdb",
       "resources/bin/linux-amd64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",

@@ -119,6 +119,8 @@ pub fn update_settings(
     // mihomo's kernel has no equivalent, hence no switch for it.
     tls_fragment_singbox: Option<bool>,
     tls_fragment_xray: Option<bool>,
+    // Builtin Cloudflare WARP companion (aether sidecar) master switch.
+    warp_enabled: Option<bool>,
 ) -> Result<AppSettings, String> {
     let mut launch_changed: Option<bool> = None;
     let mut auto_select_changed: Option<(
@@ -412,6 +414,26 @@ pub fn update_settings(
                     store.settings.tls_fragment_xray = v;
                 }
             }
+            if let Some(v) = warp_enabled {
+                if store.settings.warp_enabled != v {
+                    // Toggle drives both the node set (listings/config) and
+                    // the aether sidecar lifecycle — same rebuild semantics
+                    // as the TLS-fragment switches.
+                    core_config_changed = true;
+                    store.settings.warp_enabled = v;
+                    // Exclusive mode: point the selection at the WARP node
+                    // when it takes over, and release it when subscriptions
+                    // come back (generation falls back to the first node).
+                    if v {
+                        store.settings.current_node_id =
+                            Some(crate::storage::BUILTIN_WARP_NODE_ID.to_string());
+                    } else if store.settings.current_node_id.as_deref()
+                        == Some(crate::storage::BUILTIN_WARP_NODE_ID)
+                    {
+                        store.settings.current_node_id = None;
+                    }
+                }
+            }
             Ok(store.settings.clone())
         })
         .map_err(|e| e.to_string())?;
@@ -502,8 +524,12 @@ pub fn get_node_draft(
                 .find(|n| n.node.id == id)
                 .ok_or_else(|| AppError::NotFound(id.clone()))?;
             // Raw-passthrough nodes have no modeled fields to edit; the UI
-            // hides the entry, this guards a stale menu.
-            if matches!(stored.node.protocol, crate::domain::Protocol::Unknown) {
+            // hides the entry, this guards a stale menu. Same for the builtin
+            // WARP node — it has no per-node parameters at all.
+            if matches!(
+                stored.node.protocol,
+                crate::domain::Protocol::Unknown | crate::domain::Protocol::Warp
+            ) {
                 return Err(AppError::Config(
                     "该节点为未建模类型（原文透传），暂不支持编辑".into(),
                 ));
@@ -530,7 +556,12 @@ pub fn update_node(
                 .nodes
                 .iter()
                 .find(|n| n.node.id == id)
-                .is_some_and(|n| matches!(n.node.protocol, crate::domain::Protocol::Unknown))
+                .is_some_and(|n| {
+                    matches!(
+                        n.node.protocol,
+                        crate::domain::Protocol::Unknown | crate::domain::Protocol::Warp
+                    )
+                })
             {
                 return Err(AppError::Config(
                     "该节点为未建模类型（原文透传），暂不支持编辑".into(),
@@ -551,33 +582,19 @@ pub fn update_node(
 pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
     state
         .with_store(|store| {
-            let names: HashMap<&str, String> = store
-                .subscriptions
-                .iter()
-                .map(|s| (s.id.as_str(), s.name.clone()))
-                .collect();
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
             // Under a core that cannot serve a protocol, such nodes are
             // hidden from listings entirely (they reappear after switching).
             let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
             Ok(store
                 .nodes
                 .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                .filter(|n| store.subscription_feeds_nodes(&n.subscription_id))
                 .filter(|n| core_kind.supports_node(&n.node))
                 .map(|n| ListedNode {
                     node: wire_node(n.node.clone()),
                     latency_method: n.latency_method.clone(),
                     subscription_id: n.subscription_id.clone(),
-                    subscription_name: names
-                        .get(n.subscription_id.as_str())
-                        .cloned()
-                        .unwrap_or_default(),
+                    subscription_name: store.subscription_display_name(&n.subscription_id),
                     favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect())
@@ -620,19 +637,13 @@ pub fn list_nodes_page(
                 .iter()
                 .map(|s| (s.id.as_str(), s.name.clone()))
                 .collect();
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
             let query = query.unwrap_or_default().trim().to_lowercase();
             // Hide protocols the active core cannot serve (see list_all_nodes).
             let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
             let mut nodes: Vec<ListedNode> = store
                 .nodes
                 .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                .filter(|n| store.subscription_feeds_nodes(&n.subscription_id))
                 .filter(|n| core_kind.supports_node(&n.node))
                 .filter(|n| {
                     query.is_empty()
@@ -647,10 +658,7 @@ pub fn list_nodes_page(
                     node: wire_node(n.node.clone()),
                     latency_method: n.latency_method.clone(),
                     subscription_id: n.subscription_id.clone(),
-                    subscription_name: names
-                        .get(n.subscription_id.as_str())
-                        .cloned()
-                        .unwrap_or_default(),
+                    subscription_name: store.subscription_display_name(&n.subscription_id),
                     favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect();
@@ -684,19 +692,13 @@ pub fn list_node_ids(
                 .iter()
                 .map(|s| (s.id.as_str(), s.name.clone()))
                 .collect();
-            let enabled: std::collections::HashSet<&str> = store
-                .subscriptions
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.id.as_str())
-                .collect();
             let query = query.unwrap_or_default().trim().to_lowercase();
             // Hide protocols the active core cannot serve (see list_all_nodes).
             let core_kind = crate::core::CoreKind::parse(&store.settings.core_type);
             let mut nodes: Vec<ListedNode> = store
                 .nodes
                 .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                .filter(|n| store.subscription_feeds_nodes(&n.subscription_id))
                 .filter(|n| core_kind.supports_node(&n.node))
                 .filter(|n| {
                     query.is_empty()
@@ -711,10 +713,7 @@ pub fn list_node_ids(
                     node: wire_node(n.node.clone()),
                     latency_method: n.latency_method.clone(),
                     subscription_id: n.subscription_id.clone(),
-                    subscription_name: names
-                        .get(n.subscription_id.as_str())
-                        .cloned()
-                        .unwrap_or_default(),
+                    subscription_name: store.subscription_display_name(&n.subscription_id),
                     favorite: store.favorite_nodes.contains(&n.node.id),
                 })
                 .collect();
@@ -899,7 +898,13 @@ pub async fn generate_singbox_config(
             tun_stack: settings.tun_stack.clone(),
             dns,
             outbound_mode: settings.outbound_mode,
-            route_final: settings.route_final.clone(),
+            // Mirror the runtime's WARP-exclusive override (build_options):
+            // previews and written configs must match what actually runs.
+            route_final: if settings.warp_enabled {
+                "proxy".to_string()
+            } else {
+                settings.route_final.clone()
+            },
             auto_select: settings.auto_select,
             probe_url: settings.probe_url.clone(),
             find_process: settings.find_process,
@@ -1030,7 +1035,13 @@ pub async fn preview_singbox_config(
             tun_stack: settings.tun_stack.clone(),
             dns,
             outbound_mode: settings.outbound_mode,
-            route_final: settings.route_final.clone(),
+            // Mirror the runtime's WARP-exclusive override (build_options):
+            // previews and written configs must match what actually runs.
+            route_final: if settings.warp_enabled {
+                "proxy".to_string()
+            } else {
+                settings.route_final.clone()
+            },
             auto_select: settings.auto_select,
             probe_url: settings.probe_url.clone(),
             find_process: settings.find_process,

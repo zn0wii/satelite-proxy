@@ -28,6 +28,9 @@ impl CorePlatform {
             CoreKind::SingBox => self.asset_suffix,
             CoreKind::Xray => self.xray_asset_suffix,
             CoreKind::Mihomo => self.mihomo_asset_suffix,
+            // Staged by `scripts/fetch-bundled-aether-*` from the upstream
+            // GitHub releases (see `CoreKind::repo`), not the in-app updater.
+            CoreKind::Aether => self.asset_suffix,
         }
     }
 }

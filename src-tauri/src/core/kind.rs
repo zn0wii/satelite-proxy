@@ -12,7 +12,22 @@ pub enum CoreKind {
     SingBox,
     Xray,
     Mihomo,
+    /// Bundled `aether` companion (Cloudflare WARP / MASQUE). NEVER a main
+    /// core — [`CoreKind::parse`] deliberately does not map `"aether"`, and
+    /// every main-core surface (settings.core_type, downloads, updates)
+    /// excludes it. It exists solely as a sidecar kind in `SidecarPort` so
+    /// the delegation machinery (plan → start → poll → logs) works
+    /// unchanged. `Protocol::Warp` nodes egress through its loopback socks
+    /// listener on [`AETHER_SIDECAR_PORT`].
+    Aether,
 }
+
+/// Fixed loopback port the aether sidecar binds its SOCKS5 listener on.
+/// Deliberately NOT part of the sidecar port range: aether is a single
+/// shared tunnel (one process serves every Warp node), so it needs exactly
+/// one well-known port the generators can also fall back to when no plan
+/// is in play.
+pub const AETHER_SIDECAR_PORT: u16 = 18191;
 
 impl CoreKind {
     pub fn binary_name(self) -> &'static str {
@@ -38,6 +53,13 @@ impl CoreKind {
                     "mihomo"
                 }
             }
+            Self::Aether => {
+                if cfg!(windows) {
+                    "aether.exe"
+                } else {
+                    "aether"
+                }
+            }
         }
     }
 
@@ -46,6 +68,7 @@ impl CoreKind {
             Self::SingBox => "sing-box",
             Self::Xray => "Xray",
             Self::Mihomo => "mihomo",
+            Self::Aether => "Aether",
         }
     }
 
@@ -55,6 +78,7 @@ impl CoreKind {
             Self::SingBox => "singbox",
             Self::Xray => "xray",
             Self::Mihomo => "mihomo",
+            Self::Aether => "aether",
         }
     }
 
@@ -72,6 +96,11 @@ impl CoreKind {
             Self::SingBox => "SagerNet/sing-box",
             Self::Xray => "XTLS/Xray-core",
             Self::Mihomo => "MetaCubeX/mihomo",
+            // Upstream of the bundled core. The app never auto-downloads
+            // aether (it is staged at package time by
+            // `scripts/fetch-bundled-aether-*` from these releases); the
+            // repo() getter only documents provenance.
+            Self::Aether => "CluvexStudio/Aether",
         }
     }
 
@@ -81,6 +110,7 @@ impl CoreKind {
             Self::SingBox => "v1.13.18",
             Self::Xray => "v26.3.27",
             Self::Mihomo => "v1.19.30",
+            Self::Aether => "1.9.0",
         }
     }
 
@@ -102,6 +132,9 @@ impl CoreKind {
                 format!("sing-box-{ver_num}-{platform_suffix}.{ext}")
             }
             Self::Xray => format!("Xray-{platform_suffix}.zip"),
+            // Upstream release asset naming (`fetch-bundled-aether-*`
+            // scripts consume this shape directly).
+            Self::Aether => format!("aether-{ver_num}-{platform_suffix}.tar.gz"),
             Self::Mihomo => {
                 let ext = if is_windows { "zip" } else { "gz" };
                 if platform_suffix.ends_with("amd64") {
@@ -119,6 +152,9 @@ impl CoreKind {
             Self::SingBox => &["version"],
             Self::Xray => &["-version"],
             Self::Mihomo => &["-v"],
+            // No version flag in the CLI; version display is not surfaced
+            // for the aether sidecar.
+            Self::Aether => &["--help"],
         }
     }
 
@@ -133,6 +169,7 @@ impl CoreKind {
                 continue;
             }
             match self {
+                Self::Aether => return None,
                 Self::SingBox => {
                     if let Some(rest) = line.strip_prefix("sing-box version ") {
                         return Some(rest.split_whitespace().next()?.to_string());
@@ -180,6 +217,10 @@ impl CoreKind {
                 args.extend(mihomo_home_args(&config));
                 args
             }
+            // No config-validate mode; `CoreManager::check_config` skips the
+            // kind entirely — aether validates itself via its data-plane
+            // check after start.
+            Self::Aether => Vec::new(),
         }
     }
 
@@ -195,6 +236,20 @@ impl CoreKind {
                 args.extend(mihomo_home_args(&config));
                 args
             }
+            // `config` is the identity file (`<data>/aether/aether.toml`,
+            // created on first run). Protocol and log level arrive via
+            // `spawn_env`; the SOCKS port is the fixed sidecar constant so
+            // generated configs and the readiness wait agree without any
+            // port-plumbing through this signature.
+            Self::Aether => vec![
+                "--config".into(),
+                config.clone(),
+                "--bind".into(),
+                format!("127.0.0.1:{AETHER_SIDECAR_PORT}"),
+                "--scan".into(),
+                "turbo".into(),
+                "--quick-reconnect".into(),
+            ],
         }
     }
 
@@ -210,6 +265,7 @@ impl CoreKind {
         {
             Some("xray") => Self::Xray,
             Some("mihomo") => Self::Mihomo,
+            Some("aether") => Self::Aether,
             _ => Self::SingBox,
         }
     }
@@ -229,6 +285,18 @@ impl CoreKind {
                 ]
             }
             Self::Mihomo => Vec::new(),
+            // Headless mode: without AETHER_PROTOCOL the CLI drops into an
+            // interactive stdin protocol menu and blocks forever. MASQUE is
+            // the v1 pinned transport.
+            Self::Aether => vec![
+                ("AETHER_PROTOCOL".into(), "masque".into()),
+                ("AETHER_LOG_LEVEL".into(), "info".into()),
+                // The CLI also prompts (stdin TTY) for scan mode and IP
+                // version — pin both; the manager additionally detaches
+                // stdin so no prompt can ever block the child.
+                ("AETHER_SCAN".into(), "turbo".into()),
+                ("AETHER_IP".into(), "4".into()),
+            ],
         }
     }
 
@@ -238,6 +306,7 @@ impl CoreKind {
             Self::SingBox => "sing-box",
             Self::Xray => "xray",
             Self::Mihomo => "mihomo",
+            Self::Aether => "aether",
         }
     }
 
@@ -249,6 +318,7 @@ impl CoreKind {
             Self::SingBox => "version.txt",
             Self::Xray => "xray-version.txt",
             Self::Mihomo => "mihomo-version.txt",
+            Self::Aether => "aether-version.txt",
         }
     }
 
@@ -263,6 +333,9 @@ impl CoreKind {
             Self::SingBox => !matches!(protocol, Protocol::Unknown),
             Self::Xray => protocol.xray_supported(),
             Self::Mihomo => protocol.mihomo_supported(),
+            // Never a main core; nothing is "served by aether" directly —
+            // Warp nodes are served THROUGH it via loopback socks outbounds.
+            Self::Aether => false,
         }
     }
 
@@ -306,6 +379,7 @@ impl CoreKind {
                 Self::SingBox => "未建模类型：仅 mihomo 内核支持原文透传",
                 Self::Xray => "Xray 不支持该协议",
                 Self::Mihomo => "mihomo 不支持该协议",
+                Self::Aether => "aether 仅作为 WARP 副进程使用，不直接服务节点",
             });
         }
         if self == Self::Xray {

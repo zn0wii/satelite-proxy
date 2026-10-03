@@ -24,12 +24,15 @@ import {
 
 const LEVELS: AppLogLevel[] = ["error", "warn", "info", "debug", "trace"];
 
-type LogsTab = "app" | "singbox" | "xray" | "mihomo";
+type LogsTab = "app" | "singbox" | "xray" | "mihomo" | "aether";
 
-const CORE_TAB_KINDS: { value: "singbox" | "xray" | "mihomo"; label: string }[] = [
+const CORE_TAB_KINDS: { value: "singbox" | "xray" | "mihomo" | "aether"; label: string }[] = [
   { value: "singbox", label: "sing-box" },
   { value: "xray", label: "Xray" },
   { value: "mihomo", label: "mihomo" },
+  // aether sidecar: carries the builtin WARP tunnel (registration/scan
+  // progress and its end-to-end validation land here).
+  { value: "aether", label: "WARP" },
 ];
 
 /** Past this many lines the list renders only the visible window. */

@@ -152,6 +152,11 @@ fn parse_proxy_entry(value: &Value) -> Result<ProxyNode, String> {
         Protocol::Unknown => {
             return Err("unmodeled type".to_string());
         }
+        // Warp only exists as the provisioned builtin node — never from a
+        // parsed subscription.
+        Protocol::Warp => {
+            return Err("builtin warp protocol is not parseable".to_string());
+        }
         Protocol::Shadowsocks => parse_ss(map)?,
         Protocol::Vmess => parse_vmess(map)?,
         Protocol::Vless => parse_vless(map)?,

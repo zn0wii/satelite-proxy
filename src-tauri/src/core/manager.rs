@@ -236,6 +236,12 @@ impl CoreManager {
     }
 
     pub fn check_config(kind: CoreKind, binary: &Path, config: &Path) -> AppResult<()> {
+        // aether has no config-validate mode (its "config" is the identity
+        // toml); correctness is proven by its own end-to-end data-plane
+        // check after start, surfaced through the log tail.
+        if kind == CoreKind::Aether {
+            return Ok(());
+        }
         let mut cmd = Command::new(binary);
         cmd.args(kind.check_command_args(config));
         #[cfg(target_os = "windows")]
@@ -596,6 +602,15 @@ impl CoreManager {
         );
         let mut cmd = Command::new(binary);
         cmd.args(&run_args);
+        if kind == CoreKind::Aether {
+            // aether's CLI drops into interactive stdin menus whenever stdin
+            // is a TTY (scan mode / IP version / transport). Under `tauri dev`
+            // the child inherits the developer console and hangs forever on
+            // "Choose [1-3]" — detach stdin so every prompt sees EOF and
+            // takes its default (spawn_env pins the same values anyway).
+            use std::process::Stdio;
+            cmd.stdin(Stdio::null());
+        }
         // sing-box writes cache.db (fakeip/rule-set cache) relative to its cwd.
         // GUI apps launched from Finder/Dock inherit cwd "/" (read-only), which
         // makes cache_file init FATAL as soon as it's enabled. Anchor cwd to the
@@ -1115,7 +1130,7 @@ pub(crate) fn map_slow_tun_start_hint(err: &str) -> String {
     )
 }
 
-fn port_has_listener(port: u16) -> bool {
+pub(crate) fn port_has_listener(port: u16) -> bool {
     !listener_pids_on_port(port).is_empty()
 }
 

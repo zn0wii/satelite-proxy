@@ -1154,6 +1154,24 @@ export function SettingsPage() {
             <div className="card sidecar-card">
               <div className="via-proxy-row">
                 <div>
+                  <div className="sys-proxy-title">{t("settings.warpToggle")}</div>
+                  <div className="sys-proxy-desc">{t("settings.warpToggleDesc")}</div>
+                </div>
+                <GlassSwitchControl
+                  checked={!!settings.warp_enabled}
+                  title={t("settings.warpToggle")}
+                  disabled={customRuntime}
+                  onChange={(v) => void patchApp({ warpEnabled: v })}
+                />
+              </div>
+              <div className="field-hint muted">
+                {t("settings.warpToggleHint")}
+              </div>
+            </div>
+
+            <div className="card sidecar-card">
+              <div className="via-proxy-row">
+                <div>
                   <div className="sys-proxy-title">
                     {t("settings.multiCore")}
                     {settings.multi_core_enabled && (

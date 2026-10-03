@@ -95,12 +95,14 @@ if [[ "$ARCH" == "intel" ]]; then
   FETCH_SCRIPT="$ROOT/scripts/fetch-bundled-core-darwin-amd64.sh"
   XRAY_FETCH="$ROOT/scripts/fetch-bundled-xray-darwin-amd64.sh"
   MIHOMO_FETCH="$ROOT/scripts/fetch-bundled-mihomo-darwin-amd64.sh"
+  AETHER_FETCH="$ROOT/scripts/fetch-bundled-aether-darwin-amd64.sh"
 else
   TRIPLE="aarch64-apple-darwin"
   CORE_DIR="darwin-arm64"
   FETCH_SCRIPT="$ROOT/scripts/fetch-bundled-core-darwin-arm64.sh"
   XRAY_FETCH="$ROOT/scripts/fetch-bundled-xray-darwin-arm64.sh"
   MIHOMO_FETCH="$ROOT/scripts/fetch-bundled-mihomo-darwin-arm64.sh"
+  AETHER_FETCH="$ROOT/scripts/fetch-bundled-aether-darwin-arm64.sh"
 fi
 case "$ARCH" in
   intel) SINGBOX_ONLY_CONFIG="$ROOT/src-tauri/tauri.singbox-darwin-amd64.conf.json" ;;
@@ -148,6 +150,7 @@ if [[ "$SINGBOX_ONLY" == "0" ]]; then
   echo "Bundling Xray + mihomo alongside sing-box (pass --singbox-only to drop them)."
   "$XRAY_FETCH"
   "$MIHOMO_FETCH"
+  "$AETHER_FETCH"
 else
   echo "SingboxOnly: bundling sing-box only."
   CONFIG_FILE="$SINGBOX_ONLY_CONFIG"

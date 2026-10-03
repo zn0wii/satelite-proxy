@@ -278,6 +278,9 @@ fn build_config(draft: &ManualNodeDraft, protocol: Protocol) -> Result<ProtocolC
         Protocol::Unknown => {
             return Err("unknown protocol cannot be built from a form draft".into())
         }
+        Protocol::Warp => {
+            return Err("the builtin warp node cannot be rebuilt from a form draft".into())
+        }
         Protocol::Shadowsocks => {
             let plugin = opt_nonempty(&draft.plugin);
             let plugin_opts = opt_nonempty(&draft.plugin_opts);
@@ -472,6 +475,8 @@ pub fn node_to_draft(node: &ProxyNode) -> ManualNodeDraft {
         // Raw-passthrough node: no modeled protocol fields. Editing is
         // rejected at the command level; keep the round-trip lossless.
         ProtocolConfig::Unknown => {}
+        // Builtin WARP node: no modeled fields either; same rejection rule.
+        ProtocolConfig::Warp => {}
         ProtocolConfig::Shadowsocks {
             method,
             password,

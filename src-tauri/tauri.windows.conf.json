@@ -12,6 +12,8 @@
       "resources/bin/windows-amd64/wintun.dll",
       "resources/bin/windows-amd64/mihomo.exe",
       "resources/bin/windows-amd64/mihomo-version.txt",
+      "resources/bin/windows-amd64/aether.exe",
+      "resources/bin/windows-amd64/aether-version.txt",
       "resources/bin/windows-amd64/mihomo-geodata/Country.mmdb",
       "resources/bin/windows-amd64/mihomo-geodata/GeoSite.dat",
       "resources/rule-sets",

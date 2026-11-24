@@ -309,3 +309,44 @@ impl SystemProxy for LinuxSystemProxy {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gnome_enable_detect_disable_roundtrip() {
+        if !std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("gnome")
+        {
+            return; // GNOME-schema path only; KDE covered separately
+        }
+        let proxy = LinuxSystemProxy;
+        let before_mode = gsettings_get(GNOME_SCHEMA, "mode").unwrap();
+        let before_same = gsettings_get(GNOME_SCHEMA, "use-same-proxy").unwrap();
+
+        let snap = proxy.enable("127.0.0.1", 17890).expect("enable");
+        assert!(gnome_owned("127.0.0.1", 17890).unwrap());
+        assert!(proxy
+            .detect_owned("127.0.0.1", 17890)
+            .unwrap()
+            .is_some());
+        assert!(proxy
+            .detect_owned("127.0.0.1", 19999)
+            .unwrap()
+            .is_none());
+        assert!(proxy
+            .detect_owned("10.0.0.1", 17890)
+            .unwrap()
+            .is_none());
+
+        proxy.disable(Some(&snap)).expect("disable");
+        assert_eq!(gsettings_get(GNOME_SCHEMA, "mode").unwrap(), before_mode);
+        assert_eq!(
+            gsettings_get(GNOME_SCHEMA, "use-same-proxy").unwrap(),
+            before_same
+        );
+    }
+}

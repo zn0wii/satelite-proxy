@@ -40,6 +40,9 @@ fn unquote(raw: &str) -> String {
 
 const GNOME_SCHEMA: &str = "org.gnome.system.proxy";
 const GNOME_HTTP_SCHEMA: &str = "org.gnome.system.proxy.http";
+const GNOME_HTTPS_SCHEMA: &str = "org.gnome.system.proxy.https";
+const GNOME_SOCKS_SCHEMA: &str = "org.gnome.system.proxy.socks";
+const GNOME_FTP_SCHEMA: &str = "org.gnome.system.proxy.ftp";
 
 fn gsettings_get(schema: &str, key: &str) -> AppResult<String> {
     run("gsettings", &["get", schema, key]).map(|v| unquote(&v))
@@ -106,11 +109,12 @@ fn kde_reconfigure() {
 }
 
 /// GNOME splits proxy config across schemas: `org.gnome.system.proxy` holds
-/// mode/use-same-proxy/ignore-hosts while `org.gnome.system.proxy.http` holds
-/// the single http endpoint (enabled/host/port). With `use-same-proxy=true`
-/// every protocol (https/socks/ftp) rides on that one endpoint — exactly what
-/// a mixed-port core needs. Per-protocol keys we never touch survive a
-/// disable() that restores use-same-proxy=false.
+/// mode/use-same-proxy/ignore-hosts while each protocol has its own schema
+/// (`…proxy.http` adds `enabled`, the others only host+port). Chrome reads the
+/// per-protocol keys literally — leaving https/socks/ftp empty produces
+/// ERR_PROXY_CONNECTION_FAILED even with use-same-proxy=true, so enable()
+/// writes every protocol endpoint explicitly. Keys we never touch survive a
+/// disable() that restores the snapshot.
 #[derive(Default)]
 struct GnomeState {
     mode: String,
@@ -119,9 +123,25 @@ struct GnomeState {
     http_enabled: String,
     http_host: String,
     http_port: String,
+    https_host: String,
+    https_port: String,
+    socks_host: String,
+    socks_port: String,
+    ftp_host: String,
+    ftp_port: String,
+}
+
+fn gnome_proto_get(schema: &str) -> AppResult<(String, String)> {
+    Ok((
+        gsettings_get(schema, "host")?,
+        gsettings_get(schema, "port")?,
+    ))
 }
 
 fn gnome_read() -> AppResult<GnomeState> {
+    let (https_host, https_port) = gnome_proto_get(GNOME_HTTPS_SCHEMA)?;
+    let (socks_host, socks_port) = gnome_proto_get(GNOME_SOCKS_SCHEMA)?;
+    let (ftp_host, ftp_port) = gnome_proto_get(GNOME_FTP_SCHEMA)?;
     Ok(GnomeState {
         mode: gsettings_get(GNOME_SCHEMA, "mode")?,
         use_same: gsettings_get(GNOME_SCHEMA, "use-same-proxy")?,
@@ -132,6 +152,12 @@ fn gnome_read() -> AppResult<GnomeState> {
         http_enabled: gsettings_get(GNOME_HTTP_SCHEMA, "enabled")?,
         http_host: gsettings_get(GNOME_HTTP_SCHEMA, "host")?,
         http_port: gsettings_get(GNOME_HTTP_SCHEMA, "port")?,
+        https_host,
+        https_port,
+        socks_host,
+        socks_port,
+        ftp_host,
+        ftp_port,
     })
 }
 
@@ -141,33 +167,56 @@ fn gnome_write(s: &GnomeState) -> AppResult<()> {
     gsettings_set(GNOME_SCHEMA, "ignore-hosts", &s.ignore)?;
     gsettings_set(GNOME_HTTP_SCHEMA, "enabled", &s.http_enabled)?;
     gsettings_set(GNOME_HTTP_SCHEMA, "host", &format!("'{}'", s.http_host))?;
-    gsettings_set(GNOME_HTTP_SCHEMA, "port", &format!("uint32 {}", s.http_port))
+    gsettings_set(GNOME_HTTP_SCHEMA, "port", &format!("uint32 {}", s.http_port))?;
+    for (schema, host, port) in [
+        (GNOME_HTTPS_SCHEMA, &s.https_host, &s.https_port),
+        (GNOME_SOCKS_SCHEMA, &s.socks_host, &s.socks_port),
+        (GNOME_FTP_SCHEMA, &s.ftp_host, &s.ftp_port),
+    ] {
+        gsettings_set(schema, "host", &format!("'{host}'"))?;
+        gsettings_set(schema, "port", &format!("uint32 {port}"))?;
+    }
+    Ok(())
 }
 
 fn gnome_owned(host: &str, port: u16) -> AppResult<bool> {
     let s = gnome_read()?;
+    let p = port.to_string();
+    let ours = |h: &str, po: &str| h == host && po == p;
     Ok(s.mode == "manual"
-        && s.use_same == "true"
         && s.http_enabled == "true"
-        && s.http_host == host
-        && s.http_port == port.to_string())
+        && ours(&s.http_host, &s.http_port)
+        && ours(&s.https_host, &s.https_port)
+        && ours(&s.socks_host, &s.socks_port)
+        && ours(&s.ftp_host, &s.ftp_port))
 }
 
 fn detail_is_gnome(detail: &str) -> bool {
     detail.starts_with("gnome|")
 }
 
-/// `gnome|mode|use_same|ignore|http_enabled|http_host|http_port`
+/// `gnome|mode|use_same|ignore|http_enabled|http_host|http_port|https_host|https_port|socks_host|socks_port|ftp_host|ftp_port`
 fn gnome_detail(s: &GnomeState) -> String {
     format!(
-        "gnome|{}|{}|{}|{}|{}|{}",
-        s.mode, s.use_same, s.ignore, s.http_enabled, s.http_host, s.http_port
+        "gnome|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        s.mode,
+        s.use_same,
+        s.ignore,
+        s.http_enabled,
+        s.http_host,
+        s.http_port,
+        s.https_host,
+        s.https_port,
+        s.socks_host,
+        s.socks_port,
+        s.ftp_host,
+        s.ftp_port
     )
 }
 
 fn gnome_from_detail(detail: &str) -> Option<GnomeState> {
     let parts: Vec<&str> = detail.split('|').collect();
-    if parts.len() != 7 {
+    if parts.len() != 13 {
         return None;
     }
     Some(GnomeState {
@@ -177,6 +226,12 @@ fn gnome_from_detail(detail: &str) -> Option<GnomeState> {
         http_enabled: parts[4].into(),
         http_host: parts[5].into(),
         http_port: parts[6].into(),
+        https_host: parts[7].into(),
+        https_port: parts[8].into(),
+        socks_host: parts[9].into(),
+        socks_port: parts[10].into(),
+        ftp_host: parts[11].into(),
+        ftp_port: parts[12].into(),
     })
 }
 
@@ -217,12 +272,19 @@ impl SystemProxy for LinuxSystemProxy {
             || desktop.is_empty()
         {
             let prev = gnome_read()?;
+            let p = port_s.clone();
             let next = GnomeState {
                 mode: "manual".into(),
                 use_same: "true".into(),
                 http_enabled: "true".into(),
                 http_host: host.into(),
-                http_port: port_s,
+                http_port: p.clone(),
+                https_host: host.into(),
+                https_port: p.clone(),
+                socks_host: host.into(),
+                socks_port: p.clone(),
+                ftp_host: host.into(),
+                ftp_port: p,
                 ignore: "['localhost', '127.0.0.1', '*.local', '<local>']".into(),
             };
             gnome_write(&next)?;

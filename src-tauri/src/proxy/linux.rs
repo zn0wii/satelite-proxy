@@ -1,11 +1,12 @@
 //! Linux system proxy via desktop settings.
 //!
-//! GNOME-family desktops (GNOME/Cinnamon/Budgie/Pantheon/XFCE-with-gsettings)
-//! are driven through `org.gnome.system.proxy` gsettings keys; KDE Plasma is
-//! driven through `~/.config/kioslaverc` `[Proxy Settings]` via
-//! kwriteconfig/kreadconfig. The desktop is picked from
-//! `XDG_CURRENT_DESKTOP`; anything else is rejected with a clear error rather
-//! than silently writing config nothing reads.
+//! KDE Plasma is driven through `~/.config/kioslaverc` `[Proxy Settings]` via
+//! kwriteconfig6/5 + kded reconfigure. Everything else is capability-detected:
+//! if the `org.gnome.system.proxy` gsettings schema exists we write it — this
+//! covers GNOME, Budgie, Pantheon, Cinnamon and any derivative shipping that
+//! schema. Desktops with neither mechanism (XFCE, MATE, LXQt, Sway, i3, …)
+//! are rejected with a clear error rather than silently writing config nothing
+//! reads.
 
 use super::{SystemProxy, SystemProxySnapshot};
 use crate::error::{AppError, AppResult};
@@ -36,6 +37,23 @@ fn unquote(raw: &str) -> String {
         return inner.to_string();
     }
     t.rsplit_once(' ').map(|(_, v)| v).unwrap_or(t).to_string()
+}
+
+fn is_kde_desktop() -> bool {
+    let d = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    d.contains("kde") || d.contains("plasma")
+}
+
+/// Capability check, not a name check: the GNOME proxy schema only exists on
+/// desktops that actually read it (GNOME, Budgie, Pantheon, Cinnamon…).
+///XFCE/MATE ship their own settings daemons and correctly fall through to the
+/// unsupported error instead of failing inside gsettings.
+fn gnome_proxy_schema_available() -> bool {
+    run("gsettings", &["list-schemas"])
+        .map(|out| out.lines().any(|l| l.trim() == GNOME_SCHEMA))
+        .unwrap_or(false)
 }
 
 const GNOME_SCHEMA: &str = "org.gnome.system.proxy";
@@ -243,7 +261,7 @@ impl SystemProxy for LinuxSystemProxy {
         let port_s = port.to_string();
         let endpoint = format!("http://{host}:{port}");
 
-        if desktop.contains("kde") || desktop.contains("plasma") {
+        if is_kde_desktop() {
             let prev = [
                 kde_read("ProxyType"),
                 kde_read("httpProxy"),
@@ -263,14 +281,7 @@ impl SystemProxy for LinuxSystemProxy {
             });
         }
 
-        if desktop.contains("gnome")
-            || desktop.contains("cinnamon")
-            || desktop.contains("budgie")
-            || desktop.contains("pantheon")
-            || desktop.contains("xfce")
-            || desktop.contains("mate")
-            || desktop.is_empty()
-        {
+        if gnome_proxy_schema_available() {
             let prev = gnome_read()?;
             let p = port_s.clone();
             let next = GnomeState {
@@ -294,23 +305,26 @@ impl SystemProxy for LinuxSystemProxy {
         }
 
         Err(AppError::Core(format!(
-            "system proxy: unsupported desktop '{desktop}'"
+            "system proxy: unsupported desktop '{desktop}' \
+             (supported: GNOME-schema desktops, KDE Plasma)"
         )))
     }
 
     fn disable(&self, snapshot: Option<&SystemProxySnapshot>) -> AppResult<()> {
         let Some(snap) = snapshot else {
             // No snapshot: turn the proxy off entirely (best effort).
-            let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-                .unwrap_or_default()
-                .to_lowercase();
-            if desktop.contains("kde") || desktop.contains("plasma") {
+            if is_kde_desktop() {
                 kde_write("ProxyType", "0")?;
                 kde_reconfigure();
                 return Ok(());
             }
-            gsettings_set(GNOME_SCHEMA, "mode", "'none'")?;
-            return Ok(());
+            if gnome_proxy_schema_available() {
+                gsettings_set(GNOME_SCHEMA, "mode", "'none'")?;
+                return Ok(());
+            }
+            return Err(AppError::Core(
+                "system proxy: unsupported desktop".into(),
+            ));
         };
         let detail = &snap.detail;
         if detail_is_gnome(detail) {
@@ -339,10 +353,7 @@ impl SystemProxy for LinuxSystemProxy {
     }
 
     fn detect_owned(&self, host: &str, port: u16) -> AppResult<Option<SystemProxySnapshot>> {
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-            .unwrap_or_default()
-            .to_lowercase();
-        if desktop.contains("kde") || desktop.contains("plasma") {
+        if is_kde_desktop() {
             let p = format!("http://{host}:{port}");
             let owned = kde_read("ProxyType") == "1"
                 && kde_read("httpProxy") == p
@@ -363,7 +374,7 @@ impl SystemProxy for LinuxSystemProxy {
                 detail: format!("kde|{prev}"),
             }));
         }
-        if gnome_owned(host, port)? {
+        if gnome_proxy_schema_available() && gnome_owned(host, port)? {
             return Ok(Some(SystemProxySnapshot {
                 detail: gnome_detail(&gnome_read()?),
             }));
@@ -378,11 +389,7 @@ mod tests {
 
     #[test]
     fn gnome_enable_detect_disable_roundtrip() {
-        if !std::env::var("XDG_CURRENT_DESKTOP")
-            .unwrap_or_default()
-            .to_lowercase()
-            .contains("gnome")
-        {
+        if !gnome_proxy_schema_available() {
             return; // GNOME-schema path only; KDE covered separately
         }
         let proxy = LinuxSystemProxy;

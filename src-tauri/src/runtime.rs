@@ -246,7 +246,7 @@ pub struct Runtime {
 ///
 /// Returns `None` when no elevation is needed, or it is already granted
 /// (`macos_auth::core_has_setuid` — cheap `stat`, safe to call here too).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn resolve_pending_elevation(
     app_data_dir: &Path,
     resource_dir: Option<&Path>,

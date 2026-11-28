@@ -492,7 +492,13 @@ impl CoreManager {
                 .binary_path
                 .as_deref()
                 .is_some_and(super::macos_auth::core_has_setuid);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let dropping_privilege = !elevated
+            && self
+                .binary_path
+                .as_deref()
+                .is_some_and(super::linux_auth::core_has_setuid);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let dropping_privilege = true;
         let port_residue_wait = if dropping_privilege {
             Duration::from_millis(2000)
@@ -543,6 +549,26 @@ impl CoreManager {
                 }
             }
         }
+
+        // Linux mirrors the macOS elevation flow exactly: root-owned
+        // setuid on the core binary. The binary lives in the user's own data
+        // dir, so upgrades still replace it freely and the next TUN start
+        // re-prompts.
+        #[cfg(target_os = "linux")]
+        if elevated {
+            if let Err(e) = super::linux_auth::ensure_core_setuid(binary) {
+                self.state = CoreState::Error;
+                let msg = map_core_startup_hint(&e.to_string());
+                self.last_error = Some(msg.clone());
+                return Err(AppError::Core(msg));
+            }
+        }
+        // NOTE: unlike macOS, Linux deliberately has no setuid carry-over
+        // when switching cores with TUN off. The port-teardown race it
+        // guards against is already covered by the dropping_privilege wait
+        // above, and the setuid bit persists on each binary anyway — so a
+        // core only ever needs authorization on its first TUN start, and
+        // TUN-off core switches never prompt.
 
         // sing-box `check -c` is pure JSON validation, but Xray's
         // `run -test -c` actually creates the tun adapter for tun configs —
@@ -1080,6 +1106,10 @@ fn map_tun_permission_hint(err: &str) -> String {
         let platform_hint = if cfg!(target_os = "windows") {
             "TUN 模式需要管理员权限以创建虚拟网卡。开启 TUN 时应用会弹出 UAC 授权框并以管理员身份运行内核。\n\
              请在 UAC 弹窗中点「是」；若点了「否」，请关闭 TUN 开关后重试，或以管理员身份运行本程序。"
+        } else if cfg!(target_os = "linux") {
+            "TUN 需要更高权限才能创建虚拟网卡。\n\
+             Linux：首次开启 TUN 会为内核设置 setuid（一次密码授权），之后启停不再弹窗。\n\
+             若刚更新过内核，可能需重新授权一次。"
         } else {
             "TUN 需要更高权限才能创建虚拟网卡 (utun)。\n\
              macOS：首次开启 TUN 会为当前内核设置 setuid（一次指纹/密码授权），之后启停不再弹窗。\n\

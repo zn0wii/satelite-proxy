@@ -400,7 +400,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 4. **i18n 双语强约束** — `messages.ts` 中 `zh` 的类型是 `Record<MessageKey, string>`，漏键编译失败。
 5. **前端↔后端类型手工同步** — `src/types.ts` 与 `domain/*` 无代码生成；改 Rust 序列化结构记得同步 TS（部分 invoke 同时发 camelCase+snake_case 参数以兼容，见 `api.ts`）。
 6. **单窗口** — 无多窗口 API 用法；窗口可调性（2026-09）：pro 可缩放但下限=设计尺寸 960×720（zoom 只放大不缩小），simple 下限 320×480；两者均可自由放大、无上限，UI 经 `useViewportScale` 等比缩放（拖拽实时生效，首次应用不播过渡动画）。尺寸持久化**双轨**：前端 localStorage（模式切换恢复，`watchWindowSize` 读 Tauri `innerSize` 而非 `innerWidth`——zoom 会扭曲 DOM 测量值）+ Rust 侧 `data/window_size_<mode>`（**2026-09-24 起格式扩为 `"<w> <h> <x> <y>"` 含窗口位置**，旧两段式文件向后兼容；隐藏进托盘/退出时经 `persist_main_window_layout` 捕获、最大化跳过；托盘重建 `show_main` 与冷启动 `restore_main_window_layout` 据此让窗口**出生即目标尺寸与位置**——重建窗口若不显式给位置，Windows 会 CW_USEDEFAULT 级联摆放，每次托盘唤醒位置都漂移（2026-09-24 修复的 bug）；位置经 `position_reachable` 对各显示器工作区校验（拔掉显示器/分辨率变化后落屏外则改回居中），无记住位置亦居中）。
-7. **平台差异** — 系统代理 `proxy/windows.rs|macos.rs`（Linux 用 stub）、TUN 提权 `core/elevate.rs`（Win）与 `core/macos_auth.rs`、进程绑定 `core/job.rs`（仅 Win）。改平台行为时注意 cfg 分支。
+7. **平台差异** — 系统代理 `proxy/windows.rs|macos.rs|linux.rs`（其余 unix 用 stub）、TUN 提权 `core/elevate.rs`（Win）/ `core/macos_auth.rs`（macOS）/ `core/linux_auth.rs`（Linux，与 macOS 同为 setuid 模型——`pkexec chown root:root`+`chmod u+s` 一次授权；**不要用 setcap**：caps 不改 uid 而 polkit 按 uid 鉴权，sing-tun 的 resolvectl DNS 劫持配置在 systemd-resolved 系统上每步都弹窗，且 caps xattr 会约束 setuid root 进程的能力集）、进程绑定 `core/job.rs`（仅 Win）。改平台行为时注意 cfg 分支。
 8. **HTML5 拖拽在 Tauri WebView 不可靠** — 排序一律用 `useRulesetDragSort` 模式（指针事件手写）。
 9. **页面切换 = 重挂载**（`key={nav}`）— 页面自身状态不跨切换保留；跨页面共享靠 `api.ts` 模块级快照（peek/keep）。
 10. **规则变更应用是防抖+串行**（`rule_apply.rs` 500ms 合并）— UI 事件 `rule-set-apply-status` 回报结果，不要假设保存即重启完成。

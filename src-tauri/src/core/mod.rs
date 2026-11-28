@@ -5,10 +5,14 @@ mod elevate;
 #[cfg(target_os = "windows")]
 mod job;
 pub mod kind;
+#[cfg(target_os = "linux")]
+mod linux_auth;
 #[cfg(target_os = "macos")]
 mod macos_auth;
 #[cfg(target_os = "macos")]
 pub mod macos_net;
+#[cfg(target_os = "linux")]
+pub use linux_auth::{core_has_setuid, ensure_core_setuid};
 #[cfg(target_os = "macos")]
 pub use macos_auth::{core_has_setuid, ensure_core_setuid};
 pub mod manager;
